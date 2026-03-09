@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# MySwat launcher — self-bootstrapping wrapper.
+# Usage: ./myswat init "project-name" --desc "..."
+#        ./myswat status -p project-name
+#        ./myswat memory search "query" -p project-name
+#
+# On first run, automatically creates venv and installs dependencies.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="$SCRIPT_DIR/.venv"
+MARKER="$VENV_DIR/.myswat-installed"
+
+_bootstrap() {
+    echo "[myswat] Setting up environment (one-time)..."
+
+    if [ ! -d "$VENV_DIR" ]; then
+        echo "[myswat] Creating virtual environment..."
+        python3 -m venv "$VENV_DIR"
+    fi
+
+    echo "[myswat] Installing dependencies..."
+    "$VENV_DIR/bin/pip" install --quiet --upgrade pip
+    "$VENV_DIR/bin/pip" install --quiet pymysql pydantic pydantic-settings "typer[all]" rich
+
+    echo "[myswat] Installing myswat..."
+    "$VENV_DIR/bin/pip" install --quiet --no-deps -e "$SCRIPT_DIR"
+
+    touch "$MARKER"
+    echo "[myswat] Setup complete."
+}
+
+# Bootstrap if venv or marker missing
+if [ ! -f "$MARKER" ]; then
+    _bootstrap
+fi
+
+# Run myswat with all arguments
+exec "$VENV_DIR/bin/myswat" "$@"
