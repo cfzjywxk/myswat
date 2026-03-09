@@ -204,6 +204,26 @@ def _print_teamwork_details(pool, item, console) -> None:
             )
 
     console.print(tree)
+
+
+def _print_task_state(console, item: dict) -> None:
+    metadata = item.get("metadata_json") if isinstance(item, dict) else None
+    task_state = metadata.get("task_state") if isinstance(metadata, dict) else {}
+    if not isinstance(task_state, dict) or not task_state:
+        return
+
+    if task_state.get("current_stage"):
+        console.print(f"[bold]Stage:[/bold] {task_state['current_stage']}")
+    if task_state.get("latest_summary"):
+        console.print(f"[bold]Latest summary:[/bold] {str(task_state['latest_summary'])[:600]}")
+    if task_state.get("next_todos"):
+        console.print("[bold]Next TODOs:[/bold]")
+        for todo in task_state["next_todos"][:10]:
+            console.print(f"  - {todo}")
+    if task_state.get("open_issues"):
+        console.print("[bold]Open issues:[/bold]")
+        for issue in task_state["open_issues"][:10]:
+            console.print(f"  - {issue}")
     console.print()
 
 
@@ -286,6 +306,7 @@ def status(
         table = Table(title="Work Items")
         table.add_column("ID")
         table.add_column("Status")
+        table.add_column("Stage")
         table.add_column("Mode")
         table.add_column("Type")
         table.add_column("Agents")
@@ -328,8 +349,11 @@ def status(
                     )
                     agents_str = ", ".join(s["role"] for s in sess_agents) if sess_agents else "-"
                 mode = "[dim]solo[/dim]"
+            metadata = item.get("metadata_json") if isinstance(item, dict) else None
+            task_state = metadata.get("task_state") if isinstance(metadata, dict) else {}
+            stage = task_state.get("current_stage", "-") if isinstance(task_state, dict) else "-"
             table.add_row(
-                str(item["id"]), item["status"], mode,
+                str(item["id"]), item["status"], stage, mode,
                 item["item_type"], agents_str, item["title"][:50],
             )
         console.print(table)
@@ -435,6 +459,9 @@ def status(
                         pass
                 console.print(f"  {role_label}{time_tag}: {content}")
 
+    console.print("\n[dim]Use `myswat task <id> -p "
+                  f"{proj['slug']}` for one work item, or `myswat status -p {proj['slug']}` to refresh.[/dim]")
+
     # Knowledge stats
     knowledge_row = pool.fetch_one(
         "SELECT COUNT(*) AS cnt FROM knowledge WHERE project_id = %s",
@@ -452,6 +479,43 @@ def status(
         f"\n[dim]Knowledge: {knowledge_count} entries | "
         f"Compacted sessions: {compacted_count}[/dim]"
     )
+
+
+@app.command()
+def task(
+    work_item_id: int = typer.Argument(..., help="Work item ID"),
+    project: str = typer.Option(..., "--project", "-p", help="Project slug"),
+):
+    """Show detailed status for one work item."""
+    from rich.console import Console
+
+    from myswat.config.settings import MySwatSettings
+    from myswat.db.connection import TiDBPool
+    from myswat.memory.store import MemoryStore
+
+    console = Console()
+    settings = MySwatSettings()
+    pool = TiDBPool(settings.tidb)
+    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
+
+    proj = store.get_project_by_slug(project)
+    if not proj:
+        console.print(f"[red]Project '{project}' not found.[/red]")
+        raise typer.Exit(1)
+
+    item = store.get_work_item(work_item_id)
+    if not item or item.get("project_id") != proj["id"]:
+        console.print(f"[red]Work item {work_item_id} not found in project '{project}'.[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"\n[bold]Work Item #{item['id']}[/bold] — {item['title']}")
+    console.print(f"[bold]Status:[/bold] {item['status']}")
+    console.print(f"[bold]Type:[/bold] {item['item_type']}")
+    if item.get("description"):
+        console.print(f"[bold]Description:[/bold] {item['description'][:500]}")
+
+    _print_task_state(console, item)
+    _print_teamwork_details(pool, item, console)
 
 
 if __name__ == "__main__":

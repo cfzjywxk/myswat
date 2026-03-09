@@ -164,6 +164,7 @@ class WorkflowEngine:
         max_review_iterations: int = 5,
         ask_user: Callable[[str], str] | None = None,
         auto_approve: bool = False,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> None:
         self._store = store
         self._dev = dev_sm
@@ -173,6 +174,7 @@ class WorkflowEngine:
         self._max_review = max_review_iterations
         self._ask = ask_user or _default_ask
         self._auto_approve = auto_approve
+        self._should_cancel = should_cancel
 
     def _persist_task_state(
         self,
@@ -204,12 +206,18 @@ class WorkflowEngine:
         lines = [line.strip("-* ") for line in text.splitlines() if line.strip()]
         return lines[:limit]
 
+    def _cancelled(self) -> bool:
+        return bool(self._should_cancel and self._should_cancel())
+
     # ════════════════════════════════════════════════════════════════
     # Main workflow
     # ════════════════════════════════════════════════════════════════
 
     def run(self, requirement: str) -> WorkflowResult:
         result = WorkflowResult(requirement=requirement)
+        if self._cancelled():
+            result.final_report = "Workflow cancelled before start."
+            return result
         self._persist_task_state(
             current_stage="workflow_started",
             latest_summary=requirement,
@@ -224,6 +232,9 @@ class WorkflowEngine:
             console.print("[red]Dev failed to produce design. Aborting.[/red]")
             return result
         result.design = design
+        if self._cancelled():
+            result.final_report = "Workflow cancelled during technical design."
+            return result
 
         # Stage 2: Design review (all QA must LGTM)
         console.print(Panel("[bold]Stage 2: Design Review[/bold]", border_style="blue"))
@@ -234,6 +245,9 @@ class WorkflowEngine:
         )
         result.design = design
         result.design_review_iterations = iters
+        if self._cancelled():
+            result.final_report = "Workflow cancelled during design review."
+            return result
 
         # User checkpoint: approved design
         console.print(Panel(Markdown(design), title="QA-Approved Design", border_style="green"))
@@ -252,6 +266,9 @@ class WorkflowEngine:
             console.print("[red]Dev failed to produce plan. Aborting.[/red]")
             return result
         result.plan = plan
+        if self._cancelled():
+            result.final_report = "Workflow cancelled during planning."
+            return result
 
         # Stage 4: Plan review (QA + user approval)
         console.print(Panel("[bold]Stage 4: Plan Review[/bold]", border_style="blue"))
@@ -262,6 +279,9 @@ class WorkflowEngine:
         )
         result.plan = plan
         result.plan_review_iterations = iters
+        if self._cancelled():
+            result.final_report = "Workflow cancelled during plan review."
+            return result
 
         # User checkpoint: approved plan
         console.print(Panel(Markdown(plan), title="QA-Approved Plan", border_style="green"))
@@ -280,6 +300,9 @@ class WorkflowEngine:
         completed_summaries: list[str] = []
 
         for i, phase in enumerate(phases, 1):
+            if self._cancelled():
+                result.final_report = f"Workflow cancelled before phase {i}."
+                return result
             console.print(f"\n[bold cyan]{'='*60}[/bold cyan]")
             console.print(f"[bold cyan]Phase {i}/{len(phases)}: {phase}[/bold cyan]")
             console.print(f"[bold cyan]{'='*60}[/bold cyan]")
@@ -295,12 +318,18 @@ class WorkflowEngine:
             )
             result.phases.append(phase_result)
             completed_summaries.append(f"Phase {i} ({phase}): {phase_result.summary[:500]}")
+            if self._cancelled():
+                result.final_report = f"Workflow cancelled during phase {i}."
+                return result
 
         # Stage 6: GA Test
         console.print(Panel("[bold]Stage 6: GA Test[/bold]", border_style="blue"))
         dev_summary = "\n\n".join(completed_summaries)
         ga_result = self._run_ga_test_phase(requirement, design, plan, dev_summary)
         result.ga_test = ga_result
+        if self._cancelled():
+            result.final_report = "Workflow cancelled during GA testing."
+            return result
 
         if ga_result.aborted:
             console.print(Panel(
@@ -338,6 +367,8 @@ class WorkflowEngine:
     # ════════════════════════════════════════════════════════════════
 
     def _run_design(self, requirement: str) -> str:
+        if self._cancelled():
+            return ""
         console.print("[yellow]Dev producing technical design...[/yellow]")
         prompt = DEV_TECH_DESIGN.format(requirement=requirement)
         response = self._dev.send(prompt, task_description=f"Tech design: {requirement[:100]}")
@@ -354,6 +385,8 @@ class WorkflowEngine:
         return response.content
 
     def _run_planning(self, design: str, requirement: str) -> str:
+        if self._cancelled():
+            return ""
         console.print("[yellow]Dev creating implementation plan...[/yellow]")
         prompt = DEV_IMPLEMENTATION_PLAN.format(
             requirement=requirement[:4000],
@@ -382,6 +415,8 @@ class WorkflowEngine:
         plan: str,
         completed_summaries: list[str],
     ) -> PhaseResult:
+        if self._cancelled():
+            return PhaseResult(name=phase_name, summary="Cancelled by user.", review_iterations=0)
         completed_ctx = "\n".join(completed_summaries) if completed_summaries else "None yet."
 
         # Step 1: Dev implements
@@ -404,6 +439,8 @@ class WorkflowEngine:
         response = self._dev.send(prompt, task_description=f"Phase {phase_index}: {phase_name}")
         if not response.success:
             return PhaseResult(name=phase_name, summary="Implementation failed.", review_iterations=0)
+        if self._cancelled():
+            return PhaseResult(name=phase_name, summary="Cancelled by user.", review_iterations=0)
 
         # Step 2: Dev summarizes
         console.print("[yellow]Dev summarizing changes...[/yellow]")
@@ -429,6 +466,8 @@ class WorkflowEngine:
                 f"Requirement (brief):\n{requirement[:1000]}"
             ),
         )
+        if self._cancelled():
+            return PhaseResult(name=phase_name, summary="Cancelled by user.", review_iterations=review_iters)
 
         # Step 4: Dev commits
         console.print(f"[yellow]Dev committing phase {phase_index}...[/yellow]")
@@ -470,6 +509,9 @@ class WorkflowEngine:
         dev_summary: str,
     ) -> GATestResult:
         result = GATestResult()
+        if self._cancelled():
+            result.aborted = True
+            return result
         qa_lead = self._qas[0]
         self._persist_task_state(
             current_stage="ga_test_planning",
@@ -488,6 +530,9 @@ class WorkflowEngine:
         response = qa_lead.send(prompt, task_description="GA test plan")
         if not response.success:
             console.print("[red]QA failed to generate test plan.[/red]")
+            return result
+        if self._cancelled():
+            result.aborted = True
             return result
         test_plan = response.content
         result.test_plan = test_plan
@@ -535,6 +580,9 @@ class WorkflowEngine:
         if not exec_response.success:
             console.print("[red]QA failed to execute tests.[/red]")
             return result
+        if self._cancelled():
+            result.aborted = True
+            return result
 
         test_output = exec_response.content
         bugs = self._parse_test_results(test_output)
@@ -557,6 +605,9 @@ class WorkflowEngine:
         console.print(f"[bold red]{len(bugs)} bug(s) found in GA test.[/bold red]")
 
         while bugs:
+            if self._cancelled():
+                result.aborted = True
+                break
             if result.bugs_found > MAX_GA_BUGS:
                 console.print(
                     f"\n[bold red]More than {MAX_GA_BUGS} bugs found ({result.bugs_found} total). "
@@ -605,6 +656,9 @@ class WorkflowEngine:
             continue_response = qa_lead.send(continue_prompt, task_description="Continue GA tests")
             if not continue_response.success:
                 console.print("[red]QA failed to continue tests.[/red]")
+                break
+            if self._cancelled():
+                result.aborted = True
                 break
 
             test_output = continue_response.content
@@ -674,6 +728,8 @@ class WorkflowEngine:
     def _run_bug_fix(self, bug: dict, requirement: str, design: str) -> BugFixResult:
         title = bug.get("title", "Unknown bug")
         result = BugFixResult(title=title)
+        if self._cancelled():
+            return result
 
         # Step 1: Dev estimates the bug
         console.print(f"[yellow]Dev estimating bug: {title}...[/yellow]")
@@ -688,6 +744,8 @@ class WorkflowEngine:
         est_response = self._dev.send(estimate_prompt, task_description=f"Estimate bug: {title[:60]}")
         if not est_response.success:
             console.print("[red]Dev failed to estimate bug.[/red]")
+            return result
+        if self._cancelled():
             return result
 
         assessment = self._parse_bug_estimation(est_response.content)
@@ -713,6 +771,8 @@ class WorkflowEngine:
             if not fix_response.success:
                 console.print("[red]Dev failed to fix bug.[/red]")
                 return result
+            if self._cancelled():
+                return result
 
             # Step 3: Dev summarizes the fix
             summary_prompt = DEV_SUMMARIZE_BUG_FIX.format(bug_title=title)
@@ -724,6 +784,8 @@ class WorkflowEngine:
 
     def _run_bug_fix_arch_change(self, bug: dict, requirement: str, design: str) -> WorkflowResult:
         """Run a full design->dev cycle for an architecture-level bug fix."""
+        if self._cancelled():
+            return WorkflowResult(requirement="cancelled")
         bug_req = (
             f"Bug fix requiring architecture change:\n\n"
             f"**Bug:** {bug.get('title', '')}\n"
@@ -847,6 +909,9 @@ class WorkflowEngine:
         current = artifact
 
         for iteration in range(1, self._max_review + 1):
+            if self._cancelled():
+                console.print(f"[yellow]{artifact_type} review cancelled by user.[/yellow]")
+                break
             console.print(f"\n[dim]-- Review iteration {iteration}/{self._max_review} --[/dim]")
 
             artifact_id = None
@@ -941,6 +1006,9 @@ class WorkflowEngine:
 
             address_prompt = self._build_address_prompt(artifact_type, current, feedback)
             response = prop.send(address_prompt, task_description=f"Address {artifact_type} review")
+            if self._cancelled():
+                console.print(f"[yellow]{artifact_type} review cancelled by user.[/yellow]")
+                break
 
             if not response.success:
                 console.print(f"[red]{prop.agent_role} failed to address comments.[/red]")

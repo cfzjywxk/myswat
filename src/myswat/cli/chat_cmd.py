@@ -10,6 +10,7 @@ import termios
 import threading
 import time
 import tty
+from typing import Callable
 
 import typer
 from prompt_toolkit import PromptSession
@@ -38,6 +39,7 @@ HELP_TEXT = """
 [bold]Commands:[/bold]
   /help                 Show this help
   /status               Show project status
+  /task [id]            Show details for a work item (latest active item if omitted)
   /work <requirement>   Start full workflow: design -> review -> plan -> dev -> commit
   /role <role>          Switch agent role (developer, architect, qa_main, qa_vice)
   /reset                Reset AI session (fresh context reload, same TiDB session)
@@ -95,6 +97,7 @@ def _check_esc() -> bool:
 
 
 _MAX_LIVE_LINES = 8  # show last N lines of live output
+_TASK_MONITOR_SUMMARY_CHARS = 220
 
 
 def _extract_delegation(text: str) -> str | None:
@@ -134,6 +137,148 @@ def _build_live_display(
     if body:
         text.append(body + "\n", style="dim")
     return text
+
+
+def _single_line_preview(text: str | None, limit: int = _TASK_MONITOR_SUMMARY_CHARS) -> str:
+    if not text:
+        return ""
+    collapsed = " ".join(str(text).split())
+    if len(collapsed) > limit:
+        return collapsed[:limit] + "..."
+    return collapsed
+
+
+def _build_task_monitor_display(
+    store: MemoryStore,
+    proj: dict,
+    work_item_id: int | None,
+    label: str,
+    frame_idx: int,
+    elapsed: float,
+    cancel_requested: bool = False,
+) -> Text:
+    frame = _SPINNER_FRAMES[frame_idx % len(_SPINNER_FRAMES)]
+    text = Text(
+        f" {frame}  {label} ({_fmt_duration(elapsed)})  ESC to cancel current step\n",
+        style="bold cyan",
+    )
+
+    if work_item_id is None:
+        text.append("  Preparing work item and sessions...\n", style="dim")
+    else:
+        item = store.get_work_item(work_item_id) or {}
+        if not isinstance(item, dict):
+            item = {}
+        state = store.get_work_item_state(work_item_id) or {}
+        if not isinstance(state, dict):
+            state = {}
+
+        status = item.get("status", "unknown")
+        title = _single_line_preview(item.get("title") or f"Work item {work_item_id}", 80)
+        stage = _single_line_preview(state.get("current_stage"), 80) or "starting"
+
+        text.append(f"  Project: {proj['slug']}  Work item: #{work_item_id} [{status}]\n", style="bold")
+        text.append(f"  Title: {title}\n", style="bold")
+        text.append(f"  Stage: {stage}\n")
+
+        summary = _single_line_preview(state.get("latest_summary"))
+        if summary:
+            text.append(f"  Summary: {summary}\n", style="dim")
+
+        next_todos = state.get("next_todos") or []
+        if next_todos:
+            text.append("  Next:\n", style="green")
+            for todo in next_todos[:3]:
+                text.append(f"    - {_single_line_preview(todo, 100)}\n", style="green")
+
+        open_issues = state.get("open_issues") or []
+        if open_issues:
+            text.append("  Open issues:\n", style="yellow")
+            for issue in open_issues[:3]:
+                text.append(f"    - {_single_line_preview(issue, 100)}\n", style="yellow")
+
+    if cancel_requested:
+        text.append("  Cancellation requested. Waiting for the current agent step to stop...\n", style="bold yellow")
+
+    text.append("\n  Query from another terminal:\n", style="bold")
+    text.append(f"    myswat task {work_item_id or '<id>'} -p {proj['slug']}\n", style="dim")
+    text.append(f"    myswat status -p {proj['slug']}\n", style="dim")
+    return text
+
+
+def _run_with_task_monitor(
+    console: Console,
+    store: MemoryStore,
+    proj: dict,
+    label: str,
+    worker_fn: Callable[[], object | None],
+    work_item_ref: dict[str, int | None],
+    cancel_targets: list[AgentRunner],
+    cancel_event: threading.Event,
+) -> object | None:
+    result = [None]
+    error = [None]
+    start = time.monotonic()
+
+    def _run():
+        try:
+            result[0] = worker_fn()
+        except Exception as e:
+            error[0] = e
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+
+    fd = None
+    old_settings = None
+    use_cbreak = False
+    try:
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        use_cbreak = True
+    except Exception:
+        use_cbreak = False
+    frame_idx = 0
+    try:
+        if use_cbreak and fd is not None:
+            tty.setcbreak(fd)
+        with Live(console=console, refresh_per_second=4, transient=True) as live:
+            while worker.is_alive():
+                live.update(
+                    _build_task_monitor_display(
+                        store=store,
+                        proj=proj,
+                        work_item_id=work_item_ref.get("id"),
+                        label=label,
+                        frame_idx=frame_idx,
+                        elapsed=time.monotonic() - start,
+                        cancel_requested=cancel_event.is_set(),
+                    )
+                )
+                frame_idx += 1
+
+                if use_cbreak and _check_esc() and not cancel_event.is_set():
+                    cancel_event.set()
+                    for runner in cancel_targets:
+                        try:
+                            runner.cancel()
+                        except Exception:
+                            pass
+
+                worker.join(timeout=0.25)
+
+            if use_cbreak and fd is not None and old_settings is not None:
+                termios.tcsetattr(fd, termios.TCSAFLUSH, old_settings)
+    finally:
+        try:
+            if use_cbreak and fd is not None and old_settings is not None:
+                termios.tcsetattr(fd, termios.TCSAFLUSH, old_settings)
+        except Exception:
+            pass
+
+    if error[0] is not None:
+        raise error[0]
+    return result[0]
 
 
 def _send_with_timer(console: Console, sm: SessionManager, prompt: str):
@@ -328,6 +473,10 @@ def run_chat(
             elif cmd == "/status":
                 _show_status(store, pool, proj)
 
+            elif cmd == "/task":
+                item_id = int(arg) if arg.isdigit() else None
+                _show_task_details(store, proj, item_id)
+
             elif cmd == "/role":
                 if not arg:
                     console.print(f"[dim]Current role: {current_role}. Usage: /role <role>[/dim]")
@@ -404,7 +553,9 @@ def run_chat(
                 if sm:
                     with console.status("[dim]Saving session to TiDB...[/dim]", spinner="dots"):
                         sm.close()
-                _run_workflow(store, proj, compactor, effective_workdir, settings, arg, prompt_session)
+                _run_workflow_interactive(
+                    store, proj, compactor, effective_workdir, settings, arg, prompt_session,
+                )
                 sm = _switch_agent(current_role)
 
             elif cmd == "/review":
@@ -414,7 +565,9 @@ def run_chat(
                 if sm:
                     with console.status("[dim]Saving session to TiDB...[/dim]", spinner="dots"):
                         sm.close()
-                _run_inline_review(store, proj, compactor, effective_workdir, settings, arg)
+                _run_inline_review_interactive(
+                    store, proj, compactor, effective_workdir, settings, arg,
+                )
                 # Reopen chat session after review
                 sm = _switch_agent(current_role)
 
@@ -455,7 +608,9 @@ def run_chat(
                     if sm:
                         with console.status("[dim]Saving session to TiDB...[/dim]", spinner="dots"):
                             sm.close()
-                    _run_inline_review(store, proj, compactor, effective_workdir, settings, delegation_task)
+                    _run_inline_review_interactive(
+                        store, proj, compactor, effective_workdir, settings, delegation_task,
+                    )
                     sm = _switch_agent(current_role)
                 else:
                     console.print("[dim]Delegation skipped.[/dim]")
@@ -483,17 +638,81 @@ def _show_status(store: MemoryStore, pool: TiDBPool, proj: dict) -> None:
         table = Table(title="Work Items")
         table.add_column("ID", style="cyan")
         table.add_column("Status")
+        table.add_column("Stage")
         table.add_column("Title", max_width=50)
         for item in active[:10]:
-            table.add_row(str(item["id"]), item["status"], item["title"][:50])
+            metadata = item.get("metadata_json") if isinstance(item, dict) else None
+            task_state = metadata.get("task_state") if isinstance(metadata, dict) else {}
+            stage = "-"
+            if isinstance(task_state, dict):
+                stage = _single_line_preview(task_state.get("current_stage"), 30) or "-"
+            table.add_row(str(item["id"]), item["status"], stage, item["title"][:50])
         console.print(table)
     else:
         console.print("[dim]No active work items.[/dim]")
 
 
+def _show_task_details(store: MemoryStore, proj: dict, work_item_id: int | None = None) -> None:
+    items = list(store.list_work_items(proj["id"]))
+    if work_item_id is None:
+        active = [i for i in items if i["status"] in ("in_progress", "review", "pending")]
+        if active:
+            work_item_id = active[0]["id"]
+        elif items:
+            work_item_id = items[0]["id"]
+        else:
+            console.print("[dim]No work items yet.[/dim]")
+            return
+
+    item = store.get_work_item(work_item_id)
+    if not item:
+        console.print(f"[red]Work item {work_item_id} not found.[/red]")
+        return
+
+    state = store.get_work_item_state(work_item_id)
+    if not isinstance(state, dict):
+        state = {}
+    console.print(
+        Panel(
+            f"[bold]Work Item #{item['id']}[/bold]\n"
+            f"Status: {item.get('status', '?')}\n"
+            f"Type: {item.get('item_type', '?')}\n"
+            f"Title: {item.get('title', '')}",
+            border_style="blue",
+        )
+    )
+
+    if state:
+        if state.get("current_stage"):
+            console.print(f"[bold]Stage:[/bold] {state['current_stage']}")
+        if state.get("latest_summary"):
+            console.print(Panel(_single_line_preview(state["latest_summary"], 600), title="Latest Summary"))
+        if state.get("next_todos"):
+            console.print("[bold]Next TODOs:[/bold]")
+            for todo in state["next_todos"][:10]:
+                console.print(f"  - {todo}")
+        if state.get("open_issues"):
+            console.print("[bold]Open Issues:[/bold]")
+            for issue in state["open_issues"][:10]:
+                console.print(f"  - {issue}")
+
+    artifacts = store.list_artifacts(work_item_id)
+    if isinstance(artifacts, list) and artifacts:
+        table = Table(title="Recent Artifacts")
+        table.add_column("Iter")
+        table.add_column("Type")
+        table.add_column("Title", max_width=40)
+        for art in artifacts[-5:]:
+            table.add_row(str(art["iteration"]), art["artifact_type"], (art.get("title") or "")[:40])
+        console.print(table)
+
+
 def _run_inline_review(
     store: MemoryStore, proj: dict, compactor: KnowledgeCompactor,
     workdir: str | None, settings: MySwatSettings, task: str,
+    should_cancel: Callable[[], bool] | None = None,
+    on_work_item_created: Callable[[int], None] | None = None,
+    register_cancel_target: Callable[[AgentRunner], None] | None = None,
 ) -> None:
     """Run a dev+reviewer loop from within the chat REPL."""
     from myswat.workflow.review_loop import run_review_loop
@@ -506,8 +725,12 @@ def _run_inline_review(
 
     dev_runner = _make_runner(dev_agent)
     dev_runner.workdir = workdir
+    if register_cancel_target:
+        register_cancel_target(dev_runner)
     reviewer_runner = _make_runner(reviewer_agent)
     reviewer_runner.workdir = workdir
+    if register_cancel_target:
+        register_cancel_target(reviewer_runner)
 
     dev_sm = SessionManager(
         store=store, runner=dev_runner, agent_row=dev_agent,
@@ -523,6 +746,8 @@ def _run_inline_review(
         description=task, item_type="code_change",
         assigned_agent_id=dev_agent["id"],
     )
+    if on_work_item_created:
+        on_work_item_created(work_item_id)
     store.update_work_item_status(work_item_id, "in_progress")
 
     dev_sm.create_or_resume(purpose=f"Dev: {task[:100]}", work_item_id=work_item_id)
@@ -534,9 +759,12 @@ def _run_inline_review(
         store=store, dev_sm=dev_sm, reviewer_sm=reviewer_sm,
         task=task, project_id=proj["id"], work_item_id=work_item_id,
         max_iterations=settings.workflow.max_review_iterations,
+        should_cancel=should_cancel,
     )
 
-    if verdict.verdict == "lgtm":
+    if should_cancel and should_cancel():
+        store.update_work_item_status(work_item_id, "blocked")
+    elif verdict.verdict == "lgtm":
         store.update_work_item_status(work_item_id, "approved")
     else:
         store.update_work_item_status(work_item_id, "review")
@@ -549,6 +777,9 @@ def _run_workflow(
     store: MemoryStore, proj: dict, compactor: KnowledgeCompactor,
     workdir: str | None, settings: MySwatSettings, requirement: str,
     prompt_session: PromptSession | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    on_work_item_created: Callable[[int], None] | None = None,
+    register_cancel_target: Callable[[AgentRunner], None] | None = None,
 ) -> None:
     """Run the full teamwork workflow: design -> review -> plan -> dev -> commit."""
     from myswat.workflow.engine import WorkflowEngine
@@ -561,6 +792,8 @@ def _run_workflow(
 
     dev_runner = _make_runner(dev_agent)
     dev_runner.workdir = workdir
+    if register_cancel_target:
+        register_cancel_target(dev_runner)
     dev_sm = SessionManager(
         store=store, runner=dev_runner, agent_row=dev_agent,
         project_id=proj["id"], compactor=compactor,
@@ -573,6 +806,8 @@ def _run_workflow(
         if qa_agent:
             qa_runner = _make_runner(qa_agent)
             qa_runner.workdir = workdir
+            if register_cancel_target:
+                register_cancel_target(qa_runner)
             qa_sm = SessionManager(
                 store=store, runner=qa_runner, agent_row=qa_agent,
                 project_id=proj["id"], compactor=compactor,
@@ -589,6 +824,8 @@ def _run_workflow(
         description=requirement, item_type="code_change",
         assigned_agent_id=dev_agent["id"],
     )
+    if on_work_item_created:
+        on_work_item_created(work_item_id)
     store.update_work_item_status(work_item_id, "in_progress")
 
     # Create sessions
@@ -627,13 +864,16 @@ def _run_workflow(
         work_item_id=work_item_id,
         max_review_iterations=settings.workflow.max_review_iterations,
         ask_user=ask_user,
-        auto_approve=False,
+        auto_approve=True,
+        should_cancel=should_cancel,
     )
 
     result = engine.run(requirement)
 
     # Update work item
-    if result.success:
+    if should_cancel and should_cancel():
+        store.update_work_item_status(work_item_id, "blocked")
+    elif result.success:
         store.update_work_item_status(work_item_id, "completed")
     else:
         store.update_work_item_status(work_item_id, "review")
@@ -642,3 +882,79 @@ def _run_workflow(
     dev_sm.close()
     for qa_sm in qa_sms:
         qa_sm.close()
+
+
+def _run_inline_review_interactive(
+    store: MemoryStore,
+    proj: dict,
+    compactor: KnowledgeCompactor,
+    workdir: str | None,
+    settings: MySwatSettings,
+    task: str,
+) -> None:
+    work_item_ref: dict[str, int | None] = {"id": None}
+    cancel_targets: list[AgentRunner] = []
+    cancel_event = threading.Event()
+
+    def _worker():
+        return _run_inline_review(
+            store=store,
+            proj=proj,
+            compactor=compactor,
+            workdir=workdir,
+            settings=settings,
+            task=task,
+            should_cancel=cancel_event.is_set,
+            on_work_item_created=lambda wid: work_item_ref.__setitem__("id", wid),
+            register_cancel_target=cancel_targets.append,
+        )
+
+    _run_with_task_monitor(
+        console=console,
+        store=store,
+        proj=proj,
+        label="Running dev+QA review loop",
+        worker_fn=_worker,
+        work_item_ref=work_item_ref,
+        cancel_targets=cancel_targets,
+        cancel_event=cancel_event,
+    )
+
+
+def _run_workflow_interactive(
+    store: MemoryStore,
+    proj: dict,
+    compactor: KnowledgeCompactor,
+    workdir: str | None,
+    settings: MySwatSettings,
+    requirement: str,
+    prompt_session: PromptSession | None = None,
+) -> None:
+    work_item_ref: dict[str, int | None] = {"id": None}
+    cancel_targets: list[AgentRunner] = []
+    cancel_event = threading.Event()
+
+    def _worker():
+        return _run_workflow(
+            store=store,
+            proj=proj,
+            compactor=compactor,
+            workdir=workdir,
+            settings=settings,
+            requirement=requirement,
+            prompt_session=prompt_session,
+            should_cancel=cancel_event.is_set,
+            on_work_item_created=lambda wid: work_item_ref.__setitem__("id", wid),
+            register_cancel_target=cancel_targets.append,
+        )
+
+    _run_with_task_monitor(
+        console=console,
+        store=store,
+        proj=proj,
+        label="Running full teamwork workflow",
+        worker_fn=_worker,
+        work_item_ref=work_item_ref,
+        cancel_targets=cancel_targets,
+        cancel_event=cancel_event,
+    )

@@ -66,6 +66,7 @@ def run_review_loop(
     work_item_id: int,
     max_iterations: int = 5,
     context: str = "",
+    should_cancel=None,
 ) -> ReviewVerdict:
     """Run the developer+reviewer feedback loop.
 
@@ -97,6 +98,13 @@ def run_review_loop(
             pass
 
     for iteration in range(1, max_iterations + 1):
+        if should_cancel and should_cancel():
+            final_verdict = ReviewVerdict(
+                verdict="changes_requested",
+                issues=["cancelled by user"],
+                summary="Review loop cancelled by user.",
+            )
+            break
         console.print(f"\n[bold cyan]── Iteration {iteration}/{max_iterations} ──[/bold cyan]")
 
         # === Developer turn ===
@@ -153,6 +161,13 @@ def run_review_loop(
 
         console.print(f"[yellow]Reviewer analyzing...[/yellow]")
         review_response = reviewer_sm.send(review_prompt, task_description=f"Review: {task}")
+        if should_cancel and should_cancel():
+            final_verdict = ReviewVerdict(
+                verdict="changes_requested",
+                issues=["cancelled by user"],
+                summary="Review loop cancelled by user.",
+            )
+            break
 
         if not review_response.success:
             console.print(f"[red]Reviewer agent failed (exit={review_response.exit_code})[/red]")

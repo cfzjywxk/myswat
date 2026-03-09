@@ -5,10 +5,13 @@ Multi-AI agent co-working system for software development. Agents with persisten
 ## Key Features
 
 - **Persistent memory** — sessions are distilled into reusable knowledge entries stored in TiDB, not raw transcripts
+- **Project-shared knowledge** — compacted session knowledge is shared across the whole project, not trapped inside one role
 - **Project learning** — `myswat learn` teaches agents how to build, test, and follow conventions for any project
 - **Multi-agent review** — developer proposes, QA reviews, iterate until LGTM
-- **Full teamwork workflow** — design review, plan review, phased implementation, GA testing
+- **Full teamwork workflow** — auto-continue through design review, planning, phased implementation, and GA testing unless a critical failure stops it
 - **Knowledge-first context** — agents receive relevant knowledge via vector search, not bloated history
+- **Persistent task state** — work items keep current stage, summary, todos, and issues so newly started agent sessions can recover ongoing work
+- **Interactive long-task monitor** — `/work` and `/review` show MySwat-level progress, stage, todos, and `ESC` cancel hints instead of appearing stuck
 - **CLAUDE.md / AGENTS.md aware** — extracts project conventions from AI instruction files without adopting their workflow
 
 ## Prerequisites
@@ -87,6 +90,20 @@ myswat chat -p my-project
 
 REPL with role switching (`/role developer`), inline review (`/review "task"`), and persistent sessions.
 
+Long-running `/work` and `/review` tasks now show a live MySwat monitor with:
+- Current work item ID and status
+- Current workflow stage
+- Latest persisted summary
+- Next TODOs and open issues
+- `ESC` to cancel the current agent step
+
+Useful commands while a task is running:
+
+```bash
+myswat status -p my-project
+myswat task 42 -p my-project
+```
+
 ### 4. Run a task
 
 ```bash
@@ -104,6 +121,8 @@ myswat work -p my-project "Implement bloom filter for compaction"
 ```
 
 Runs: tech design -> design review -> planning -> plan review -> phased implementation (per-phase code review + commit) -> GA testing -> final report.
+
+`myswat work` now auto-continues by default instead of stopping for manual approvals during the workflow. In chat mode, `/work` also shows the live task monitor described above.
 
 ### 6. Feed documents
 
@@ -129,6 +148,7 @@ myswat memory search "transaction isolation" -p my-project
 | `myswat work <requirement> -p <slug>` | Full teamwork workflow |
 | `myswat feed <path> -p <slug> [--glob pattern]` | Ingest documents into knowledge |
 | `myswat status -p <slug>` | Show project status |
+| `myswat task <id> -p <slug>` | Show detailed status for one work item |
 | `myswat memory search <query> -p <slug>` | Search knowledge base |
 | `myswat memory add <title> <content> -p <slug> [-c cat]` | Add knowledge manually |
 | `myswat memory list -p <slug> [-c category]` | List knowledge entries |
@@ -147,9 +167,10 @@ User --> CLI (Typer)
           |      +--> SessionManager --> AgentRunner (codex/kimi subprocess)
           |      |                   --> Mid-session compaction (watermark-based)
           |      |
-          |      +--> WorkflowEngine (design -> review -> plan -> dev -> GA test)
+          |      +--> WorkflowEngine (auto-continue design -> review -> plan -> dev -> GA test)
           |      |
           |      +--> MemoryRetriever --> project_ops (myswat.md cache or TiDB fallback)
+          |                           --> work_item task state
           |                           --> knowledge (vector search)
           |                           --> session context
           |

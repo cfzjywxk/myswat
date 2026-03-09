@@ -221,6 +221,66 @@ class TestStatusCommand:
 
         status(project="proj")
 
+
+class TestTaskCommand:
+    @patch("myswat.config.settings.MySwatSettings")
+    @patch("myswat.db.connection.TiDBPool")
+    @patch("myswat.memory.store.MemoryStore")
+    def test_project_not_found(self, mock_store_cls, mock_pool_cls, mock_settings_cls):
+        from myswat.cli.main import task
+
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = None
+        mock_store_cls.return_value = mock_store
+
+        with pytest.raises(ClickExit):
+            task(work_item_id=1, project="missing")
+
+    @patch("myswat.cli.main._print_teamwork_details")
+    @patch("myswat.config.settings.MySwatSettings")
+    @patch("myswat.db.connection.TiDBPool")
+    @patch("myswat.memory.store.MemoryStore")
+    def test_work_item_not_found(self, mock_store_cls, mock_pool_cls, mock_settings_cls, mock_teamwork):
+        from myswat.cli.main import task
+
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = {"id": 1, "slug": "proj", "name": "Proj"}
+        mock_store.get_work_item.return_value = None
+        mock_store_cls.return_value = mock_store
+
+        with pytest.raises(ClickExit):
+            task(work_item_id=1, project="proj")
+
+    @patch("myswat.cli.main._print_teamwork_details")
+    @patch("myswat.config.settings.MySwatSettings")
+    @patch("myswat.db.connection.TiDBPool")
+    @patch("myswat.memory.store.MemoryStore")
+    def test_success(self, mock_store_cls, mock_pool_cls, mock_settings_cls, mock_teamwork):
+        from myswat.cli.main import task
+
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = {"id": 1, "slug": "proj", "name": "Proj"}
+        mock_store.get_work_item.return_value = {
+            "id": 7,
+            "project_id": 1,
+            "status": "in_progress",
+            "item_type": "code_change",
+            "title": "Implement feature",
+            "description": "Detailed",
+            "metadata_json": {
+                "task_state": {
+                    "current_stage": "phase_1",
+                    "latest_summary": "working",
+                    "next_todos": ["do x"],
+                    "open_issues": ["issue y"],
+                }
+            },
+        }
+        mock_store_cls.return_value = mock_store
+
+        task(work_item_id=7, project="proj")
+        mock_teamwork.assert_called_once()
+
     @patch("myswat.config.settings.MySwatSettings")
     @patch("myswat.db.connection.TiDBPool")
     @patch("myswat.memory.store.MemoryStore")
