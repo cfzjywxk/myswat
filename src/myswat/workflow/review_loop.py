@@ -101,14 +101,18 @@ def run_review_loop(
         previous_artifact = artifact_content
 
         # Store artifact in DB
-        artifact_id = store.create_artifact(
-            work_item_id=work_item_id,
-            agent_id=dev_sm.agent_id,
-            iteration=iteration,
-            artifact_type="proposal" if iteration == 1 else "diff",
-            title=f"Iteration {iteration}",
-            content=artifact_content,
-        )
+        artifact_id = None
+        try:
+            artifact_id = store.create_artifact(
+                work_item_id=work_item_id,
+                agent_id=dev_sm.agent_id,
+                iteration=iteration,
+                artifact_type="proposal" if iteration == 1 else "diff",
+                title=f"Iteration {iteration}",
+                content=artifact_content,
+            )
+        except Exception as e:
+            console.print(f"[dim red]Warning: Failed to persist artifact: {e}[/dim red]")
 
         console.print(f"[green]Developer submitted (artifact_id={artifact_id}, {len(artifact_content)} chars)[/green]")
 
@@ -129,20 +133,24 @@ def run_review_loop(
         final_verdict = verdict
 
         # Store review cycle in DB
-        cycle_id = store.create_review_cycle(
-            work_item_id=work_item_id,
-            iteration=iteration,
-            proposer_agent_id=dev_sm.agent_id,
-            reviewer_agent_id=reviewer_sm.agent_id,
-            artifact_id=artifact_id,
-            proposal_session_id=dev_sm.session.id if dev_sm.session else None,
-        )
-        store.update_review_verdict(
-            cycle_id=cycle_id,
-            verdict=verdict.verdict,
-            verdict_json=verdict.model_dump(),
-            review_session_id=reviewer_sm.session.id if reviewer_sm.session else None,
-        )
+        if artifact_id is not None:
+            try:
+                cycle_id = store.create_review_cycle(
+                    work_item_id=work_item_id,
+                    iteration=iteration,
+                    proposer_agent_id=dev_sm.agent_id,
+                    reviewer_agent_id=reviewer_sm.agent_id,
+                    artifact_id=artifact_id,
+                    proposal_session_id=dev_sm.session.id if dev_sm.session else None,
+                )
+                store.update_review_verdict(
+                    cycle_id=cycle_id,
+                    verdict=verdict.verdict,
+                    verdict_json=verdict.model_dump(),
+                    review_session_id=reviewer_sm.session.id if reviewer_sm.session else None,
+                )
+            except Exception as e:
+                console.print(f"[dim red]Warning: Failed to persist review cycle: {e}[/dim red]")
 
         console.print(f"[bold]Verdict: {verdict.verdict.upper()}[/bold]")
         if verdict.summary:

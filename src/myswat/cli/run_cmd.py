@@ -74,6 +74,12 @@ def run_single(
         console.print(f"[red]Project '{project_slug}' not found.[/red]")
         raise typer.Exit(1)
 
+    effective_workdir = workdir or proj.get("repo_path")
+
+    # Auto-learn if project hasn't been learned yet
+    from myswat.cli.learn_cmd import ensure_learned
+    ensure_learned(store, project_slug, proj["id"], effective_workdir)
+
     # Resolve agent
     agent_row = store.get_agent(proj["id"], role)
     if not agent_row:
@@ -111,19 +117,31 @@ def run_single(
     )
     console.print(f"[bold]Task:[/bold] {task}\n")
 
-    with console.status("[bold cyan]Agent working...", spinner="dots"):
-        response = sm.send(task, task_description=task)
+    try:
+        with console.status("[bold cyan]Agent working...", spinner="dots"):
+            response = sm.send(task, task_description=task)
 
-    # Display result
-    if response.success:
-        console.print(Panel(response.content, title="Agent Response", border_style="green"))
-    else:
-        console.print(Panel(response.content, title="Agent Response (error)", border_style="red"))
-        if response.raw_stderr:
-            console.print(f"[dim red]stderr: {response.raw_stderr[:500]}[/dim red]")
+        # Display result
+        if response.success:
+            console.print(Panel(response.content, title="Agent Response", border_style="green"))
+        else:
+            console.print(Panel(response.content, title="Agent Response (error)", border_style="red"))
+            if response.raw_stderr:
+                console.print(f"[dim red]stderr: {response.raw_stderr[:500]}[/dim red]")
+    except Exception as e:
+        from myswat.workflow.error_handler import WorkflowError, handle_workflow_error
 
-    # Close session
-    sm.close()
+        werr = WorkflowError(
+            error=e,
+            stage="agent_task",
+            context={"project": project_slug, "role": role, "task": task[:500]},
+        )
+        handle_workflow_error(werr, store=store, project_id=proj["id"])
+    finally:
+        try:
+            sm.close()
+        except Exception:
+            pass
 
     console.print(f"\n[dim]Session closed. Turns persisted to TiDB.[/dim]")
 
@@ -150,6 +168,10 @@ def run_with_review(
         raise typer.Exit(1)
 
     effective_workdir = workdir or proj.get("repo_path")
+
+    # Auto-learn if project hasn't been learned yet
+    from myswat.cli.learn_cmd import ensure_learned
+    ensure_learned(store, project_slug, proj["id"], effective_workdir)
 
     # Resolve agents
     dev_agent = store.get_agent(proj["id"], developer_role)
@@ -208,25 +230,46 @@ def run_with_review(
     )
     console.print(f"[dim]Work item: {work_item_id}[/dim]\n")
 
-    # Run the review loop
-    verdict = run_review_loop(
-        store=store,
-        dev_sm=dev_sm,
-        reviewer_sm=reviewer_sm,
-        task=task,
-        project_id=proj["id"],
-        work_item_id=work_item_id,
-        max_iterations=settings.workflow.max_review_iterations,
-    )
+    try:
+        # Run the review loop
+        verdict = run_review_loop(
+            store=store,
+            dev_sm=dev_sm,
+            reviewer_sm=reviewer_sm,
+            task=task,
+            project_id=proj["id"],
+            work_item_id=work_item_id,
+            max_iterations=settings.workflow.max_review_iterations,
+        )
 
-    # Update work item status
-    if verdict.verdict == "lgtm":
-        store.update_work_item_status(work_item_id, "approved")
-    else:
-        store.update_work_item_status(work_item_id, "review")
+        # Update work item status
+        if verdict.verdict == "lgtm":
+            store.update_work_item_status(work_item_id, "approved")
+        else:
+            store.update_work_item_status(work_item_id, "review")
+    except Exception as e:
+        from myswat.workflow.error_handler import WorkflowError, handle_workflow_error
 
-    # Close sessions
-    dev_sm.close()
-    reviewer_sm.close()
+        werr = WorkflowError(
+            error=e,
+            stage="review_loop",
+            context={
+                "project": project_slug,
+                "task": task[:500],
+                "work_item_id": work_item_id,
+            },
+        )
+        handle_workflow_error(werr, store=store, project_id=proj["id"])
+
+        try:
+            store.update_work_item_status(work_item_id, "blocked")
+        except Exception:
+            pass
+    finally:
+        for sm in [dev_sm, reviewer_sm]:
+            try:
+                sm.close()
+            except Exception:
+                pass
 
     console.print(f"\n[dim]Sessions closed. All turns persisted to TiDB.[/dim]")

@@ -1,14 +1,27 @@
-"""TiDB connection pool manager."""
+"""TiDB connection pool manager with retry for transient errors."""
 
 from __future__ import annotations
 
+import time
 from contextlib import contextmanager
 from typing import Generator
 
 import pymysql
 import pymysql.cursors
+import pymysql.err
 
 from myswat.config.settings import TiDBSettings
+
+# PyMySQL error codes for transient connection issues
+_TRANSIENT_ERRORS = frozenset({
+    2003,  # Can't connect to MySQL server
+    2006,  # MySQL server has gone away
+    2013,  # Lost connection to MySQL server during query
+    4031,  # TiDB server timeout
+})
+
+_MAX_RETRIES = 2
+_RETRY_DELAY = 0.5  # seconds, multiplied by attempt number
 
 
 class TiDBPool:
@@ -16,6 +29,20 @@ class TiDBPool:
 
     def __init__(self, settings: TiDBSettings) -> None:
         self._settings = settings
+
+    def _with_retry(self, fn):
+        """Execute fn(), retrying on transient connection errors."""
+        last_err = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                return fn()
+            except pymysql.err.OperationalError as e:
+                if e.args and e.args[0] in _TRANSIENT_ERRORS and attempt < _MAX_RETRIES:
+                    time.sleep(_RETRY_DELAY * (attempt + 1))
+                    last_err = e
+                    continue
+                raise
+        raise last_err
 
     def _connect(self, database: str | None = None) -> pymysql.Connection:
         ssl_opts = {"ca": self._settings.ssl_ca} if self._settings.ssl_ca else None
@@ -67,32 +94,42 @@ class TiDBPool:
 
     def execute(self, sql: str, args: tuple | None = None, database: str | None = None) -> int:
         """Execute a single statement, return affected row count."""
-        with self.cursor(database) as cur:
-            cur.execute(sql, args)
-            return cur.rowcount
+        def _op():
+            with self.cursor(database) as cur:
+                cur.execute(sql, args)
+                return cur.rowcount
+        return self._with_retry(_op)
 
     def execute_many(self, statements: list[str], database: str | None = None) -> None:
         """Execute multiple DDL/DML statements in sequence."""
-        with self.cursor(database) as cur:
-            for stmt in statements:
-                stmt = stmt.strip()
-                if stmt:
-                    cur.execute(stmt)
+        def _op():
+            with self.cursor(database) as cur:
+                for stmt in statements:
+                    stmt = stmt.strip()
+                    if stmt:
+                        cur.execute(stmt)
+        return self._with_retry(_op)
 
     def fetch_one(self, sql: str, args: tuple | None = None, database: str | None = None) -> dict | None:
-        with self.cursor(database) as cur:
-            cur.execute(sql, args)
-            return cur.fetchone()
+        def _op():
+            with self.cursor(database) as cur:
+                cur.execute(sql, args)
+                return cur.fetchone()
+        return self._with_retry(_op)
 
     def fetch_all(self, sql: str, args: tuple | None = None, database: str | None = None) -> list[dict]:
-        with self.cursor(database) as cur:
-            cur.execute(sql, args)
-            return cur.fetchall()
+        def _op():
+            with self.cursor(database) as cur:
+                cur.execute(sql, args)
+                return cur.fetchall()
+        return self._with_retry(_op)
 
     def insert_returning_id(self, sql: str, args: tuple | None = None, database: str | None = None) -> int:
         """Execute an INSERT and return the auto-generated ID."""
-        with self.cursor(database) as cur:
-            cur.execute(sql, args)
-            cur.execute("SELECT LAST_INSERT_ID() AS id")
-            row = cur.fetchone()
-            return row["id"]
+        def _op():
+            with self.cursor(database) as cur:
+                cur.execute(sql, args)
+                cur.execute("SELECT LAST_INSERT_ID() AS id")
+                row = cur.fetchone()
+                return row["id"]
+        return self._with_retry(_op)

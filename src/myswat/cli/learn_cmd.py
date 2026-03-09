@@ -467,3 +467,34 @@ def run_learn(project_slug: str, workdir: str | None = None) -> None:
         f"\n[dim]Dev/QA agents will automatically receive this knowledge.\n"
         f"Re-run 'myswat learn -p {project_slug}' to refresh.[/dim]"
     )
+
+
+def ensure_learned(
+    store: MemoryStore,
+    project_slug: str,
+    project_id: int,
+    repo_path: str | None,
+) -> None:
+    """Auto-learn the project if no project_ops knowledge exists.
+
+    Called by ``chat``, ``run``, and ``work`` commands before agents start.
+    Checks local ``myswat.md`` first (fast), then TiDB.  If neither has
+    project_ops knowledge, runs the full learn phase automatically.
+    """
+    # Fast path: local cache file exists
+    if repo_path:
+        md_file = Path(repo_path) / "myswat.md"
+        if md_file.is_file():
+            return
+
+    # Check TiDB
+    ops = store.list_knowledge(project_id, category="project_ops", limit=1)
+    if ops:
+        return
+
+    # No knowledge found — auto-learn
+    console.print(
+        "\n[bold yellow]No project operations knowledge found. "
+        "Running auto-learn...[/bold yellow]\n"
+    )
+    run_learn(project_slug, workdir=repo_path)

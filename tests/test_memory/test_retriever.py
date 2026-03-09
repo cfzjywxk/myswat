@@ -11,6 +11,7 @@ def _make_store_mock(knowledge_results=None, history=None, artifacts=None, work_
     store.get_recent_history_for_agent.return_value = history or []
     store.get_recent_artifacts_for_project.return_value = artifacts or []
     store.list_work_items.return_value = work_items or []
+    store.list_knowledge.return_value = []  # no project_ops by default
     return store
 
 

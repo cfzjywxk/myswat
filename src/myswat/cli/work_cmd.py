@@ -55,14 +55,9 @@ def run_work(
 
     effective_workdir = workdir or proj.get("repo_path")
 
-    # Pre-flight: check for project_ops knowledge
-    ops = store.list_knowledge(proj["id"], category="project_ops", limit=1)
-    if not ops:
-        console.print(
-            "[yellow]Warning: No project operations knowledge found.\n"
-            f"Run 'myswat learn -p {project_slug}' first so agents know how to "
-            "build, test, and follow project conventions.[/yellow]\n"
-        )
+    # Auto-learn if project hasn't been learned yet
+    from myswat.cli.learn_cmd import ensure_learned
+    ensure_learned(store, project_slug, proj["id"], effective_workdir)
 
     # Set up Dev
     dev_agent = store.get_agent(proj["id"], "developer")
@@ -137,17 +132,38 @@ def run_work(
         max_review_iterations=settings.workflow.max_review_iterations,
     )
 
-    result = engine.run(requirement)
+    try:
+        result = engine.run(requirement)
 
-    # Update work item
-    if result.success:
-        store.update_work_item_status(work_item_id, "completed")
-    else:
-        store.update_work_item_status(work_item_id, "review")
+        # Update work item
+        if result.success:
+            store.update_work_item_status(work_item_id, "completed")
+        else:
+            store.update_work_item_status(work_item_id, "review")
+    except Exception as e:
+        from myswat.workflow.error_handler import WorkflowError, handle_workflow_error
 
-    # Close sessions
-    dev_sm.close()
-    for qa_sm in qa_sms:
-        qa_sm.close()
+        werr = WorkflowError(
+            error=e,
+            stage="workflow_execution",
+            context={
+                "project": project_slug,
+                "requirement": requirement[:500],
+                "work_item_id": work_item_id,
+            },
+        )
+        handle_workflow_error(werr, store=store, project_id=proj["id"])
+
+        try:
+            store.update_work_item_status(work_item_id, "blocked")
+        except Exception:
+            pass
+    finally:
+        # Always close sessions — prevent orphaned active sessions
+        for sm in [dev_sm] + qa_sms:
+            try:
+                sm.close()
+            except Exception:
+                pass
 
     console.print(f"\n[dim]Sessions closed. All turns persisted to TiDB.[/dim]")

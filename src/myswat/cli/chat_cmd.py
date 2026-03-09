@@ -233,6 +233,10 @@ def run_chat(
 
     effective_workdir = workdir or proj.get("repo_path")
 
+    # Auto-learn if project hasn't been learned yet
+    from myswat.cli.learn_cmd import ensure_learned
+    ensure_learned(store, project_slug, proj["id"], effective_workdir)
+
     # Create a lightweight runner for compaction (uses codex by default)
     compaction_runner = _make_compaction_runner(store, proj, settings)
     compactor = KnowledgeCompactor(

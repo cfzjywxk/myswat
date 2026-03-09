@@ -730,18 +730,21 @@ class WorkflowEngine:
 
             artifact_id = None
             if self._work_item_id:
-                artifact_id = self._store.create_artifact(
-                    work_item_id=self._work_item_id,
-                    agent_id=prop.agent_id,
-                    iteration=iteration,
-                    artifact_type=self._review_artifact_type(artifact_type),
-                    title=f"{artifact_type} review v{iteration}",
-                    content=current[:65000],
-                    metadata_json={
-                        "source": "review_loop",
-                        "workflow_artifact_type": artifact_type,
-                    },
-                )
+                try:
+                    artifact_id = self._store.create_artifact(
+                        work_item_id=self._work_item_id,
+                        agent_id=prop.agent_id,
+                        iteration=iteration,
+                        artifact_type=self._review_artifact_type(artifact_type),
+                        title=f"{artifact_type} review v{iteration}",
+                        content=current[:65000],
+                        metadata_json={
+                            "source": "review_loop",
+                            "workflow_artifact_type": artifact_type,
+                        },
+                    )
+                except Exception as e:
+                    console.print(f"[dim red]Warning: Failed to persist artifact: {e}[/dim red]")
 
             all_issues: list[str] = []
             all_lgtm = True
@@ -770,21 +773,24 @@ class WorkflowEngine:
                     console.print(f"    [dim]{verdict.summary}[/dim]")
 
                 # Store review cycle in DB
-                if self._work_item_id:
-                    cycle_id = self._store.create_review_cycle(
-                        work_item_id=self._work_item_id,
-                        iteration=iteration,
-                        proposer_agent_id=prop.agent_id,
-                        reviewer_agent_id=reviewer.agent_id,
-                        artifact_id=artifact_id,
-                        proposal_session_id=prop.session.id if prop.session else None,
-                    )
-                    self._store.update_review_verdict(
-                        cycle_id=cycle_id,
-                        verdict=verdict.verdict,
-                        verdict_json=verdict.model_dump(),
-                        review_session_id=reviewer.session.id if reviewer.session else None,
-                    )
+                if self._work_item_id and artifact_id:
+                    try:
+                        cycle_id = self._store.create_review_cycle(
+                            work_item_id=self._work_item_id,
+                            iteration=iteration,
+                            proposer_agent_id=prop.agent_id,
+                            reviewer_agent_id=reviewer.agent_id,
+                            artifact_id=artifact_id,
+                            proposal_session_id=prop.session.id if prop.session else None,
+                        )
+                        self._store.update_review_verdict(
+                            cycle_id=cycle_id,
+                            verdict=verdict.verdict,
+                            verdict_json=verdict.model_dump(),
+                            review_session_id=reviewer.session.id if reviewer.session else None,
+                        )
+                    except Exception as e:
+                        console.print(f"[dim red]Warning: Failed to persist review cycle: {e}[/dim red]")
 
             if all_lgtm:
                 console.print(f"\n[bold green]All reviewers gave LGTM at iteration {iteration}![/bold green]")
@@ -805,19 +811,22 @@ class WorkflowEngine:
 
             # Preserve the final unreviewed revision when the loop stops here.
             if self._work_item_id and iteration == self._max_review:
-                self._store.create_artifact(
-                    work_item_id=self._work_item_id,
-                    agent_id=prop.agent_id,
-                    iteration=iteration + 1,
-                    artifact_type=self._review_artifact_type(artifact_type),
-                    title=f"{artifact_type} draft v{iteration + 1}",
-                    content=current[:65000],
-                    metadata_json={
-                        "source": "review_loop",
-                        "workflow_artifact_type": artifact_type,
-                        "reviewed": False,
-                    },
-                )
+                try:
+                    self._store.create_artifact(
+                        work_item_id=self._work_item_id,
+                        agent_id=prop.agent_id,
+                        iteration=iteration + 1,
+                        artifact_type=self._review_artifact_type(artifact_type),
+                        title=f"{artifact_type} draft v{iteration + 1}",
+                        content=current[:65000],
+                        metadata_json={
+                            "source": "review_loop",
+                            "workflow_artifact_type": artifact_type,
+                            "reviewed": False,
+                        },
+                    )
+                except Exception as e:
+                    console.print(f"[dim red]Warning: Failed to persist final artifact: {e}[/dim red]")
 
         console.print(f"[yellow]Max iterations reached for {artifact_type} review.[/yellow]")
         return current, self._max_review
