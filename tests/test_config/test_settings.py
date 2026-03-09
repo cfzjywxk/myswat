@@ -9,6 +9,7 @@ import pytest
 from myswat.config.settings import (
     AgentSettings,
     CompactionSettings,
+    EmbeddingSettings,
     MySwatSettings,
     TiDBSettings,
     WorkflowSettings,
@@ -197,6 +198,34 @@ class TestCompactionSettings:
 
 
 # ---------------------------------------------------------------------------
+# EmbeddingSettings
+# ---------------------------------------------------------------------------
+
+class TestEmbeddingSettings:
+    """Tests for EmbeddingSettings defaults and env-var overrides."""
+
+    def test_defaults(self):
+        settings = EmbeddingSettings()
+        assert settings.backend == "auto"
+        assert settings.tidb_model == "built-in"
+
+    def test_env_override_backend(self, monkeypatch):
+        monkeypatch.setenv("MYSWAT_EMBEDDING_BACKEND", "tidb")
+        settings = EmbeddingSettings()
+        assert settings.backend == "tidb"
+
+    def test_env_override_tidb_model(self, monkeypatch):
+        monkeypatch.setenv("MYSWAT_EMBEDDING_TIDB_MODEL", "text-embedding-3-small")
+        settings = EmbeddingSettings()
+        assert settings.tidb_model == "text-embedding-3-small"
+
+    def test_env_disable_tidb_fallback(self, monkeypatch):
+        monkeypatch.setenv("MYSWAT_EMBEDDING_TIDB_MODEL", "")
+        settings = EmbeddingSettings()
+        assert settings.tidb_model == ""
+
+
+# ---------------------------------------------------------------------------
 # MySwatSettings
 # ---------------------------------------------------------------------------
 
@@ -214,6 +243,7 @@ class TestMySwatSettings:
         assert isinstance(settings.agents, AgentSettings)
         assert isinstance(settings.workflow, WorkflowSettings)
         assert isinstance(settings.compaction, CompactionSettings)
+        assert isinstance(settings.embedding, EmbeddingSettings)
 
         # Spot-check a few nested defaults
         assert settings.tidb.port == 4000

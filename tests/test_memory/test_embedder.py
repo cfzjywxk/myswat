@@ -334,3 +334,69 @@ class TestGetModel:
         ):
             embedder.preload_model()
             mock_get.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# 7. tidb_embed_expr
+# ---------------------------------------------------------------------------
+
+class TestTidbEmbedExpr:
+    """Tests for embedder.tidb_embed_expr()."""
+
+    def test_returns_embedding_sql(self):
+        result = embedder.tidb_embed_expr("my-model")
+        assert result == "EMBEDDING('my-model', %s)"
+
+    def test_built_in_model(self):
+        result = embedder.tidb_embed_expr("built-in")
+        assert result == "EMBEDDING('built-in', %s)"
+
+    def test_custom_model_name(self):
+        result = embedder.tidb_embed_expr("text-embedding-3-small")
+        assert result == "EMBEDDING('text-embedding-3-small', %s)"
+
+
+# ---------------------------------------------------------------------------
+# 8. resolve_embed_sql
+# ---------------------------------------------------------------------------
+
+class TestResolveEmbedSql:
+    """Tests for embedder.resolve_embed_sql()."""
+
+    def test_local_available_returns_vec_from_text(self):
+        """When local embed returns a vector, use VEC_FROM_TEXT."""
+        fake_vec = [0.1, 0.2, 0.3]
+        with patch.object(embedder, "embed", return_value=fake_vec):
+            sql, params = embedder.resolve_embed_sql("hello")
+        assert sql == "VEC_FROM_TEXT(%s)"
+        assert len(params) == 1
+        assert json.loads(params[0]) == fake_vec
+
+    def test_local_unavailable_tidb_fallback(self):
+        """When local embed returns None and tidb_model is set, use EMBEDDING()."""
+        with patch.object(embedder, "embed", return_value=None):
+            sql, params = embedder.resolve_embed_sql("hello", tidb_model="built-in")
+        assert sql == "EMBEDDING('built-in', %s)"
+        assert params == ["hello"]
+
+    def test_local_unavailable_no_tidb_returns_null(self):
+        """When local embed returns None and no tidb_model, return NULL."""
+        with patch.object(embedder, "embed", return_value=None):
+            sql, params = embedder.resolve_embed_sql("hello", tidb_model="")
+        assert sql == "NULL"
+        assert params == []
+
+    def test_local_unavailable_no_tidb_default(self):
+        """Default tidb_model is empty string — no fallback."""
+        with patch.object(embedder, "embed", return_value=None):
+            sql, params = embedder.resolve_embed_sql("hello")
+        assert sql == "NULL"
+        assert params == []
+
+    def test_local_preferred_over_tidb(self):
+        """Even with tidb_model set, local embed takes priority."""
+        fake_vec = [1.0, 2.0]
+        with patch.object(embedder, "embed", return_value=fake_vec):
+            sql, params = embedder.resolve_embed_sql("hello", tidb_model="built-in")
+        assert sql == "VEC_FROM_TEXT(%s)"
+        assert json.loads(params[0]) == fake_vec

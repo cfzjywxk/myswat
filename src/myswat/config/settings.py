@@ -44,6 +44,17 @@ class WorkflowSettings(BaseSettings):
     model_config = {"env_prefix": "MYSWAT_WORKFLOW_"}
 
 
+class EmbeddingSettings(BaseSettings):
+    # "auto" = try local BGE-M3 first, fall back to TiDB built-in EMBEDDING().
+    # "local" = only use local model (None if unavailable).
+    # "tidb" = always use TiDB built-in EMBEDDING().
+    backend: str = "auto"
+    # TiDB built-in model name passed to EMBEDDING(model, text).
+    tidb_model: str = "built-in"
+
+    model_config = {"env_prefix": "MYSWAT_EMBEDDING_"}
+
+
 class CompactionSettings(BaseSettings):
     # Compaction triggers when EITHER threshold is exceeded.
     # Modern AI CLIs (Claude Code, Codex) support ~1M token contexts.
@@ -63,6 +74,7 @@ class MySwatSettings(BaseSettings):
     agents: AgentSettings = Field(default_factory=AgentSettings)
     workflow: WorkflowSettings = Field(default_factory=WorkflowSettings)
     compaction: CompactionSettings = Field(default_factory=CompactionSettings)
+    embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     config_path: Path = Path("~/.myswat/config.toml").expanduser()
 
     model_config = {"env_prefix": "MYSWAT_"}

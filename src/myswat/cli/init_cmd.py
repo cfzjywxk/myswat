@@ -42,7 +42,7 @@ def run_init(name: str, repo_path: str | None, description: str | None) -> None:
 
     # Create project
     slug = _slugify(name)
-    store = MemoryStore(pool)
+    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
 
     existing = store.get_project_by_slug(slug)
     if existing:

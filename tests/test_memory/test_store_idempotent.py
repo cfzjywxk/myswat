@@ -393,6 +393,58 @@ class TestStoreReadOperations:
 
         assert kid == 99
 
+    @patch("myswat.memory.embedder.embed", return_value=None)
+    def test_store_knowledge_tidb_fallback(self, mock_embed, mock_pool):
+        """When local embed is unavailable and tidb_model is set, uses EMBEDDING()."""
+        mock_pool.insert_returning_id.return_value = 42
+
+        store = MemoryStore(mock_pool, tidb_embedding_model="built-in")
+        kid = store.store_knowledge(
+            project_id=1, category="test", title="Test", content="content",
+        )
+
+        assert kid == 42
+        sql = mock_pool.insert_returning_id.call_args[0][0]
+        assert "EMBEDDING('built-in', %s)" in sql
+
+    @patch("myswat.memory.embedder.embed", return_value=None)
+    def test_store_knowledge_no_fallback_when_tidb_model_empty(self, mock_embed, mock_pool):
+        """When local embed is unavailable and no tidb_model, stores NULL."""
+        mock_pool.insert_returning_id.return_value = 42
+
+        store = MemoryStore(mock_pool, tidb_embedding_model="")
+        kid = store.store_knowledge(
+            project_id=1, category="test", title="Test", content="content",
+        )
+
+        assert kid == 42
+        sql = mock_pool.insert_returning_id.call_args[0][0]
+        assert "NULL" in sql
+        assert "EMBEDDING" not in sql
+
+    @patch("myswat.memory.embedder.embed", return_value=None)
+    def test_search_knowledge_tidb_fallback(self, mock_embed, mock_pool):
+        """When local embed unavailable, search uses TiDB EMBEDDING() for vector."""
+        mock_pool.fetch_all.return_value = []
+
+        store = MemoryStore(mock_pool, tidb_embedding_model="built-in")
+        store.search_knowledge(project_id=1, query="test query")
+
+        sql = mock_pool.fetch_all.call_args[0][0]
+        assert "EMBEDDING('built-in', %s)" in sql
+
+    @patch("myswat.memory.embedder.embed", return_value=None)
+    def test_search_knowledge_no_vector_without_fallback(self, mock_embed, mock_pool):
+        """When no local embed and no tidb_model, vector search is skipped."""
+        mock_pool.fetch_all.return_value = []
+
+        store = MemoryStore(mock_pool, tidb_embedding_model="")
+        store.search_knowledge(project_id=1, query="test query")
+
+        sql = mock_pool.fetch_all.call_args[0][0]
+        assert "VEC_COSINE_DISTANCE" not in sql
+        assert "EMBEDDING" not in sql
+
     def test_create_session(self, mock_pool):
         mock_pool.insert_returning_id.return_value = 10
 

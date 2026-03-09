@@ -40,7 +40,7 @@ def run_feed(path: str, project: str, glob_pattern: str, no_ai: bool) -> None:
     """Feed documents into the project knowledge base."""
     settings = MySwatSettings()
     pool = TiDBPool(settings.tidb)
-    store = MemoryStore(pool)
+    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
 
     proj = store.get_project_by_slug(project)
     if not proj:

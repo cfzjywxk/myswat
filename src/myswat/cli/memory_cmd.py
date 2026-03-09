@@ -27,7 +27,7 @@ def search(
     """Search project knowledge base (hybrid: keyword + semantic)."""
     settings = MySwatSettings()
     pool = TiDBPool(settings.tidb)
-    store = MemoryStore(pool)
+    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
 
     proj = store.get_project_by_slug(project)
     if not proj:
@@ -77,7 +77,7 @@ def add(
     """Manually add a knowledge entry."""
     settings = MySwatSettings()
     pool = TiDBPool(settings.tidb)
-    store = MemoryStore(pool)
+    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
 
     proj = store.get_project_by_slug(project)
     if not proj:
@@ -105,7 +105,7 @@ def list_knowledge(
     """List knowledge entries for a project."""
     settings = MySwatSettings()
     pool = TiDBPool(settings.tidb)
-    store = MemoryStore(pool)
+    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
 
     proj = store.get_project_by_slug(project)
     if not proj:
@@ -159,7 +159,7 @@ def compact(
 
     settings = MySwatSettings()
     pool = TiDBPool(settings.tidb)
-    store = MemoryStore(pool)
+    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
 
     proj = store.get_project_by_slug(project)
     if not proj:
@@ -222,7 +222,7 @@ def purge(
     """
     settings = MySwatSettings()
     pool = TiDBPool(settings.tidb)
-    store = MemoryStore(pool)
+    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
 
     proj = store.get_project_by_slug(project)
     if not proj:

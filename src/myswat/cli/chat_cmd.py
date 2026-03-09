@@ -224,7 +224,7 @@ def run_chat(
 
     pool = TiDBPool(settings.tidb)
     run_migrations(pool)
-    store = MemoryStore(pool)
+    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
 
     proj = store.get_project_by_slug(project_slug)
     if not proj:

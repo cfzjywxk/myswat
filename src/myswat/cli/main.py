@@ -258,7 +258,7 @@ def status(
     console = Console()
     settings = MySwatSettings()
     pool = TiDBPool(settings.tidb)
-    store = MemoryStore(pool)
+    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
 
     proj = store.get_project_by_slug(project)
     if not proj:

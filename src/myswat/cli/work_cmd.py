@@ -46,7 +46,7 @@ def run_work(
     applied = run_migrations(pool)
     if applied:
         console.print(f"[dim]Applied schema migrations: {applied}[/dim]")
-    store = MemoryStore(pool)
+    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
 
     proj = store.get_project_by_slug(project_slug)
     if not proj:
