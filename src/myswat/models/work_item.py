@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class WorkItem(BaseModel):
@@ -21,6 +22,13 @@ class WorkItem(BaseModel):
     metadata_json: dict[str, Any] | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+    @field_validator("metadata_json", mode="before")
+    @classmethod
+    def parse_metadata(cls, v: Any) -> dict[str, Any] | None:
+        if isinstance(v, str):
+            return json.loads(v)
+        return v
 
 
 class Artifact(BaseModel):

@@ -23,6 +23,15 @@ class MemoryStore:
         self._pool = pool
         self._tidb_embedding_model = tidb_embedding_model
 
+    @staticmethod
+    def _parse_json_field(value: Any) -> dict[str, Any] | list[Any] | None:
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return None
+        return value
+
     # ──────────────────────────── Projects ────────────────────────────
 
     def create_project(
@@ -96,11 +105,18 @@ class MemoryStore:
                         parent_session_id=parent_session_id, purpose=purpose,
                         work_item_id=work_item_id)
 
-    def get_active_session(self, agent_id: int) -> Session | None:
-        row = self._pool.fetch_one(
+    def get_active_session(self, agent_id: int, work_item_id: int | None = None) -> Session | None:
+        sql = (
             "SELECT * FROM sessions WHERE agent_id = %s AND status = 'active' "
-            "ORDER BY created_at DESC LIMIT 1", (agent_id,),
         )
+        args: list[Any] = [agent_id]
+        if work_item_id is None:
+            sql += "AND work_item_id IS NULL "
+        else:
+            sql += "AND work_item_id = %s "
+            args.append(work_item_id)
+        sql += "ORDER BY updated_at DESC, created_at DESC LIMIT 1"
+        row = self._pool.fetch_one(sql, tuple(args))
         return Session(**row) if row else None
 
     def close_session(self, session_id: int) -> None:
@@ -392,17 +408,17 @@ class MemoryStore:
         tags: list[str] | None = None, limit: int = 10,
         use_vector: bool = True, use_fulltext: bool = True,
     ) -> list[dict]:
-        """Hybrid search: combine keyword score and vector cosine similarity."""
+        """Hybrid search across project knowledge.
+
+        Knowledge in MySwat is project-scoped. The ``agent_id`` parameter is
+        retained for call-site compatibility but does not narrow the search.
+        """
         # Args are split by SQL position: SELECT (score) ... WHERE ... LIMIT
         score_args: list[Any] = []
         where_args: list[Any] = []
 
         conditions = ["k.project_id = %s"]
         where_args.append(project_id)
-
-        if agent_id is not None:
-            conditions.append("(k.agent_id = %s OR k.agent_id IS NULL)")
-            where_args.append(agent_id)
         if category:
             conditions.append("k.category = %s")
             where_args.append(category)
@@ -497,13 +513,15 @@ class MemoryStore:
         self, project_id: int, title: str, item_type: str,
         description: str | None = None, assigned_agent_id: int | None = None,
         parent_item_id: int | None = None, priority: int = 3,
+        metadata_json: dict[str, Any] | None = None,
     ) -> int:
         return self._pool.insert_returning_id(
             "INSERT INTO work_items (project_id, title, description, item_type, "
-            "assigned_agent_id, parent_item_id, priority) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            "assigned_agent_id, parent_item_id, priority, metadata_json) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
             (project_id, title, description, item_type,
-             assigned_agent_id, parent_item_id, priority),
+             assigned_agent_id, parent_item_id, priority,
+             json.dumps(metadata_json) if metadata_json else None),
         )
 
     def update_work_item_status(self, item_id: int, status: str) -> None:
@@ -512,7 +530,10 @@ class MemoryStore:
         )
 
     def get_work_item(self, item_id: int) -> dict | None:
-        return self._pool.fetch_one("SELECT * FROM work_items WHERE id = %s", (item_id,))
+        row = self._pool.fetch_one("SELECT * FROM work_items WHERE id = %s", (item_id,))
+        if row and row.get("metadata_json") is not None:
+            row["metadata_json"] = self._parse_json_field(row["metadata_json"])
+        return row
 
     def list_work_items(self, project_id: int, status: str | None = None) -> list[dict]:
         sql = "SELECT * FROM work_items WHERE project_id = %s"
@@ -521,7 +542,64 @@ class MemoryStore:
             sql += " AND status = %s"
             args.append(status)
         sql += " ORDER BY priority, created_at"
-        return self._pool.fetch_all(sql, tuple(args))
+        rows = self._pool.fetch_all(sql, tuple(args))
+        for row in rows:
+            if row.get("metadata_json") is not None:
+                row["metadata_json"] = self._parse_json_field(row["metadata_json"])
+        return rows
+
+    def update_work_item_metadata(self, item_id: int, metadata_json: dict[str, Any] | None) -> None:
+        self._pool.execute(
+            "UPDATE work_items SET metadata_json = %s WHERE id = %s",
+            (json.dumps(metadata_json) if metadata_json else None, item_id),
+        )
+
+    def get_work_item_state(self, item_id: int) -> dict[str, Any]:
+        row = self.get_work_item(item_id)
+        if not row:
+            return {}
+        metadata = row.get("metadata_json") or {}
+        if not isinstance(metadata, dict):
+            return {}
+        task_state = metadata.get("task_state") or {}
+        return task_state if isinstance(task_state, dict) else {}
+
+    def update_work_item_state(
+        self,
+        item_id: int,
+        *,
+        current_stage: str | None = None,
+        latest_summary: str | None = None,
+        next_todos: list[str] | None = None,
+        open_issues: list[str] | None = None,
+        last_artifact_id: int | None = None,
+        updated_by_agent_id: int | None = None,
+    ) -> None:
+        row = self.get_work_item(item_id)
+        metadata = row.get("metadata_json") if row else None
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        task_state = metadata.get("task_state")
+        if not isinstance(task_state, dict):
+            task_state = {}
+
+        if current_stage is not None:
+            task_state["current_stage"] = current_stage[:128]
+        if latest_summary is not None:
+            task_state["latest_summary"] = latest_summary[:4000]
+        if next_todos is not None:
+            task_state["next_todos"] = [str(item)[:300] for item in next_todos[:20]]
+        if open_issues is not None:
+            task_state["open_issues"] = [str(item)[:500] for item in open_issues[:20]]
+        if last_artifact_id is not None:
+            task_state["last_artifact_id"] = last_artifact_id
+        if updated_by_agent_id is not None:
+            task_state["updated_by_agent_id"] = updated_by_agent_id
+        task_state["updated_at"] = datetime.now().isoformat(timespec="seconds")
+
+        metadata["task_state"] = task_state
+        self.update_work_item_metadata(item_id, metadata)
 
     # ──────────────────────────── Artifacts ────────────────────────────
 

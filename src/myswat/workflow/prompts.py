@@ -322,9 +322,12 @@ DEV_SUMMARIZE_PHASE = """Summarize what you just implemented in phase {phase_ind
 Provide:
 1. **Changes made** — what was implemented
 2. **Files modified** — list of files created or changed
-3. **Key decisions** — any implementation choices made
-4. **Deviations** — anything that differs from the plan
-5. **Test status** — what was tested and results
+3. **Modules / areas affected** — which subsystems or behaviors changed
+4. **Key decisions** — any implementation choices made
+5. **Deviations** — anything that differs from the plan
+6. **Risks / remaining concerns** — anything QA should pay special attention to
+7. **QA focus** — what the reviewer should inspect directly in the codebase
+8. **Test status** — what was tested and results
 """
 
 DEV_ADDRESS_CODE_COMMENTS = """Address the following code review comments.
@@ -350,10 +353,11 @@ QA_CODE_REVIEW = """You are a QA engineer reviewing a development phase.
 {summary}
 
 ## Instructions
-1. Read the developer's summary above.
-2. Examine the actual code changes in the working directory to verify the implementation.
+1. Treat the developer's summary as a handoff, not as ground truth.
+2. Examine the actual code and changes in the working directory yourself.
 3. Check that tests exist and pass if possible.
-4. Provide your verdict.
+4. Call out any mismatch between the summary and the code you inspected.
+5. Provide your verdict.
 
 ## Review Criteria
 1. **Correctness** — Does the code match the design and plan?

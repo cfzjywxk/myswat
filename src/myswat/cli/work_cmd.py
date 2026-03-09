@@ -130,6 +130,7 @@ def run_work(
         project_id=proj["id"],
         work_item_id=work_item_id,
         max_review_iterations=settings.workflow.max_review_iterations,
+        auto_approve=True,
     )
 
     try:

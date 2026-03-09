@@ -66,6 +66,41 @@ class MemoryRetriever:
             ops_lines.append(f"### {entry['title']}\n{entry['content']}\n")
         return "\n".join(ops_lines)
 
+    def _build_work_item_state_context(self, work_item_id: int, budget_tokens: int = 600) -> str:
+        item = self._store.get_work_item(work_item_id)
+        if not item:
+            return ""
+
+        state = self._store.get_work_item_state(work_item_id)
+        if not state:
+            return ""
+
+        lines = ["## Current Task State\n"]
+        title = item.get("title") or f"Work item {work_item_id}"
+        status = item.get("status") or "unknown"
+        lines.append(f"**Work Item**: {title} [{status}]\n")
+
+        if state.get("current_stage"):
+            lines.append(f"**Stage**: {state['current_stage']}\n")
+        if state.get("latest_summary"):
+            summary = str(state["latest_summary"])[:2000]
+            lines.append(f"### Latest Summary\n{summary}\n")
+        if state.get("open_issues"):
+            lines.append("### Open Issues")
+            for issue in state["open_issues"][:10]:
+                lines.append(f"- {issue}")
+            lines.append("")
+        if state.get("next_todos"):
+            lines.append("### Next TODOs")
+            for todo in state["next_todos"][:10]:
+                lines.append(f"- {todo}")
+            lines.append("")
+
+        text = "\n".join(lines).strip()
+        if len(text) // 4 > budget_tokens:
+            return text[:budget_tokens * 4] + "\n... [truncated]"
+        return text
+
     def build_context_for_agent(
         self,
         project_id: int,
@@ -93,6 +128,15 @@ class MemoryRetriever:
         ops_tokens_used = len(ops_text) // 4 if ops_text else 0
         if ops_text:
             sections.append(ops_text)
+
+        # ── 0b. Current task state (ALWAYS loaded for work item sessions) ──
+        if current_session_id is not None:
+            session = self._store.get_session(current_session_id)
+            work_item_id = session.get("work_item_id") if session else None
+            if work_item_id:
+                task_state = self._build_work_item_state_context(work_item_id)
+                if task_state:
+                    sections.append(task_state)
 
         # ── 1. Knowledge base search (PRIMARY — vector + keyword) ──
         # This is the core: fed documents + compacted session knowledge,

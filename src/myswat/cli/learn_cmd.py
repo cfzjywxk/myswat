@@ -236,7 +236,7 @@ def _store_learned_knowledge(
     }
     store.store_knowledge(
         project_id=project_id,
-        agent_id=agent_id,
+        agent_id=None,
         category="project_ops",
         title="Project Overview",
         content=json.dumps(overview, indent=2),
@@ -261,7 +261,7 @@ def _store_learned_knowledge(
 
         store.store_knowledge(
             project_id=project_id,
-            agent_id=agent_id,
+            agent_id=None,
             category="project_ops",
             title=title,
             content=content,

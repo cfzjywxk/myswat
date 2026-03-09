@@ -309,6 +309,15 @@ class TestWorkItem:
         assert item.created_at == now
         assert item.updated_at == now
 
+    def test_metadata_json_string_parsed(self):
+        item = WorkItem(
+            project_id=1,
+            title="Task",
+            item_type="task",
+            metadata_json='{"task_state": {"current_stage": "design"}}',
+        )
+        assert item.metadata_json == {"task_state": {"current_stage": "design"}}
+
     @pytest.mark.parametrize(
         "item_type",
         ["task", "feature", "bug", "epic", "story", "subtask"],

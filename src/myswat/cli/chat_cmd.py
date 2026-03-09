@@ -627,6 +627,7 @@ def _run_workflow(
         work_item_id=work_item_id,
         max_review_iterations=settings.workflow.max_review_iterations,
         ask_user=ask_user,
+        auto_approve=False,
     )
 
     result = engine.run(requirement)

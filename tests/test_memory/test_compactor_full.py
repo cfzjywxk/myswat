@@ -239,6 +239,7 @@ class TestCompactSession:
         assert len(result) == 1
         assert result[0] == 42
         store.store_knowledge.assert_called_once()
+        assert store.store_knowledge.call_args.kwargs["agent_id"] is None
         store.mark_session_compacted.assert_called_once_with(1)
 
     def test_mark_compacted_false_advances_watermark(self):

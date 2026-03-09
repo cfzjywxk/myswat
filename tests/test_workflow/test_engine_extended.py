@@ -1002,6 +1002,16 @@ class TestBuildAddressPrompt:
 
 class TestUserCheckpoint:
 
+    def test_auto_approve_skips_prompt(self):
+        engine, _, _ = _make_engine()
+        engine._auto_approve = True
+        engine._ask.reset_mock()
+
+        result = engine._user_checkpoint("artifact", "design", "Approve?")
+
+        assert result == "artifact"
+        engine._ask.assert_not_called()
+
     def test_approve_with_empty_string(self):
         engine, _, _ = _make_engine(ask_return="")
         result = engine._user_checkpoint("artifact", "design", "Approve?")

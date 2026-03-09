@@ -74,6 +74,28 @@ def run_review_loop(
     previous_artifact = ""
     final_verdict = ReviewVerdict(verdict="changes_requested", issues=["max iterations reached"])
 
+    def _persist_state(
+        *,
+        stage: str,
+        summary: str,
+        next_todos: list[str] | None = None,
+        open_issues: list[str] | None = None,
+        last_artifact_id: int | None = None,
+        updated_by_agent_id: int | None = None,
+    ) -> None:
+        try:
+            store.update_work_item_state(
+                work_item_id,
+                current_stage=stage,
+                latest_summary=summary[:4000],
+                next_todos=next_todos,
+                open_issues=open_issues,
+                last_artifact_id=last_artifact_id,
+                updated_by_agent_id=updated_by_agent_id,
+            )
+        except Exception:
+            pass
+
     for iteration in range(1, max_iterations + 1):
         console.print(f"\n[bold cyan]── Iteration {iteration}/{max_iterations} ──[/bold cyan]")
 
@@ -115,6 +137,13 @@ def run_review_loop(
             console.print(f"[dim red]Warning: Failed to persist artifact: {e}[/dim red]")
 
         console.print(f"[green]Developer submitted (artifact_id={artifact_id}, {len(artifact_content)} chars)[/green]")
+        _persist_state(
+            stage="review_loop_reviewing",
+            summary=artifact_content,
+            next_todos=["Reviewer inspect the latest implementation summary and codebase"],
+            last_artifact_id=artifact_id,
+            updated_by_agent_id=dev_sm.agent_id,
+        )
 
         # === Reviewer turn ===
         review_prompt = REVIEWER.format(
@@ -161,6 +190,22 @@ def run_review_loop(
 
         if verdict.verdict == "lgtm":
             console.print(f"\n[bold green]Review passed at iteration {iteration}![/bold green]")
+            _persist_state(
+                stage="review_loop_approved",
+                summary=artifact_content,
+                next_todos=[],
+                open_issues=[],
+                last_artifact_id=artifact_id,
+                updated_by_agent_id=reviewer_sm.agent_id,
+            )
             break
+        _persist_state(
+            stage="review_loop_changes_requested",
+            summary=artifact_content,
+            next_todos=["Developer address reviewer feedback"],
+            open_issues=verdict.issues or ([verdict.summary] if verdict.summary else []),
+            last_artifact_id=artifact_id,
+            updated_by_agent_id=reviewer_sm.agent_id,
+        )
 
     return final_verdict

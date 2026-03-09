@@ -469,12 +469,33 @@ class TestStoreReadOperations:
 
         assert session is not None
         assert session.id == 5
+        sql, args = mock_pool.fetch_one.call_args[0]
+        assert "work_item_id IS NULL" in sql
+        assert args == (1,)
 
     def test_get_active_session_none(self, mock_pool):
         mock_pool.fetch_one.return_value = None
 
         store = MemoryStore(mock_pool)
         assert store.get_active_session(1) is None
+
+    def test_get_active_session_for_work_item(self, mock_pool):
+        mock_pool.fetch_one.return_value = {
+            "id": 6, "agent_id": 1, "session_uuid": "abc-456",
+            "parent_session_id": None, "status": "active",
+            "purpose": "test", "work_item_id": 42,
+            "token_count_est": 0, "compacted_through_turn_index": -1,
+            "created_at": None, "updated_at": None,
+        }
+
+        store = MemoryStore(mock_pool)
+        session = store.get_active_session(1, work_item_id=42)
+
+        assert session is not None
+        assert session.work_item_id == 42
+        sql, args = mock_pool.fetch_one.call_args[0]
+        assert "work_item_id = %s" in sql
+        assert args == (1, 42)
 
     def test_purge_compacted_sessions(self, mock_pool):
         mock_pool.fetch_all.return_value = [{"id": 1}, {"id": 2}]

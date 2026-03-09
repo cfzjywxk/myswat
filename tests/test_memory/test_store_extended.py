@@ -316,6 +316,18 @@ class TestGetWorkItem:
         assert result is not None
         assert result["title"] == "Task"
 
+    def test_parses_work_item_metadata_json(self, store, mock_pool):
+        mock_pool.fetch_one.return_value = {
+            "id": "w1",
+            "project_id": "p1",
+            "title": "Task",
+            "status": "open",
+            "metadata_json": '{"task_state": {"current_stage": "design_review"}}',
+        }
+        result = store.get_work_item("w1")
+        assert result is not None
+        assert result["metadata_json"]["task_state"]["current_stage"] == "design_review"
+
     def test_returns_none_when_not_found(self, store, mock_pool):
         mock_pool.fetch_one.return_value = None
         result = store.get_work_item("missing")
@@ -341,6 +353,40 @@ class TestListWorkItems:
         call_args = mock_pool.fetch_all.call_args
         sql = call_args[0][0]
         assert "status" in sql.lower()
+
+    def test_list_parses_metadata_json(self, store, mock_pool):
+        mock_pool.fetch_all.return_value = [
+            {"id": "w1", "status": "open", "metadata_json": '{"task_state": {"next_todos": ["t1"]}}'},
+        ]
+        result = store.list_work_items("p1")
+        assert result[0]["metadata_json"]["task_state"]["next_todos"] == ["t1"]
+
+
+class TestWorkItemState:
+    def test_get_work_item_state_returns_empty_when_missing(self, store, mock_pool):
+        mock_pool.fetch_one.return_value = None
+        assert store.get_work_item_state("missing") == {}
+
+    def test_update_work_item_state_merges_task_state(self, store, mock_pool):
+        mock_pool.fetch_one.return_value = {
+            "id": "w1",
+            "metadata_json": '{"task_state": {"current_stage": "design"}}',
+        }
+
+        store.update_work_item_state(
+            "w1",
+            current_stage="plan_review",
+            latest_summary="summary",
+            next_todos=["todo 1"],
+            open_issues=["issue 1"],
+            updated_by_agent_id=7,
+        )
+
+        args = mock_pool.execute.call_args[0][1]
+        payload = args[0]
+        assert '"plan_review"' in payload
+        assert '"todo 1"' in payload
+        assert '"issue 1"' in payload
 
 
 # ── 13. get_artifact ───────────────────────────────────────────────────

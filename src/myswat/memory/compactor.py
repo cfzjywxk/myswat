@@ -189,7 +189,7 @@ class KnowledgeCompactor:
 
             kid = self._store.store_knowledge(
                 project_id=project_id,
-                agent_id=agent_id,
+                agent_id=None,
                 source_session_id=session_id,
                 source_turn_ids=turn_ids,
                 category=category,

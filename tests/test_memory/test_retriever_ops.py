@@ -29,6 +29,8 @@ def mock_store():
     store.search_knowledge.return_value = []
     store.get_session.return_value = None
     store.get_session_turns.return_value = []
+    store.get_work_item.return_value = None
+    store.get_work_item_state.return_value = {}
     store.list_work_items.return_value = []
     store.get_recent_artifacts_for_project.return_value = []
     store.get_recent_history_for_agent.return_value = []
@@ -124,6 +126,33 @@ class TestBuildContextForAgent:
             project_id=1, agent_id=1, current_session_id=1,
         )
         assert "fix the bug" in result
+
+    def test_includes_current_task_state(self, retriever, mock_store):
+        mock_store.get_session.return_value = {
+            "compacted_through_turn_index": -1,
+            "work_item_id": 42,
+        }
+        mock_store.get_work_item.return_value = {
+            "id": 42,
+            "title": "Implement feature X",
+            "status": "in_progress",
+            "metadata_json": {},
+        }
+        mock_store.get_work_item_state.return_value = {
+            "current_stage": "phase_2_under_review",
+            "latest_summary": "Implemented the parser and added tests.",
+            "next_todos": ["Address QA feedback", "Re-run tests"],
+            "open_issues": ["Edge case for empty input"],
+        }
+
+        result = retriever.build_context_for_agent(
+            project_id=1, agent_id=1, current_session_id=1,
+        )
+
+        assert "Current Task State" in result
+        assert "Implement feature X" in result
+        assert "Address QA feedback" in result
+        assert "Edge case for empty input" in result
 
     def test_includes_work_items(self, retriever, mock_store):
         mock_store.list_work_items.return_value = [

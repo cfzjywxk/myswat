@@ -163,6 +163,7 @@ class WorkflowEngine:
         work_item_id: int | None = None,
         max_review_iterations: int = 5,
         ask_user: Callable[[str], str] | None = None,
+        auto_approve: bool = False,
     ) -> None:
         self._store = store
         self._dev = dev_sm
@@ -171,6 +172,37 @@ class WorkflowEngine:
         self._work_item_id = work_item_id
         self._max_review = max_review_iterations
         self._ask = ask_user or _default_ask
+        self._auto_approve = auto_approve
+
+    def _persist_task_state(
+        self,
+        *,
+        current_stage: str,
+        latest_summary: str | None = None,
+        next_todos: list[str] | None = None,
+        open_issues: list[str] | None = None,
+        last_artifact_id: int | None = None,
+        updated_by_agent_id: int | None = None,
+    ) -> None:
+        if not self._work_item_id:
+            return
+        try:
+            self._store.update_work_item_state(
+                self._work_item_id,
+                current_stage=current_stage,
+                latest_summary=latest_summary,
+                next_todos=next_todos,
+                open_issues=open_issues,
+                last_artifact_id=last_artifact_id,
+                updated_by_agent_id=updated_by_agent_id,
+            )
+        except Exception as e:
+            console.print(f"[dim red]Warning: Failed to persist task state: {e}[/dim red]")
+
+    @staticmethod
+    def _first_lines(text: str, limit: int = 4) -> list[str]:
+        lines = [line.strip("-* ") for line in text.splitlines() if line.strip()]
+        return lines[:limit]
 
     # ════════════════════════════════════════════════════════════════
     # Main workflow
@@ -178,6 +210,12 @@ class WorkflowEngine:
 
     def run(self, requirement: str) -> WorkflowResult:
         result = WorkflowResult(requirement=requirement)
+        self._persist_task_state(
+            current_stage="workflow_started",
+            latest_summary=requirement,
+            next_todos=["Produce technical design"],
+            updated_by_agent_id=self._dev.agent_id,
+        )
 
         # Stage 1: Tech design
         console.print(Panel("[bold]Stage 1: Technical Design[/bold]", border_style="blue"))
@@ -286,6 +324,13 @@ class WorkflowEngine:
         ) if result.phases else False
 
         console.print(Panel(Markdown(report), title="E2E Workflow Report", border_style="green"))
+        self._persist_task_state(
+            current_stage="workflow_completed" if result.success else "workflow_finished_with_issues",
+            latest_summary=report[:4000],
+            next_todos=[] if result.success else ["Review final report and unresolved issues"],
+            open_issues=[] if result.success else self._first_lines(report, limit=8),
+            updated_by_agent_id=self._dev.agent_id,
+        )
         return result
 
     # ════════════════════════════════════════════════════════════════
@@ -300,6 +345,12 @@ class WorkflowEngine:
             console.print(f"[red]Dev agent failed (exit={response.exit_code})[/red]")
             return ""
         console.print("[green]Dev submitted design.[/green]")
+        self._persist_task_state(
+            current_stage="design_draft",
+            latest_summary=response.content[:4000],
+            next_todos=["Run QA design review"],
+            updated_by_agent_id=self._dev.agent_id,
+        )
         return response.content
 
     def _run_planning(self, design: str, requirement: str) -> str:
@@ -313,6 +364,12 @@ class WorkflowEngine:
             console.print(f"[red]Dev agent failed (exit={response.exit_code})[/red]")
             return ""
         console.print("[green]Dev submitted implementation plan.[/green]")
+        self._persist_task_state(
+            current_stage="plan_draft",
+            latest_summary=response.content[:4000],
+            next_todos=["Run QA plan review"],
+            updated_by_agent_id=self._dev.agent_id,
+        )
         return response.content
 
     def _run_phase(
@@ -329,6 +386,12 @@ class WorkflowEngine:
 
         # Step 1: Dev implements
         console.print("[yellow]Dev implementing...[/yellow]")
+        self._persist_task_state(
+            current_stage=f"phase_{phase_index}_implementing",
+            latest_summary=phase_name,
+            next_todos=[f"Complete phase {phase_index}: {phase_name}", "Produce a handoff summary for QA"],
+            updated_by_agent_id=self._dev.agent_id,
+        )
         prompt = DEV_IMPLEMENT_PHASE.format(
             requirement=requirement[:2000],
             design=design[:3000],
@@ -350,6 +413,12 @@ class WorkflowEngine:
         )
         summary_resp = self._dev.send(summary_prompt, task_description=f"Summarize phase {phase_index}")
         summary = summary_resp.content if summary_resp.success else response.content
+        self._persist_task_state(
+            current_stage=f"phase_{phase_index}_under_review",
+            latest_summary=summary[:4000],
+            next_todos=["QA review this phase summary and inspect the codebase"],
+            updated_by_agent_id=self._dev.agent_id,
+        )
 
         # Step 3: QA review loop
         reviewed_summary, review_iters = self._run_review_loop(
@@ -375,6 +444,13 @@ class WorkflowEngine:
         else:
             console.print(f"[red]Phase {phase_index} commit failed.[/red]")
 
+        self._persist_task_state(
+            current_stage=f"phase_{phase_index}_committed" if committed else f"phase_{phase_index}_commit_failed",
+            latest_summary=reviewed_summary[:4000],
+            next_todos=[] if committed else [f"Revisit phase {phase_index} commit failure"],
+            updated_by_agent_id=self._dev.agent_id,
+        )
+
         return PhaseResult(
             name=phase_name,
             summary=reviewed_summary[:2000],
@@ -395,6 +471,12 @@ class WorkflowEngine:
     ) -> GATestResult:
         result = GATestResult()
         qa_lead = self._qas[0]
+        self._persist_task_state(
+            current_stage="ga_test_planning",
+            latest_summary=dev_summary[:4000],
+            next_todos=["Generate GA test plan"],
+            updated_by_agent_id=qa_lead.agent_id,
+        )
 
         # Step 1: QA generates test plan
         console.print("[yellow]QA generating GA test plan...[/yellow]")
@@ -409,6 +491,12 @@ class WorkflowEngine:
             return result
         test_plan = response.content
         result.test_plan = test_plan
+        self._persist_task_state(
+            current_stage="ga_test_plan_draft",
+            latest_summary=test_plan[:4000],
+            next_todos=["Review test plan", "Approve and start testing"],
+            updated_by_agent_id=qa_lead.agent_id,
+        )
 
         # Step 2: Dev + User review test plan
         console.print(Panel("[bold]Test Plan Review[/bold]", border_style="cyan"))
@@ -433,6 +521,12 @@ class WorkflowEngine:
             result.aborted = True
             return result
         result.test_plan = test_plan
+        self._persist_task_state(
+            current_stage="ga_test_executing",
+            latest_summary=test_plan[:4000],
+            next_todos=["Execute approved GA tests"],
+            updated_by_agent_id=qa_lead.agent_id,
+        )
 
         # Step 3: QA executes tests
         console.print("[yellow]QA executing GA tests...[/yellow]")
@@ -450,6 +544,12 @@ class WorkflowEngine:
             console.print("[bold green]All GA tests passed![/bold green]")
             result.test_report = test_output
             result.passed = True
+            self._persist_task_state(
+                current_stage="ga_test_passed",
+                latest_summary=test_output[:4000],
+                next_todos=["Generate final report"],
+                updated_by_agent_id=qa_lead.agent_id,
+            )
             return result
 
         # Step 4: Bug fix loop
@@ -467,6 +567,13 @@ class WorkflowEngine:
                     "Please review the situation and decide how to proceed.[/yellow]"
                 )
                 result.aborted = True
+                self._persist_task_state(
+                    current_stage="ga_test_aborted",
+                    latest_summary=test_output[:4000],
+                    next_todos=["Review too many bugs and decide next action"],
+                    open_issues=[bug.get("title", "Unknown bug") for bug in bugs[:10]],
+                    updated_by_agent_id=qa_lead.agent_id,
+                )
                 break
 
             for bug in bugs:
@@ -510,6 +617,13 @@ class WorkflowEngine:
                     f"[bold red]{len(bugs)} new bug(s) found "
                     f"({result.bugs_found} total).[/bold red]"
                 )
+                self._persist_task_state(
+                    current_stage="ga_test_bug_fixing",
+                    latest_summary=test_output[:4000],
+                    next_todos=["Fix newly found bugs", "Re-run QA tests"],
+                    open_issues=[bug.get("title", "Unknown bug") for bug in bugs[:10]],
+                    updated_by_agent_id=qa_lead.agent_id,
+                )
             else:
                 console.print("[bold green]All tests pass after bug fixes![/bold green]")
 
@@ -525,6 +639,13 @@ class WorkflowEngine:
         report_response = qa_lead.send(report_prompt, task_description="GA test report")
         if report_response.success:
             result.test_report = report_response.content
+            self._persist_task_state(
+                current_stage="ga_test_report_ready",
+                latest_summary=report_response.content[:4000],
+                next_todos=["Generate final delivery report"] if result.passed else ["Review GA test report"],
+                open_issues=[] if result.passed else [bug.get("title", "Unknown bug") for bug in bugs[:10]],
+                updated_by_agent_id=qa_lead.agent_id,
+            )
 
         return result
 
@@ -757,6 +878,8 @@ class WorkflowEngine:
 
                 if not response.success:
                     console.print(f"[red]{reviewer.agent_role} failed (exit={response.exit_code})[/red]")
+                    all_lgtm = False
+                    all_issues.append(f"[{reviewer.agent_role}] review failed (exit={response.exit_code})")
                     continue
 
                 verdict = _parse_verdict(response.content)
@@ -794,10 +917,26 @@ class WorkflowEngine:
 
             if all_lgtm:
                 console.print(f"\n[bold green]All reviewers gave LGTM at iteration {iteration}![/bold green]")
+                self._persist_task_state(
+                    current_stage=f"{artifact_type}_approved",
+                    latest_summary=current[:4000],
+                    next_todos=["Proceed to the next workflow stage"],
+                    open_issues=[],
+                    last_artifact_id=artifact_id,
+                    updated_by_agent_id=prop.agent_id,
+                )
                 return current, iteration
 
             # Proposer addresses comments
             console.print(f"\n[yellow]{prop.agent_role} addressing {len(all_issues)} comment(s)...[/yellow]")
+            self._persist_task_state(
+                current_stage=f"{artifact_type}_review",
+                latest_summary=current[:4000],
+                next_todos=[f"{prop.agent_role} address {len(all_issues)} review comment(s)"],
+                open_issues=all_issues,
+                last_artifact_id=artifact_id,
+                updated_by_agent_id=prop.agent_id,
+            )
             feedback = "\n".join(f"- {issue}" for issue in all_issues)
 
             address_prompt = self._build_address_prompt(artifact_type, current, feedback)
@@ -808,6 +947,13 @@ class WorkflowEngine:
                 break
 
             current = response.content
+            self._persist_task_state(
+                current_stage=f"{artifact_type}_revision_ready",
+                latest_summary=current[:4000],
+                next_todos=["Await another review round"],
+                open_issues=all_issues,
+                updated_by_agent_id=prop.agent_id,
+            )
 
             # Preserve the final unreviewed revision when the loop stops here.
             if self._work_item_id and iteration == self._max_review:
@@ -881,6 +1027,9 @@ class WorkflowEngine:
         Returns updated artifact or None to abort.
         """
         target = proposer or self._dev
+        if self._auto_approve:
+            console.print("[dim]Auto-approve enabled; continuing without user checkpoint.[/dim]")
+            return artifact
         while True:
             response = self._ask(prompt_text)
             if response.lower() in ("", "y", "yes"):

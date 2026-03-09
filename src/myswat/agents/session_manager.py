@@ -62,7 +62,7 @@ class SessionManager:
         self, purpose: str | None = None, work_item_id: int | None = None,
     ) -> Session:
         """Create a new session or resume an active one for this agent."""
-        existing = self._store.get_active_session(self._agent_row["id"])
+        existing = self._store.get_active_session(self._agent_row["id"], work_item_id=work_item_id)
         if existing:
             self._session = existing
             return existing

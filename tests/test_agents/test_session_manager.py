@@ -41,6 +41,7 @@ class TestCreateOrResume:
         session = sm.create_or_resume(purpose="test")
 
         assert session.id == 10
+        store.get_active_session.assert_called_once_with(1, work_item_id=None)
         store.create_session.assert_called_once()
 
     def test_resumes_existing_session(self):
@@ -51,6 +52,18 @@ class TestCreateOrResume:
         session = sm.create_or_resume()
 
         assert session.id == 5
+        store.get_active_session.assert_called_once_with(1, work_item_id=None)
+        store.create_session.assert_not_called()
+
+    def test_resumes_existing_session_scoped_by_work_item(self):
+        sm, store, _ = _make_sm()
+        existing = Session(id=8, agent_id=1, session_uuid="work-item-uuid", work_item_id=42)
+        store.get_active_session.return_value = existing
+
+        session = sm.create_or_resume(work_item_id=42)
+
+        assert session.id == 8
+        store.get_active_session.assert_called_once_with(1, work_item_id=42)
         store.create_session.assert_not_called()
 
 
