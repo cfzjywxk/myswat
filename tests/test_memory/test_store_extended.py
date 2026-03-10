@@ -388,6 +388,46 @@ class TestWorkItemState:
         assert '"todo 1"' in payload
         assert '"issue 1"' in payload
 
+    def test_get_work_item_process_log_returns_empty_when_missing(self, store, mock_pool):
+        mock_pool.fetch_one.return_value = None
+        assert store.get_work_item_process_log("missing") == []
+
+    def test_append_work_item_process_event_persists_event(self, store, mock_pool):
+        mock_pool.fetch_one.return_value = {
+            "id": "w1",
+            "metadata_json": '{"task_state": {"current_stage": "design"}}',
+        }
+
+        event = store.append_work_item_process_event(
+            "w1",
+            event_type="handoff",
+            title="Architect delegation",
+            summary="Send finalized design doc update to developer.",
+            from_role="architect",
+            to_role="developer",
+            updated_by_agent_id=7,
+        )
+
+        assert event["type"] == "handoff"
+        assert event["from_role"] == "architect"
+        assert event["to_role"] == "developer"
+
+        args = mock_pool.execute.call_args[0][1]
+        payload = args[0]
+        assert '"process_log"' in payload
+        assert '"Architect delegation"' in payload
+        assert '"architect"' in payload
+        assert '"developer"' in payload
+
+    def test_get_work_item_process_log_returns_log(self, store, mock_pool):
+        mock_pool.fetch_one.return_value = {
+            "id": "w1",
+            "metadata_json": '{"task_state": {"process_log": [{"type": "handoff", "summary": "x"}]}}',
+        }
+
+        result = store.get_work_item_process_log("w1")
+        assert result == [{"type": "handoff", "summary": "x"}]
+
 
 # ── 13. get_artifact ───────────────────────────────────────────────────
 

@@ -25,6 +25,7 @@ def _make_turn(turn_index=0, role="user", content="hello", session_id=1):
 @pytest.fixture
 def mock_store():
     store = MagicMock()
+    store.get_project.return_value = {"id": 1, "slug": "proj", "repo_path": "/tmp/proj"}
     store.list_knowledge.return_value = []
     store.search_knowledge.return_value = []
     store.get_session.return_value = None
@@ -117,6 +118,14 @@ class TestBuildContextForAgent:
         )
         assert "Auth Flow" in result
 
+    def test_includes_myswat_command_guide(self, retriever, mock_store):
+        result = retriever.build_context_for_agent(
+            project_id=1, agent_id=1, repo_path="/tmp/proj",
+        )
+        assert "MySwat Project Access" in result
+        assert "./myswat status -p proj" in result
+        assert "/status" in result
+
     def test_includes_current_session_turns(self, retriever, mock_store):
         mock_store.get_session.return_value = {"compacted_through_turn_index": -1}
         mock_store.get_session_turns.return_value = [
@@ -161,6 +170,30 @@ class TestBuildContextForAgent:
         result = retriever.build_context_for_agent(project_id=1, agent_id=1)
         assert "Refactor DB layer" in result
 
+    def test_includes_active_work_item_flow_summary(self, retriever, mock_store):
+        mock_store.list_work_items.return_value = [
+            {
+                "title": "Refactor DB layer",
+                "status": "in_progress",
+                "priority": 2,
+                "metadata_json": {
+                    "task_state": {
+                        "current_stage": "review_loop_reviewing",
+                        "process_log": [
+                            {
+                                "from_role": "architect",
+                                "to_role": "developer",
+                                "title": "Architect delegation",
+                                "summary": "Update the design doc",
+                            }
+                        ],
+                    }
+                },
+            },
+        ]
+        result = retriever.build_context_for_agent(project_id=1, agent_id=1)
+        assert "flow: architect -> developer" in result
+
     def test_includes_raw_history_when_insufficient(self, retriever, mock_store):
         # Fewer than threshold knowledge results
         mock_store.search_knowledge.return_value = [
@@ -190,7 +223,7 @@ class TestBuildContextForAgent:
 
     def test_empty_context(self, retriever, mock_store):
         result = retriever.build_context_for_agent(project_id=1, agent_id=1)
-        assert result == ""
+        assert "MySwat Project Access" in result
 
 
 # ===================================================================

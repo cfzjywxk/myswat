@@ -22,6 +22,7 @@ from myswat.agents.session_manager import SessionManager
 from myswat.cli.progress import (
     _build_live_display,
     _check_esc,
+    _describe_process_event,
     _fmt_duration,
     _run_with_task_monitor,
     _send_with_timer,
@@ -340,25 +341,31 @@ def run_chat(
             delegation_task = _extract_delegation(response.content)
             if delegation_task and current_role == "architect":
                 console.print(
-                    f"\n[bold cyan]Architect wants to delegate:[/bold cyan] {delegation_task[:120]}"
+                    f"\n[bold cyan]Architect delegated to developer:[/bold cyan] {delegation_task[:160]}"
                 )
-                try:
-                    confirm = prompt_session.prompt(
-                        "Start dev+review loop? [Y/n] > ",
-                        multiline=False,
-                    ).strip().lower()
-                except (EOFError, KeyboardInterrupt):
-                    confirm = "n"
-                if confirm in ("", "y", "yes"):
-                    if sm:
-                        with console.status("[dim]Saving session to TiDB...[/dim]", spinner="dots"):
-                            sm.close()
-                    _run_inline_review_interactive(
-                        store, proj, compactor, effective_workdir, settings, delegation_task,
-                    )
-                    sm = _switch_agent(current_role)
-                else:
-                    console.print("[dim]Delegation skipped.[/dim]")
+                console.print("[dim]Starting dev+QA review loop automatically.[/dim]")
+                if sm:
+                    with console.status("[dim]Saving session to TiDB...[/dim]", spinner="dots"):
+                        sm.close()
+                _run_inline_review_interactive(
+                    store,
+                    proj,
+                    compactor,
+                    effective_workdir,
+                    settings,
+                    delegation_task,
+                    initial_process_events=[
+                        {
+                            "event_type": "delegation",
+                            "title": "Architect delegation",
+                            "summary": delegation_task,
+                            "from_role": "architect",
+                            "to_role": "developer",
+                            "updated_by_agent_id": getattr(sm, "agent_id", None),
+                        }
+                    ],
+                )
+                sm = _switch_agent(current_role)
         else:
             console.print(Panel(
                 response.content,
@@ -380,6 +387,7 @@ def _show_status(store: MemoryStore, pool: TiDBPool, proj: dict) -> None:
     items = list(store.list_work_items(proj["id"]))
     active = [i for i in items if i["status"] in ("in_progress", "review", "pending")]
     if active:
+        active_with_state: list[tuple[dict, dict]] = []
         table = Table(title="Work Items")
         table.add_column("ID", style="cyan")
         table.add_column("Status")
@@ -388,11 +396,21 @@ def _show_status(store: MemoryStore, pool: TiDBPool, proj: dict) -> None:
         for item in active[:10]:
             metadata = item.get("metadata_json") if isinstance(item, dict) else None
             task_state = metadata.get("task_state") if isinstance(metadata, dict) else {}
+            if not isinstance(task_state, dict):
+                task_state = {}
+            active_with_state.append((item, task_state))
             stage = "-"
-            if isinstance(task_state, dict):
-                stage = _single_line_preview(task_state.get("current_stage"), 30) or "-"
+            stage = _single_line_preview(task_state.get("current_stage"), 30) or "-"
             table.add_row(str(item["id"]), item["status"], stage, item["title"][:50])
         console.print(table)
+        for item, task_state in active_with_state[:3]:
+            process_log = task_state.get("process_log")
+            if not isinstance(process_log, list) or not process_log:
+                continue
+            console.print(f"\n[bold]Work Item #{item['id']} Flow[/bold] — {item['title'][:80]}")
+            for event in process_log[-8:]:
+                if isinstance(event, dict):
+                    console.print(f"  - {_describe_process_event(event, 140)}")
     else:
         console.print("[dim]No active work items.[/dim]")
 
@@ -440,6 +458,12 @@ def _show_task_details(store: MemoryStore, proj: dict, work_item_id: int | None 
             console.print("[bold]Open Issues:[/bold]")
             for issue in state["open_issues"][:10]:
                 console.print(f"  - {issue}")
+        process_log = state.get("process_log")
+        if isinstance(process_log, list) and process_log:
+            console.print("[bold]Process Log:[/bold]")
+            for event in process_log[-20:]:
+                if isinstance(event, dict):
+                    console.print(f"  - {_describe_process_event(event, 160)}")
 
     artifacts = store.list_artifacts(work_item_id)
     if isinstance(artifacts, list) and artifacts:
@@ -458,6 +482,7 @@ def _run_inline_review(
     should_cancel: Callable[[], bool] | None = None,
     on_work_item_created: Callable[[int], None] | None = None,
     register_cancel_target: Callable[[AgentRunner], None] | None = None,
+    initial_process_events: list[dict] | None = None,
 ) -> None:
     """Run a dev+reviewer loop from within the chat REPL."""
     from myswat.workflow.review_loop import run_review_loop
@@ -494,6 +519,29 @@ def _run_inline_review(
     if on_work_item_created:
         on_work_item_created(work_item_id)
     store.update_work_item_status(work_item_id, "in_progress")
+    kickoff_events = initial_process_events or [
+        {
+            "event_type": "task_request",
+            "title": "Review loop task",
+            "summary": task,
+            "from_role": "user",
+            "to_role": "developer",
+            "updated_by_agent_id": None,
+        }
+    ]
+    for event in kickoff_events:
+        try:
+            store.append_work_item_process_event(
+                work_item_id,
+                event_type=event.get("event_type", "task_request"),
+                title=event.get("title"),
+                summary=event.get("summary", task),
+                from_role=event.get("from_role"),
+                to_role=event.get("to_role"),
+                updated_by_agent_id=event.get("updated_by_agent_id"),
+            )
+        except Exception:
+            pass
 
     dev_sm.create_or_resume(purpose=f"Dev: {task[:100]}", work_item_id=work_item_id)
     reviewer_sm.create_or_resume(purpose=f"Review: {task[:100]}", work_item_id=work_item_id)
@@ -636,6 +684,7 @@ def _run_inline_review_interactive(
     workdir: str | None,
     settings: MySwatSettings,
     task: str,
+    initial_process_events: list[dict] | None = None,
 ) -> None:
     work_item_ref: dict[str, int | None] = {"id": None}
     cancel_targets: list[AgentRunner] = []
@@ -652,6 +701,7 @@ def _run_inline_review_interactive(
             should_cancel=cancel_event.is_set,
             on_work_item_created=lambda wid: work_item_ref.__setitem__("id", wid),
             register_cancel_target=cancel_targets.append,
+            initial_process_events=initial_process_events,
         )
 
     _run_with_task_monitor(

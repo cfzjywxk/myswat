@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from rich.console import Console
 
+from myswat.cli.progress import _preview_text
 from myswat.models.work_item import ReviewVerdict
 from myswat.workflow.prompts import DEVELOPER_INITIAL, DEVELOPER_REVISION, REVIEWER
 
@@ -97,6 +98,28 @@ def run_review_loop(
         except Exception:
             pass
 
+    def _append_process_event(
+        *,
+        event_type: str,
+        summary: str,
+        from_role: str | None = None,
+        to_role: str | None = None,
+        title: str | None = None,
+        updated_by_agent_id: int | None = None,
+    ) -> None:
+        try:
+            store.append_work_item_process_event(
+                work_item_id,
+                event_type=event_type,
+                title=title,
+                summary=_preview_text(summary, 1600),
+                from_role=from_role,
+                to_role=to_role,
+                updated_by_agent_id=updated_by_agent_id,
+            )
+        except Exception:
+            pass
+
     for iteration in range(1, max_iterations + 1):
         if should_cancel and should_cancel():
             final_verdict = ReviewVerdict(
@@ -167,6 +190,14 @@ def run_review_loop(
             last_artifact_id=artifact_id,
             updated_by_agent_id=dev_sm.agent_id,
         )
+        _append_process_event(
+            event_type="review_request",
+            title=f"Iteration {iteration} submission",
+            summary=artifact_content,
+            from_role=dev_sm.agent_role,
+            to_role=reviewer_sm.agent_role,
+            updated_by_agent_id=dev_sm.agent_id,
+        )
 
         # === Reviewer turn ===
         review_prompt = REVIEWER.format(
@@ -217,6 +248,20 @@ def run_review_loop(
         if verdict.issues:
             for issue in verdict.issues:
                 console.print(f"  [red]• {issue}[/red]")
+
+        verdict_summary = verdict.summary or ""
+        if verdict.issues:
+            verdict_summary = (verdict_summary + " Issues: " if verdict_summary else "Issues: ") + "; ".join(verdict.issues[:6])
+        if not verdict_summary:
+            verdict_summary = verdict.verdict
+        _append_process_event(
+            event_type="review_response",
+            title=f"Iteration {iteration} verdict: {verdict.verdict}",
+            summary=verdict_summary,
+            from_role=reviewer_sm.agent_role,
+            to_role=dev_sm.agent_role,
+            updated_by_agent_id=reviewer_sm.agent_id,
+        )
 
         if verdict.verdict == "lgtm":
             console.print(f"\n[bold green]Review passed at iteration {iteration}![/bold green]")

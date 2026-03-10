@@ -946,6 +946,69 @@ class TestRunChat:
         run_chat("proj")
         mock_send_timer.assert_called_once()
 
+    @patch("myswat.cli.chat_cmd._run_inline_review_interactive")
+    @patch("myswat.cli.chat_cmd._send_with_timer")
+    @patch("myswat.cli.chat_cmd.PromptSession")
+    @patch("myswat.cli.chat_cmd.preload_model")
+    @patch("myswat.cli.chat_cmd.MySwatSettings")
+    @patch("myswat.cli.chat_cmd.TiDBPool")
+    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.MemoryStore")
+    @patch("myswat.cli.chat_cmd.SessionManager")
+    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
+    @patch("myswat.cli.learn_cmd.ensure_learned")
+    def test_architect_delegation_auto_starts_review_loop(
+        self,
+        mock_learn,
+        mock_comp,
+        mock_sm_cls,
+        mock_store_cls,
+        mock_mig,
+        mock_pool_cls,
+        mock_settings_cls,
+        mock_preload,
+        mock_prompt_session_cls,
+        mock_send_timer,
+        mock_review,
+    ):
+        from myswat.cli.chat_cmd import run_chat
+
+        settings = self._setup_mocks()
+        mock_settings_cls.return_value = settings
+
+        architect_row = _agent_row("architect")
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = _proj()
+        mock_store.get_agent.return_value = architect_row
+        mock_store.list_agents.return_value = [architect_row]
+        mock_store_cls.return_value = mock_store
+
+        sm = MagicMock()
+        sm.session = SimpleNamespace(session_uuid="uuid-1234")
+        sm.agent_id = 9
+        mock_sm_cls.return_value = sm
+
+        mock_send_timer.return_value = (
+            AgentResponse(
+                content="Plan\n```delegate\nTASK: update the design doc\n```",
+                exit_code=0,
+            ),
+            2.0,
+        )
+
+        prompt_session = MagicMock()
+        prompt_session.prompt.side_effect = ["hello", "/quit"]
+        mock_prompt_session_cls.return_value = prompt_session
+
+        run_chat("proj", role="architect")
+
+        mock_review.assert_called_once()
+        review_args = mock_review.call_args.args
+        review_kwargs = mock_review.call_args.kwargs
+        assert review_args[5] == "update the design doc"
+        assert review_kwargs["initial_process_events"][0]["from_role"] == "architect"
+        assert review_kwargs["initial_process_events"][0]["to_role"] == "developer"
+
     @patch("myswat.cli.chat_cmd._send_with_timer")
     @patch("myswat.cli.chat_cmd.PromptSession")
     @patch("myswat.cli.chat_cmd.preload_model")

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 _SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 _MAX_LIVE_LINES = 8
 _TASK_MONITOR_SUMMARY_CHARS = 220
+_TASK_MONITOR_PROCESS_LINES = 4
 _TASK_MONITOR_REFRESH_PER_SECOND = 8
 _TASK_MONITOR_LOOP_INTERVAL = 0.1
 _TASK_MONITOR_STORE_POLL_SECONDS = 1.0
@@ -64,6 +65,16 @@ def _coerce_live_lines(value: object) -> list[str]:
     return [str(line) for line in items if str(line).strip()]
 
 
+def _preview_text(text: str | None, limit: int = _TASK_MONITOR_SUMMARY_CHARS) -> str:
+    """Collapse whitespace and trim text to a single preview line."""
+    if not text:
+        return ""
+    collapsed = " ".join(str(text).split())
+    if len(collapsed) > limit:
+        return collapsed[:limit] + "..."
+    return collapsed
+
+
 def _build_live_display(
     frame_idx: int,
     elapsed: float,
@@ -89,12 +100,28 @@ def _build_live_display(
 
 
 def _single_line_preview(text: str | None, limit: int = _TASK_MONITOR_SUMMARY_CHARS) -> str:
-    if not text:
-        return ""
-    collapsed = " ".join(str(text).split())
-    if len(collapsed) > limit:
-        return collapsed[:limit] + "..."
-    return collapsed
+    return _preview_text(text, limit)
+
+
+def _describe_process_event(event: dict, summary_limit: int = 120) -> str:
+    from_role = _single_line_preview(event.get("from_role"), 30)
+    to_role = _single_line_preview(event.get("to_role"), 30)
+    title = _single_line_preview(event.get("title"), 80)
+    summary = _single_line_preview(event.get("summary"), summary_limit)
+
+    if from_role and to_role:
+        prefix = f"{from_role} -> {to_role}"
+    elif from_role:
+        prefix = from_role
+    elif to_role:
+        prefix = to_role
+    else:
+        prefix = _single_line_preview(event.get("type"), 30) or "event"
+
+    details = title or summary
+    if title and summary and summary != title:
+        details = f"{title}: {summary}"
+    return f"{prefix}: {details}" if details else prefix
 
 
 def _load_task_monitor_snapshot(
@@ -157,6 +184,13 @@ def _build_task_monitor_display(
             text.append("  Open issues:\n", style="yellow")
             for issue in open_issues[:3]:
                 text.append(f"    - {_single_line_preview(issue, 100)}\n", style="yellow")
+
+        process_log = state.get("process_log") or []
+        if process_log:
+            text.append("  Flow:\n", style="cyan")
+            for event in process_log[-_TASK_MONITOR_PROCESS_LINES:]:
+                if isinstance(event, dict):
+                    text.append(f"    - {_describe_process_event(event, 90)}\n", style="cyan")
 
     if cancel_requested:
         text.append(

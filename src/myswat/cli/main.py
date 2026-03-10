@@ -2,6 +2,7 @@
 
 import typer
 
+from myswat.cli.progress import _describe_process_event
 from myswat.cli.memory_cmd import memory_app
 
 app = typer.Typer(
@@ -224,6 +225,15 @@ def _print_task_state(console, item: dict) -> None:
         console.print("[bold]Open issues:[/bold]")
         for issue in task_state["open_issues"][:10]:
             console.print(f"  - {issue}")
+    process_log = task_state.get("process_log")
+    if isinstance(process_log, list) and process_log:
+        console.print("[bold]Process Log:[/bold]")
+        for event in process_log[-20:]:
+            if not isinstance(event, dict):
+                continue
+            timestamp = event.get("at")
+            prefix = f"[{timestamp}] " if timestamp else ""
+            console.print(f"  - {prefix}{_describe_process_event(event, 160)}")
     console.print()
 
 
@@ -357,6 +367,14 @@ def status(
                 item["item_type"], agents_str, item["title"][:50],
             )
         console.print(table)
+
+        active_detail_items = [
+            item for item in items
+            if item.get("status") in ("in_progress", "review", "pending")
+        ]
+        for item in active_detail_items[:5]:
+            console.print(f"\n[bold]Work Item #{item['id']} State[/bold] — {item['title'][:80]}")
+            _print_task_state(console, item)
 
         # ── Teamwork details for recent work items ──
         for item in teamwork_items[:5]:

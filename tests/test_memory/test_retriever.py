@@ -62,7 +62,7 @@ class TestKnowledgeFirstRetriever:
             project_id=1, agent_id=1, task_description="test",
         )
 
-        assert context == ""
+        assert "MySwat Project Access" in context
 
     def test_artifacts_included_in_context(self):
         artifacts = [{

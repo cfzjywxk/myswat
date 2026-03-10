@@ -32,6 +32,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 
+from myswat.cli.progress import _preview_text
 from myswat.models.work_item import ReviewVerdict
 from myswat.workflow.prompts import (
     DEV_ADDRESS_CODE_COMMENTS,
@@ -209,6 +210,31 @@ class WorkflowEngine:
     def _cancelled(self) -> bool:
         return bool(self._should_cancel and self._should_cancel())
 
+    def _append_process_event(
+        self,
+        *,
+        event_type: str,
+        summary: str,
+        from_role: str | None = None,
+        to_role: str | None = None,
+        title: str | None = None,
+        updated_by_agent_id: int | None = None,
+    ) -> None:
+        if not self._work_item_id:
+            return
+        try:
+            self._store.append_work_item_process_event(
+                self._work_item_id,
+                event_type=event_type,
+                title=title,
+                summary=_preview_text(summary, 1600),
+                from_role=from_role,
+                to_role=to_role,
+                updated_by_agent_id=updated_by_agent_id,
+            )
+        except Exception:
+            pass
+
     # ════════════════════════════════════════════════════════════════
     # Main workflow
     # ════════════════════════════════════════════════════════════════
@@ -222,6 +248,14 @@ class WorkflowEngine:
             current_stage="workflow_started",
             latest_summary=requirement,
             next_todos=["Produce technical design"],
+            updated_by_agent_id=self._dev.agent_id,
+        )
+        self._append_process_event(
+            event_type="task_request",
+            title="Workflow requirement",
+            summary=requirement,
+            from_role="user",
+            to_role=self._dev.agent_role,
             updated_by_agent_id=self._dev.agent_id,
         )
 
@@ -382,6 +416,14 @@ class WorkflowEngine:
             next_todos=["Run QA design review"],
             updated_by_agent_id=self._dev.agent_id,
         )
+        self._append_process_event(
+            event_type="design_draft",
+            title="Technical design draft",
+            summary=response.content,
+            from_role=self._dev.agent_role,
+            to_role="qa",
+            updated_by_agent_id=self._dev.agent_id,
+        )
         return response.content
 
     def _run_planning(self, design: str, requirement: str) -> str:
@@ -401,6 +443,14 @@ class WorkflowEngine:
             current_stage="plan_draft",
             latest_summary=response.content[:4000],
             next_todos=["Run QA plan review"],
+            updated_by_agent_id=self._dev.agent_id,
+        )
+        self._append_process_event(
+            event_type="plan_draft",
+            title="Implementation plan draft",
+            summary=response.content,
+            from_role=self._dev.agent_role,
+            to_role="qa",
             updated_by_agent_id=self._dev.agent_id,
         )
         return response.content
@@ -454,6 +504,14 @@ class WorkflowEngine:
             current_stage=f"phase_{phase_index}_under_review",
             latest_summary=summary[:4000],
             next_todos=["QA review this phase summary and inspect the codebase"],
+            updated_by_agent_id=self._dev.agent_id,
+        )
+        self._append_process_event(
+            event_type="phase_summary",
+            title=f"Phase {phase_index} summary",
+            summary=summary,
+            from_role=self._dev.agent_role,
+            to_role="qa",
             updated_by_agent_id=self._dev.agent_id,
         )
 
@@ -540,6 +598,14 @@ class WorkflowEngine:
             current_stage="ga_test_plan_draft",
             latest_summary=test_plan[:4000],
             next_todos=["Review test plan", "Approve and start testing"],
+            updated_by_agent_id=qa_lead.agent_id,
+        )
+        self._append_process_event(
+            event_type="ga_test_plan",
+            title="GA test plan",
+            summary=test_plan,
+            from_role=qa_lead.agent_role,
+            to_role=self._dev.agent_role,
             updated_by_agent_id=qa_lead.agent_id,
         )
 
@@ -937,6 +1003,14 @@ class WorkflowEngine:
 
             for reviewer in revs:
                 console.print(f"[yellow]{reviewer.agent_role} reviewing {artifact_type}...[/yellow]")
+                self._append_process_event(
+                    event_type="review_request",
+                    title=f"{artifact_type} review iteration {iteration}",
+                    summary=current,
+                    from_role=prop.agent_role,
+                    to_role=reviewer.agent_role,
+                    updated_by_agent_id=prop.agent_id,
+                )
 
                 prompt = self._build_review_prompt(artifact_type, context, current, iteration)
                 response = reviewer.send(prompt, task_description=f"Review {artifact_type} (iter {iteration})")
@@ -959,6 +1033,22 @@ class WorkflowEngine:
                         all_issues.append(f"[{reviewer.agent_role}] {verdict.summary}")
                 elif verdict.summary:
                     console.print(f"    [dim]{verdict.summary}[/dim]")
+
+                verdict_summary = verdict.summary or ""
+                if verdict.issues:
+                    verdict_summary = (
+                        (verdict_summary + " Issues: ") if verdict_summary else "Issues: "
+                    ) + "; ".join(verdict.issues[:6])
+                if not verdict_summary:
+                    verdict_summary = verdict.verdict
+                self._append_process_event(
+                    event_type="review_response",
+                    title=f"{artifact_type} review verdict: {verdict.verdict}",
+                    summary=verdict_summary,
+                    from_role=reviewer.agent_role,
+                    to_role=prop.agent_role,
+                    updated_by_agent_id=reviewer.agent_id,
+                )
 
                 # Store review cycle in DB
                 if self._work_item_id and artifact_id:

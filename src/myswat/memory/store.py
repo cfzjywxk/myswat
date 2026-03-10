@@ -19,6 +19,8 @@ from myswat.models.work_item import Artifact, ReviewCycle, WorkItem
 class MemoryStore:
     """Core CRUD interface for sessions, knowledge, work items, artifacts, and review cycles."""
 
+    _PROCESS_LOG_LIMIT = 50
+
     def __init__(self, pool: TiDBPool, tidb_embedding_model: str = "") -> None:
         self._pool = pool
         self._tidb_embedding_model = tidb_embedding_model
@@ -55,6 +57,9 @@ class MemoryStore:
 
     def get_project_by_slug(self, slug: str) -> dict | None:
         return self._pool.fetch_one("SELECT * FROM projects WHERE slug = %s", (slug,))
+
+    def get_project(self, project_id: int) -> dict | None:
+        return self._pool.fetch_one("SELECT * FROM projects WHERE id = %s", (project_id,))
 
     # ──────────────────────────── Agents ────────────────────────────
 
@@ -564,6 +569,11 @@ class MemoryStore:
         task_state = metadata.get("task_state") or {}
         return task_state if isinstance(task_state, dict) else {}
 
+    def get_work_item_process_log(self, item_id: int) -> list[dict[str, Any]]:
+        task_state = self.get_work_item_state(item_id)
+        process_log = task_state.get("process_log") if isinstance(task_state, dict) else None
+        return process_log if isinstance(process_log, list) else []
+
     def update_work_item_state(
         self,
         item_id: int,
@@ -600,6 +610,52 @@ class MemoryStore:
 
         metadata["task_state"] = task_state
         self.update_work_item_metadata(item_id, metadata)
+
+    def append_work_item_process_event(
+        self,
+        item_id: int,
+        *,
+        event_type: str,
+        summary: str,
+        from_role: str | None = None,
+        to_role: str | None = None,
+        title: str | None = None,
+        updated_by_agent_id: int | None = None,
+    ) -> dict[str, Any]:
+        row = self.get_work_item(item_id)
+        metadata = row.get("metadata_json") if row else None
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        task_state = metadata.get("task_state")
+        if not isinstance(task_state, dict):
+            task_state = {}
+
+        process_log = task_state.get("process_log")
+        if not isinstance(process_log, list):
+            process_log = []
+
+        event = {
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "type": event_type[:64],
+            "summary": summary[:4000],
+        }
+        if from_role:
+            event["from_role"] = from_role[:64]
+        if to_role:
+            event["to_role"] = to_role[:64]
+        if title:
+            event["title"] = title[:300]
+
+        process_log.append(event)
+        task_state["process_log"] = process_log[-self._PROCESS_LOG_LIMIT:]
+        if updated_by_agent_id is not None:
+            task_state["updated_by_agent_id"] = updated_by_agent_id
+        task_state["updated_at"] = datetime.now().isoformat(timespec="seconds")
+
+        metadata["task_state"] = task_state
+        self.update_work_item_metadata(item_id, metadata)
+        return event
 
     # ──────────────────────────── Artifacts ────────────────────────────
 

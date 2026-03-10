@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from myswat.cli.progress import _describe_process_event, _preview_text
 from myswat.memory.store import MemoryStore
 
 # Minimum number of knowledge results to consider the knowledge base "trained".
@@ -28,6 +29,32 @@ class MemoryRetriever:
 
     def __init__(self, store: MemoryStore) -> None:
         self._store = store
+
+    def _build_myswat_cli_context(self, project: dict | None, repo_path: str | None) -> str:
+        if not isinstance(project, dict):
+            return ""
+
+        slug = project.get("slug") or "<project-slug>"
+        repo_label = repo_path or project.get("repo_path") or "."
+        launcher = "./myswat"
+
+        return (
+            "## MySwat Project Access\n\n"
+            f"**Project slug**: {slug}\n"
+            f"**Repo root**: {repo_label}\n\n"
+            "Use MySwat itself to inspect persisted project state before claiming information is unavailable.\n\n"
+            "Useful commands from the repo root:\n"
+            f"- `{launcher} status -p {slug}` — show project work items, stages, process logs, review rounds, sessions\n"
+            f"- `{launcher} task <id> -p {slug}` — show one work item with process log, artifacts, and teamwork details\n"
+            f"- `{launcher} memory search \"<query>\" -p {slug}` — search project knowledge\n"
+            f"- `{launcher} memory list -p {slug}` — inspect stored knowledge entries\n"
+            f"- `{launcher} learn -p {slug}` — refresh project operations knowledge\n\n"
+            "Useful commands inside `myswat chat`:\n"
+            "- `/status` — show active work items and recent process flow\n"
+            "- `/task <id>` — show detailed work item state and process log\n"
+            "- `/agents` — list roles/models\n"
+            "- `/history [n]` — show recent turns\n"
+        )
 
     def _load_project_ops(
         self, project_id: int, repo_path: str | None,
@@ -95,6 +122,13 @@ class MemoryRetriever:
             for todo in state["next_todos"][:10]:
                 lines.append(f"- {todo}")
             lines.append("")
+        process_log = state.get("process_log")
+        if isinstance(process_log, list) and process_log:
+            lines.append("### Process Log")
+            for event in process_log[-8:]:
+                if isinstance(event, dict):
+                    lines.append(f"- {_describe_process_event(event, 140)}")
+            lines.append("")
 
         text = "\n".join(lines).strip()
         if len(text) // 4 > budget_tokens:
@@ -120,6 +154,13 @@ class MemoryRetriever:
                 if knowledge is sufficient, this 20% is redistributed to knowledge
         """
         sections: list[str] = []
+        project = self._store.get_project(project_id)
+        if not isinstance(project, dict):
+            project = {}
+
+        cli_context = self._build_myswat_cli_context(project, repo_path)
+        if cli_context:
+            sections.append(cli_context)
 
         # ── 0. Project ops (ALWAYS loaded — build, test, conventions) ──
         # Try local ``myswat.md`` first (fast file read, no TiDB round-trip).
@@ -202,7 +243,28 @@ class MemoryRetriever:
         if all_active:
             work_lines = ["## Active Work Items\n"]
             for item in all_active[:5]:
-                line = f"- [{item['status']}] {item['title']} (priority: {item['priority']})\n"
+                metadata = item.get("metadata_json") if isinstance(item, dict) else None
+                task_state = metadata.get("task_state") if isinstance(metadata, dict) else {}
+                if not isinstance(task_state, dict):
+                    task_state = {}
+                stage = _preview_text(task_state.get("current_stage"), 40)
+                process_log = task_state.get("process_log")
+                latest_flow = ""
+                if isinstance(process_log, list):
+                    for event in reversed(process_log):
+                        if isinstance(event, dict):
+                            latest_flow = _describe_process_event(event, 80)
+                            break
+                extras = []
+                if stage:
+                    extras.append(f"stage: {stage}")
+                if latest_flow:
+                    extras.append(f"flow: {latest_flow}")
+                extra_suffix = f", {'; '.join(extras)}" if extras else ""
+                line = (
+                    f"- [{item['status']}] {item['title']} "
+                    f"(priority: {item['priority']}{extra_suffix})\n"
+                )
                 line_tokens = len(line) // 4
                 if metadata_tokens_used + line_tokens > metadata_budget:
                     break

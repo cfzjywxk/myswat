@@ -226,6 +226,18 @@ def run_with_review(
         assigned_agent_id=dev_agent["id"],
     )
     store.update_work_item_status(work_item_id, "in_progress")
+    try:
+        store.append_work_item_process_event(
+            work_item_id,
+            event_type="task_request",
+            title="Review loop task",
+            summary=task,
+            from_role="user",
+            to_role=dev_agent["role"],
+            updated_by_agent_id=dev_agent["id"],
+        )
+    except Exception:
+        pass
 
     # Create sessions
     dev_sm.create_or_resume(purpose=f"Dev: {task[:100]}", work_item_id=work_item_id)
