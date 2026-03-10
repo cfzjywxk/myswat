@@ -1,5 +1,7 @@
 """MySwat CLI — main entry point."""
 
+import json
+
 import typer
 
 from myswat.cli.progress import _describe_process_event
@@ -90,13 +92,110 @@ def init(
     run_init(name, repo_path, description)
 
 
-def _print_teamwork_details(pool, item, console) -> None:
+def _parse_verdict_payload(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _build_teamwork_flow_entries(pool, item: dict) -> list[dict]:
+    metadata = item.get("metadata_json") if isinstance(item, dict) else None
+    task_state = metadata.get("task_state") if isinstance(metadata, dict) else {}
+    if isinstance(task_state, dict):
+        process_log = task_state.get("process_log")
+        if isinstance(process_log, list) and process_log:
+            return [event for event in process_log if isinstance(event, dict)]
+
+    rows = pool.fetch_all(
+        "SELECT rc.iteration, rc.verdict, rc.verdict_json, "
+        "a1.role AS proposer_role, a2.role AS reviewer_role, "
+        "art.title AS artifact_title, art.artifact_type, art.content AS artifact_content "
+        "FROM review_cycles rc "
+        "JOIN agents a1 ON rc.proposer_agent_id = a1.id "
+        "JOIN agents a2 ON rc.reviewer_agent_id = a2.id "
+        "LEFT JOIN artifacts art ON rc.artifact_id = art.id "
+        "WHERE rc.work_item_id = %s "
+        "ORDER BY rc.created_at, rc.id",
+        (item["id"],),
+    )
+
+    if not rows:
+        return []
+
+    events: list[dict] = []
+    description = item.get("description")
+    if description:
+        events.append({
+            "type": "task_request",
+            "from_role": "request",
+            "to_role": rows[0].get("proposer_role") or "developer",
+            "title": "Task request",
+            "summary": description,
+        })
+
+    for row in rows:
+        artifact_summary = row.get("artifact_content") or row.get("artifact_title") or row.get("artifact_type") or ""
+        events.append({
+            "type": "review_request",
+            "from_role": row.get("proposer_role"),
+            "to_role": row.get("reviewer_role"),
+            "title": row.get("artifact_title") or row.get("artifact_type") or f"Iteration {row.get('iteration')}",
+            "summary": artifact_summary,
+        })
+
+        verdict_payload = _parse_verdict_payload(row.get("verdict_json"))
+        verdict_summary = verdict_payload.get("summary") or row.get("verdict") or ""
+        issues = verdict_payload.get("issues")
+        if isinstance(issues, list) and issues:
+            issue_text = "; ".join(str(issue) for issue in issues[:6])
+            verdict_summary = f"{verdict_summary} Issues: {issue_text}" if verdict_summary else f"Issues: {issue_text}"
+        events.append({
+            "type": "review_response",
+            "from_role": row.get("reviewer_role"),
+            "to_role": row.get("proposer_role"),
+            "title": f"Verdict: {row.get('verdict', '?')}",
+            "summary": verdict_summary or row.get("verdict") or "",
+        })
+
+    return events
+
+
+def _print_message_flow(tree, flow_entries: list[dict]) -> None:
+    flow_branch = tree.add("[bold]Message Flow[/bold]")
+    last_node = None
+    for entry in flow_entries[-20:]:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") == "reaction" and entry.get("from_role") == "myswat" and last_node is not None:
+            summary = str(entry.get("summary") or "").strip()
+            if summary:
+                last_node.add(f"MySwat next: {summary}")
+            continue
+        from_role = entry.get("from_role") or "event"
+        to_role = entry.get("to_role")
+        title = entry.get("title") or entry.get("type") or "Message"
+        header = f"{from_role} -> {to_role}: {title}" if to_role else f"{from_role}: {title}"
+        node = flow_branch.add(header)
+        last_node = node
+
+        summary = str(entry.get("summary") or "").strip()
+        if summary:
+            node.add(summary)
+
+
+def _print_teamwork_details(pool, item, console, details: bool = False) -> None:
     """Print collaboration details for a teamwork work item."""
     from rich.table import Table
     from rich.tree import Tree
 
     item_id = item["id"]
-    title = item["title"][:60]
+    title = item["title"] if details else item["title"][:60]
 
     tree = Tree(
         f"[bold]Work Item #{item_id}:[/bold] {title} "
@@ -152,6 +251,11 @@ def _print_teamwork_details(pool, item, console) -> None:
                 f"[dim]reviewed:[/dim] [{verdict_style}]{final_verdict}[/{verdict_style}] "
                 f"[dim]({iter_note})[/dim]"
             )
+
+    if details:
+        flow_entries = _build_teamwork_flow_entries(pool, item)
+        if flow_entries:
+            _print_message_flow(tree, flow_entries)
 
     # ── Artifacts ──
     artifacts = pool.fetch_all(
@@ -276,6 +380,7 @@ def _infer_stage_labels(rounds: list[dict]) -> list[str]:
 @app.command()
 def status(
     project: str = typer.Option(..., "--project", "-p", help="Project slug"),
+    details: bool = typer.Option(False, "--details", help="Show detailed work-item flow and review data"),
 ):
     """Show project status: active work items, sessions, agents."""
     from rich.console import Console
@@ -368,17 +473,14 @@ def status(
             )
         console.print(table)
 
-        active_detail_items = [
-            item for item in items
-            if item.get("status") in ("in_progress", "review", "pending")
-        ]
-        for item in active_detail_items[:5]:
-            console.print(f"\n[bold]Work Item #{item['id']} State[/bold] — {item['title'][:80]}")
-            _print_task_state(console, item)
+        if details:
+            for item in items[:10]:
+                console.print(f"\n[bold]Work Item #{item['id']} State[/bold] — {item['title'][:80]}")
+                _print_task_state(console, item)
 
-        # ── Teamwork details for recent work items ──
-        for item in teamwork_items[:5]:
-            _print_teamwork_details(pool, item, console)
+            # ── Teamwork details for recent work items ──
+            for item in teamwork_items[:10]:
+                _print_teamwork_details(pool, item, console, details=True)
     else:
         console.print("\n[dim]No work items yet.[/dim]")
 
@@ -533,7 +635,7 @@ def task(
         console.print(f"[bold]Description:[/bold] {item['description'][:500]}")
 
     _print_task_state(console, item)
-    _print_teamwork_details(pool, item, console)
+    _print_teamwork_details(pool, item, console, details=True)
 
 
 if __name__ == "__main__":

@@ -45,6 +45,7 @@ class MemoryRetriever:
             "Use MySwat itself to inspect persisted project state before claiming information is unavailable.\n\n"
             "Useful commands from the repo root:\n"
             f"- `{launcher} status -p {slug}` — show project work items, stages, process logs, review rounds, sessions\n"
+            f"- `{launcher} status -p {slug} --details` — show detailed handoffs, process logs, and review breakdowns\n"
             f"- `{launcher} task <id> -p {slug}` — show one work item with process log, artifacts, and teamwork details\n"
             f"- `{launcher} memory search \"<query>\" -p {slug}` — search project knowledge\n"
             f"- `{launcher} memory list -p {slug}` — inspect stored knowledge entries\n"

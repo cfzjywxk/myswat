@@ -65,11 +65,16 @@ def _coerce_live_lines(value: object) -> list[str]:
     return [str(line) for line in items if str(line).strip()]
 
 
-def _preview_text(text: str | None, limit: int = _TASK_MONITOR_SUMMARY_CHARS) -> str:
-    """Collapse whitespace and trim text to a single preview line."""
+def _collapse_text(text: str | None) -> str:
+    """Collapse arbitrary text into a single whitespace-normalized line."""
     if not text:
         return ""
-    collapsed = " ".join(str(text).split())
+    return " ".join(str(text).split())
+
+
+def _preview_text(text: str | None, limit: int = _TASK_MONITOR_SUMMARY_CHARS) -> str:
+    """Collapse whitespace and trim text to a single preview line."""
+    collapsed = _collapse_text(text)
     if len(collapsed) > limit:
         return collapsed[:limit] + "..."
     return collapsed

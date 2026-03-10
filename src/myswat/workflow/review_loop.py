@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from rich.console import Console
 
-from myswat.cli.progress import _preview_text
+from myswat.cli.progress import _collapse_text
 from myswat.models.work_item import ReviewVerdict
 from myswat.workflow.prompts import DEVELOPER_INITIAL, DEVELOPER_REVISION, REVIEWER
 
@@ -112,7 +112,7 @@ def run_review_loop(
                 work_item_id,
                 event_type=event_type,
                 title=title,
-                summary=_preview_text(summary, 1600),
+                summary=_collapse_text(summary),
                 from_role=from_role,
                 to_role=to_role,
                 updated_by_agent_id=updated_by_agent_id,
@@ -264,6 +264,14 @@ def run_review_loop(
         )
 
         if verdict.verdict == "lgtm":
+            _append_process_event(
+                event_type="reaction",
+                title="MySwat reaction",
+                summary="Accepted QA LGTM and marked the review loop approved.",
+                from_role="myswat",
+                to_role=dev_sm.agent_role,
+                updated_by_agent_id=reviewer_sm.agent_id,
+            )
             console.print(f"\n[bold green]Review passed at iteration {iteration}![/bold green]")
             _persist_state(
                 stage="review_loop_approved",
@@ -280,6 +288,14 @@ def run_review_loop(
             next_todos=["Developer address reviewer feedback"],
             open_issues=verdict.issues or ([verdict.summary] if verdict.summary else []),
             last_artifact_id=artifact_id,
+            updated_by_agent_id=reviewer_sm.agent_id,
+        )
+        _append_process_event(
+            event_type="reaction",
+            title="MySwat reaction",
+            summary="Collected QA feedback and asked developer to revise the submission.",
+            from_role="myswat",
+            to_role=dev_sm.agent_role,
             updated_by_agent_id=reviewer_sm.agent_id,
         )
 

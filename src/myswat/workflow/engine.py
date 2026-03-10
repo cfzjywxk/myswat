@@ -32,7 +32,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 
-from myswat.cli.progress import _preview_text
+from myswat.cli.progress import _collapse_text
 from myswat.models.work_item import ReviewVerdict
 from myswat.workflow.prompts import (
     DEV_ADDRESS_CODE_COMMENTS,
@@ -227,7 +227,7 @@ class WorkflowEngine:
                 self._work_item_id,
                 event_type=event_type,
                 title=title,
-                summary=_preview_text(summary, 1600),
+                summary=_collapse_text(summary),
                 from_role=from_role,
                 to_role=to_role,
                 updated_by_agent_id=updated_by_agent_id,
@@ -1071,6 +1071,14 @@ class WorkflowEngine:
                         console.print(f"[dim red]Warning: Failed to persist review cycle: {e}[/dim red]")
 
             if all_lgtm:
+                self._append_process_event(
+                    event_type="reaction",
+                    title="MySwat reaction",
+                    summary=f"Accepted all reviewer LGTM responses and advanced the {artifact_type} stage.",
+                    from_role="myswat",
+                    to_role=prop.agent_role,
+                    updated_by_agent_id=prop.agent_id,
+                )
                 console.print(f"\n[bold green]All reviewers gave LGTM at iteration {iteration}![/bold green]")
                 self._persist_task_state(
                     current_stage=f"{artifact_type}_approved",
@@ -1090,6 +1098,14 @@ class WorkflowEngine:
                 next_todos=[f"{prop.agent_role} address {len(all_issues)} review comment(s)"],
                 open_issues=all_issues,
                 last_artifact_id=artifact_id,
+                updated_by_agent_id=prop.agent_id,
+            )
+            self._append_process_event(
+                event_type="reaction",
+                title="MySwat reaction",
+                summary=f"Collected {len(all_issues)} review comment(s) and asked {prop.agent_role} to revise the {artifact_type}.",
+                from_role="myswat",
+                to_role=prop.agent_role,
                 updated_by_agent_id=prop.agent_id,
             )
             feedback = "\n".join(f"- {issue}" for issue in all_issues)

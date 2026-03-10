@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import io
 from unittest.mock import MagicMock, patch
 
 import pytest
 from click.exceptions import Exit as ClickExit
+from rich.console import Console
 
 from myswat.cli.main import _print_teamwork_details, _infer_stage_labels
 
@@ -142,6 +144,49 @@ class TestPrintTeamworkDetails:
 
         _print_teamwork_details(pool, item, console)
 
+    def test_details_mode_shows_message_flow(self):
+        pool = MagicMock()
+        pool.fetch_all.side_effect = [
+            [
+                {
+                    "iteration": 1, "verdict": "changes_requested",
+                    "created_at": "2026-03-07",
+                    "proposer_role": "developer", "proposer_name": "Dev",
+                    "reviewer_role": "qa_main", "reviewer_name": "QA",
+                },
+            ],
+            [
+                {
+                    "iteration": 1,
+                    "verdict": "changes_requested",
+                    "verdict_json": '{"verdict":"changes_requested","summary":"Needs more detail","issues":["add phase scope"]}',
+                    "proposer_role": "developer",
+                    "reviewer_role": "qa_main",
+                    "artifact_title": "Iteration 1",
+                    "artifact_type": "proposal",
+                    "artifact_content": "Initial design draft",
+                },
+            ],
+            [],
+            [],
+        ]
+
+        item = {
+            "id": 1,
+            "title": "Implement auth",
+            "status": "completed",
+            "description": "Architect request to developer",
+        }
+        output = io.StringIO()
+        console = Console(file=output, force_terminal=False, width=120)
+
+        _print_teamwork_details(pool, item, console, details=True)
+
+        rendered = output.getvalue()
+        assert "Message Flow" in rendered
+        assert "developer -> qa_main" in rendered
+        assert "qa_main -> developer" in rendered
+
     def test_tokens_under_1000(self):
         pool = MagicMock()
         pool.fetch_all.side_effect = [
@@ -173,14 +218,16 @@ class TestStatusCommand:
     @patch("myswat.memory.store.MemoryStore")
     def test_project_not_found(self, mock_store_cls, mock_pool_cls,
                                 mock_settings_cls):
-        from myswat.cli.main import status
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
 
         mock_store = MagicMock()
         mock_store.get_project_by_slug.return_value = None
         mock_store_cls.return_value = mock_store
 
-        with pytest.raises(ClickExit):
-            status(project="missing")
+        runner = CliRunner()
+        result = runner.invoke(app, ["status", "--project", "missing"])
+        assert result.exit_code == 1
 
     @patch("myswat.cli.main._print_teamwork_details")
     @patch("myswat.config.settings.MySwatSettings")
@@ -188,7 +235,8 @@ class TestStatusCommand:
     @patch("myswat.memory.store.MemoryStore")
     def test_with_agents_and_items(self, mock_store_cls, mock_pool_cls,
                                     mock_settings_cls, mock_teamwork):
-        from myswat.cli.main import status
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
 
         mock_store = MagicMock()
         mock_store.get_project_by_slug.return_value = {
@@ -219,7 +267,9 @@ class TestStatusCommand:
         ]
         mock_pool_cls.return_value = pool
 
-        status(project="proj")
+        runner = CliRunner()
+        result = runner.invoke(app, ["status", "--project", "proj"])
+        assert result.exit_code == 0
 
 
 class TestTaskCommand:
@@ -285,7 +335,8 @@ class TestTaskCommand:
     @patch("myswat.db.connection.TiDBPool")
     @patch("myswat.memory.store.MemoryStore")
     def test_no_items(self, mock_store_cls, mock_pool_cls, mock_settings_cls):
-        from myswat.cli.main import status
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
 
         mock_store = MagicMock()
         mock_store.get_project_by_slug.return_value = {
@@ -303,7 +354,9 @@ class TestTaskCommand:
         ]
         mock_pool_cls.return_value = pool
 
-        status(project="proj")
+        runner = CliRunner()
+        result = runner.invoke(app, ["status", "--project", "proj"])
+        assert result.exit_code == 0
 
     @patch("myswat.cli.main._print_teamwork_details")
     @patch("myswat.config.settings.MySwatSettings")
@@ -311,7 +364,8 @@ class TestTaskCommand:
     @patch("myswat.memory.store.MemoryStore")
     def test_with_teamwork_items(self, mock_store_cls, mock_pool_cls,
                                   mock_settings_cls, mock_teamwork):
-        from myswat.cli.main import status
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
 
         mock_store = MagicMock()
         mock_store.get_project_by_slug.return_value = {
@@ -344,7 +398,53 @@ class TestTaskCommand:
         ]
         mock_pool_cls.return_value = pool
 
-        status(project="proj")
+        runner = CliRunner()
+        result = runner.invoke(app, ["status", "--project", "proj"])
+        assert result.exit_code == 0
+        mock_teamwork.assert_not_called()
+
+    @patch("myswat.cli.main._print_teamwork_details")
+    @patch("myswat.config.settings.MySwatSettings")
+    @patch("myswat.db.connection.TiDBPool")
+    @patch("myswat.memory.store.MemoryStore")
+    def test_with_teamwork_items_details(self, mock_store_cls, mock_pool_cls,
+                                         mock_settings_cls, mock_teamwork):
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
+
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = {
+            "id": 1, "slug": "proj", "name": "Proj", "repo_path": "/tmp",
+        }
+        mock_store.list_agents.return_value = []
+        mock_store.list_work_items.return_value = [
+            {
+                "id": 1, "status": "completed", "item_type": "code_change",
+                "title": "Teamwork task", "assigned_agent_id": 1,
+            },
+        ]
+        mock_store.count_session_turns.return_value = 5
+        mock_store_cls.return_value = mock_store
+
+        pool = MagicMock()
+        pool.fetch_all.side_effect = [
+            [
+                {
+                    "proposer_agent_id": 1, "reviewer_agent_id": 2,
+                    "proposer_role": "developer", "reviewer_role": "qa_main",
+                },
+            ],
+            [],
+        ]
+        pool.fetch_one.side_effect = [
+            {"cnt": 5},
+            {"cnt": 1},
+        ]
+        mock_pool_cls.return_value = pool
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["status", "--project", "proj", "--details"])
+        assert result.exit_code == 0
         mock_teamwork.assert_called_once()
 
     @patch("myswat.config.settings.MySwatSettings")
@@ -352,7 +452,8 @@ class TestTaskCommand:
     @patch("myswat.memory.store.MemoryStore")
     def test_with_active_sessions(self, mock_store_cls, mock_pool_cls,
                                    mock_settings_cls):
-        from myswat.cli.main import status
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
         import json as _json
 
         mock_store = MagicMock()
@@ -395,14 +496,17 @@ class TestTaskCommand:
         ]
         mock_pool_cls.return_value = pool
 
-        status(project="proj")
+        runner = CliRunner()
+        result = runner.invoke(app, ["status", "--project", "proj"])
+        assert result.exit_code == 0
 
     @patch("myswat.config.settings.MySwatSettings")
     @patch("myswat.db.connection.TiDBPool")
     @patch("myswat.memory.store.MemoryStore")
     def test_solo_item_with_session_agents(self, mock_store_cls, mock_pool_cls,
                                             mock_settings_cls):
-        from myswat.cli.main import status
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
 
         mock_store = MagicMock()
         mock_store.get_project_by_slug.return_value = {
@@ -429,14 +533,17 @@ class TestTaskCommand:
         ]
         mock_pool_cls.return_value = pool
 
-        status(project="proj")
+        runner = CliRunner()
+        result = runner.invoke(app, ["status", "--project", "proj"])
+        assert result.exit_code == 0
 
     @patch("myswat.config.settings.MySwatSettings")
     @patch("myswat.db.connection.TiDBPool")
     @patch("myswat.memory.store.MemoryStore")
     def test_with_repo_path(self, mock_store_cls, mock_pool_cls,
                              mock_settings_cls):
-        from myswat.cli.main import status
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
 
         mock_store = MagicMock()
         mock_store.get_project_by_slug.return_value = {
@@ -454,7 +561,9 @@ class TestTaskCommand:
         ]
         mock_pool_cls.return_value = pool
 
-        status(project="proj")
+        runner = CliRunner()
+        result = runner.invoke(app, ["status", "--project", "proj"])
+        assert result.exit_code == 0
 
 
 # ---------------------------------------------------------------------------
