@@ -4,9 +4,10 @@ import re
 import pytest
 from unittest.mock import MagicMock, patch
 
-from myswat.cli.chat_cmd import _extract_delegation, _fmt_duration, _build_live_display
+from myswat.cli.chat_cmd import _extract_delegation
 from myswat.cli.init_cmd import _slugify
 from myswat.cli.main import _infer_stage_labels
+from myswat.cli.progress import _fmt_duration, _build_live_display
 
 
 # ── _fmt_duration ──
@@ -115,7 +116,7 @@ class TestBuildLiveDisplay:
     def test_empty_lines(self):
         result = _build_live_display(0, 0.0, [])
         plain = result.plain
-        assert "Agent working" in plain
+        assert "Waiting for AI agent" in plain
 
 
 # ── _slugify ──

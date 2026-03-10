@@ -12,12 +12,18 @@ Re-running ``myswat learn`` replaces previous project_ops knowledge.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.live import Live
+from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
+from myswat.cli.progress import _SPINNER_FRAMES, _coerce_live_lines, _fmt_duration
 from myswat.config.settings import MySwatSettings
 from myswat.db.connection import TiDBPool
 from myswat.db.schema import run_migrations
@@ -97,6 +103,88 @@ MAX_FILE_BYTES = 12_000
 
 # Required top-level keys in the architect's output
 REQUIRED_KEYS = {"build", "test", "structure"}
+_LEARN_WAIT_LIVE_LINES = 6
+
+
+def _stage_start(console: Console, stage_num: int, total_stages: int, label: str) -> float:
+    """Print a stage header and return its start timestamp."""
+    console.print(f"\n[bold cyan]Stage {stage_num}/{total_stages}:[/bold cyan] {label}")
+    return time.monotonic()
+
+
+def _stage_done(
+    console: Console,
+    stage_num: int,
+    total_stages: int,
+    started_at: float,
+    detail: str | None = None,
+) -> None:
+    """Print a stage completion line with elapsed time."""
+    message = (
+        f"[green]Stage {stage_num}/{total_stages} complete.[/green] "
+        f"[dim]({_fmt_duration(time.monotonic() - started_at)})[/dim]"
+    )
+    if detail:
+        message += f" [dim]{detail}[/dim]"
+    console.print(message)
+
+
+def _build_wait_display(frame_idx: int, elapsed: float, live_lines: list[str]) -> Panel:
+    """Build the live wait display shown while the architect agent is working."""
+    frame = _SPINNER_FRAMES[frame_idx % len(_SPINNER_FRAMES)]
+    whole_seconds = int(elapsed)
+    seconds_label = "second" if whole_seconds == 1 else "seconds"
+    text = Text()
+    text.append(
+        f"{frame} Waiting for AI agent... {whole_seconds} {seconds_label}\n",
+        style="bold yellow",
+    )
+
+    if live_lines:
+        tail = live_lines[-_LEARN_WAIT_LIVE_LINES:]
+        if len(live_lines) > _LEARN_WAIT_LIVE_LINES:
+            skipped = len(live_lines) - _LEARN_WAIT_LIVE_LINES
+            text.append(f"{skipped} earlier update(s) hidden\n", style="dim")
+        text.append("Latest agent updates:\n", style="bold")
+        for line in tail:
+            text.append(f"  {line}\n", style="dim")
+    else:
+        text.append(
+            "Architect is analyzing discovered files and extracting project knowledge.\n",
+            style="dim",
+        )
+
+    return Panel.fit(text, title="myswat learn", border_style="yellow")
+
+
+def _invoke_with_wait_display(console: Console, runner, prompt: str):
+    """Invoke the architect runner while showing a live wait display."""
+    result = [None]
+    error = [None]
+    started_at = time.monotonic()
+
+    def _run():
+        try:
+            result[0] = runner.invoke(prompt)
+        except Exception as exc:
+            error[0] = exc
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+
+    frame_idx = 0
+    with Live(console=console, refresh_per_second=6, transient=True) as live:
+        while worker.is_alive():
+            elapsed = time.monotonic() - started_at
+            live_lines = _coerce_live_lines(getattr(runner, "live_output", []))
+            live.update(_build_wait_display(frame_idx, elapsed, live_lines))
+            frame_idx += 1
+            worker.join(timeout=0.25)
+
+    if error[0] is not None:
+        raise error[0]
+
+    return result[0], time.monotonic() - started_at
 
 
 def _discover_files(repo_path: Path) -> dict[str, list[tuple[str, str]]]:
@@ -331,6 +419,15 @@ def run_learn(project_slug: str, workdir: str | None = None) -> None:
     """Learn a project's operational knowledge via the architect agent."""
     from myswat.workflow.prompts import ARCHITECT_LEARN_PROJECT
 
+    stage_labels = (
+        "Scanning project files",
+        "Resolving architect agent",
+        "Architect analyzing project files",
+        "Parsing and validating learned knowledge",
+        "Persisting learned knowledge",
+        "Reporting learned project knowledge",
+    )
+    total_stages = len(stage_labels)
     settings = MySwatSettings()
     pool = TiDBPool(settings.tidb)
     applied = run_migrations(pool)
@@ -349,6 +446,7 @@ def run_learn(project_slug: str, workdir: str | None = None) -> None:
         raise typer.Exit(1)
 
     # ── Step 1: Discover indicator files ──
+    stage_started = _stage_start(console, 1, total_stages, stage_labels[0])
     console.print(f"[bold]Scanning project at {repo_path}...[/bold]")
     discovered = _discover_files(repo_path)
     agent_instructions = _read_agent_instructions(repo_path)
@@ -370,8 +468,16 @@ def run_learn(project_slug: str, workdir: str | None = None) -> None:
     if agent_instructions:
         table.add_row("agent instructions", ", ".join(name for name, _ in agent_instructions))
     console.print(table)
+    _stage_done(
+        console,
+        1,
+        total_stages,
+        stage_started,
+        f"Found {total_files} indicator file(s) and {len(agent_instructions)} instruction file(s).",
+    )
 
     # ── Step 2: Get architect agent ──
+    stage_started = _stage_start(console, 2, total_stages, stage_labels[1])
     arch_agent = store.get_agent(proj["id"], "architect")
     if not arch_agent:
         console.print("[red]Architect agent not found. Run 'myswat init' first.[/red]")
@@ -379,8 +485,16 @@ def run_learn(project_slug: str, workdir: str | None = None) -> None:
 
     runner = _make_runner(arch_agent)
     runner.workdir = str(repo_path)
+    _stage_done(
+        console,
+        2,
+        total_stages,
+        stage_started,
+        f"Using {arch_agent['display_name']} ({arch_agent['cli_backend']}/{arch_agent['model_name']}).",
+    )
 
     # ── Step 3: Send to architect for analysis ──
+    stage_started = _stage_start(console, 3, total_stages, stage_labels[2])
     file_contents = _format_file_contents(discovered)
     agent_instr_text = _format_agent_instructions(agent_instructions)
 
@@ -389,8 +503,7 @@ def run_learn(project_slug: str, workdir: str | None = None) -> None:
         agent_instructions=agent_instr_text,
     )
 
-    console.print("\n[yellow]Architect analyzing project...[/yellow]")
-    response = runner.invoke(prompt)
+    response, analysis_elapsed = _invoke_with_wait_display(console, runner, prompt)
 
     if not response.success:
         console.print(
@@ -398,8 +511,16 @@ def run_learn(project_slug: str, workdir: str | None = None) -> None:
             f"Cannot learn this project. Check agent configuration.[/red]"
         )
         raise typer.Exit(1)
+    _stage_done(
+        console,
+        3,
+        total_stages,
+        stage_started,
+        f"Architect response received in {_fmt_duration(analysis_elapsed)}.",
+    )
 
     # ── Step 4: Parse and validate ──
+    stage_started = _stage_start(console, 4, total_stages, stage_labels[3])
     from myswat.workflow.engine import _extract_json_block
 
     data = _extract_json_block(response.content)
@@ -421,16 +542,25 @@ def run_learn(project_slug: str, workdir: str | None = None) -> None:
             "Make sure the project has a README, Makefile, or equivalent build files.[/yellow]"
         )
         raise typer.Exit(1)
+    _stage_done(console, 4, total_stages, stage_started, "Structured knowledge passed validation.")
 
     # ── Step 5: Persist to TiDB ──
-    console.print("\n[yellow]Persisting learned knowledge...[/yellow]")
+    stage_started = _stage_start(console, 5, total_stages, stage_labels[4])
     count = _store_learned_knowledge(store, proj["id"], data, agent_id=arch_agent["id"])
 
     # ── Step 5b: Write local cache (myswat.md) ──
     md_path = _write_myswat_md(repo_path, data, project_slug)
     console.print(f"[dim]Written local cache: {md_path}[/dim]")
+    _stage_done(
+        console,
+        5,
+        total_stages,
+        stage_started,
+        f"Stored {count} knowledge entr{'y' if count == 1 else 'ies'} and refreshed myswat.md.",
+    )
 
     # ── Step 6: Report ──
+    stage_started = _stage_start(console, 6, total_stages, stage_labels[5])
     console.print(f"\n[bold green]Learned {count} knowledge entries for '{project_slug}'.[/bold green]")
 
     report = Table(title="Learned Knowledge Summary")
@@ -467,6 +597,7 @@ def run_learn(project_slug: str, workdir: str | None = None) -> None:
         f"\n[dim]Dev/QA agents will automatically receive this knowledge.\n"
         f"Re-run 'myswat learn -p {project_slug}' to refresh.[/dim]"
     )
+    _stage_done(console, 6, total_stages, stage_started, "Learn command finished.")
 
 
 def ensure_learned(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 
 import typer
 from rich.console import Console
@@ -11,6 +12,7 @@ from myswat.agents.base import AgentRunner
 from myswat.agents.codex_runner import CodexRunner
 from myswat.agents.kimi_runner import KimiRunner
 from myswat.agents.session_manager import SessionManager
+from myswat.cli.progress import _run_with_task_monitor
 from myswat.config.settings import MySwatSettings
 from myswat.db.connection import TiDBPool
 from myswat.db.schema import run_migrations
@@ -123,6 +125,7 @@ def run_work(
         )
     console.print(f"[dim]Work item: {work_item_id}[/dim]\n")
 
+    cancel_event = threading.Event()
     engine = WorkflowEngine(
         store=store,
         dev_sm=dev_sm,
@@ -131,13 +134,31 @@ def run_work(
         work_item_id=work_item_id,
         max_review_iterations=settings.workflow.max_review_iterations,
         auto_approve=True,
+        should_cancel=cancel_event.is_set,
     )
 
     try:
-        result = engine.run(requirement)
+        work_item_ref: dict[str, int | None] = {"id": work_item_id}
+        cancel_targets: list[AgentRunner] = [dev_runner] + [qa_sm._runner for qa_sm in qa_sms]
+
+        def _worker():
+            return engine.run(requirement)
+
+        result = _run_with_task_monitor(
+            console=console,
+            store=store,
+            proj=proj,
+            label="Running full teamwork workflow",
+            worker_fn=_worker,
+            work_item_ref=work_item_ref,
+            cancel_targets=cancel_targets,
+            cancel_event=cancel_event,
+        )
 
         # Update work item
-        if result.success:
+        if cancel_event.is_set():
+            store.update_work_item_status(work_item_id, "blocked")
+        elif result.success:
             store.update_work_item_status(work_item_id, "completed")
         else:
             store.update_work_item_status(work_item_id, "review")

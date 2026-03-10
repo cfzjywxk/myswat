@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 
 import typer
 from rich.console import Console
@@ -12,6 +13,7 @@ from myswat.agents.base import AgentRunner
 from myswat.agents.codex_runner import CodexRunner
 from myswat.agents.kimi_runner import KimiRunner
 from myswat.agents.session_manager import SessionManager
+from myswat.cli.progress import _fmt_duration, _run_with_task_monitor, _send_with_timer
 from myswat.config.settings import MySwatSettings
 from myswat.db.connection import TiDBPool
 from myswat.db.schema import run_migrations
@@ -116,10 +118,18 @@ def run_single(
         f"Agent: {agent_row['display_name']} ({agent_row['cli_backend']}/{agent_row['model_name']})[/dim]"
     )
     console.print(f"[bold]Task:[/bold] {task}\n")
+    console.print("[bold cyan]Stage 1/1:[/bold cyan] Sending task to agent")
 
     try:
-        with console.status("[bold cyan]Agent working...", spinner="dots"):
-            response = sm.send(task, task_description=task)
+        response, elapsed = _send_with_timer(
+            console,
+            sm,
+            task,
+            task_description=task,
+        )
+        console.print(
+            f"[green]Stage 1/1 complete.[/green] [dim]({_fmt_duration(elapsed)})[/dim]"
+        )
 
         # Display result
         if response.success:
@@ -231,19 +241,38 @@ def run_with_review(
     console.print(f"[dim]Work item: {work_item_id}[/dim]\n")
 
     try:
+        work_item_ref: dict[str, int | None] = {"id": work_item_id}
+        cancel_targets: list[AgentRunner] = [dev_runner, reviewer_runner]
+        cancel_event = threading.Event()
+
+        def _worker():
+            return run_review_loop(
+                store=store,
+                dev_sm=dev_sm,
+                reviewer_sm=reviewer_sm,
+                task=task,
+                project_id=proj["id"],
+                work_item_id=work_item_id,
+                max_iterations=settings.workflow.max_review_iterations,
+                should_cancel=cancel_event.is_set,
+            )
+
         # Run the review loop
-        verdict = run_review_loop(
+        verdict = _run_with_task_monitor(
+            console=console,
             store=store,
-            dev_sm=dev_sm,
-            reviewer_sm=reviewer_sm,
-            task=task,
-            project_id=proj["id"],
-            work_item_id=work_item_id,
-            max_iterations=settings.workflow.max_review_iterations,
+            proj=proj,
+            label="Running dev+QA review loop",
+            worker_fn=_worker,
+            work_item_ref=work_item_ref,
+            cancel_targets=cancel_targets,
+            cancel_event=cancel_event,
         )
 
         # Update work item status
-        if verdict.verdict == "lgtm":
+        if cancel_event.is_set():
+            store.update_work_item_status(work_item_id, "blocked")
+        elif verdict.verdict == "lgtm":
             store.update_work_item_status(work_item_id, "approved")
         else:
             store.update_work_item_status(work_item_id, "review")

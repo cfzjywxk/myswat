@@ -95,25 +95,25 @@ class TestMakeCompactionRunner:
 # _check_esc
 # ---------------------------------------------------------------------------
 class TestCheckEsc:
-    @patch("myswat.cli.chat_cmd.select")
-    @patch("myswat.cli.chat_cmd.sys")
+    @patch("myswat.cli.progress.select")
+    @patch("myswat.cli.progress.sys")
     def test_esc_pressed(self, mock_sys, mock_select):
         mock_select.select.return_value = ([True], [], [])
         mock_sys.stdin.read.return_value = "\x1b"
         assert _check_esc() is True
 
-    @patch("myswat.cli.chat_cmd.select")
+    @patch("myswat.cli.progress.select")
     def test_no_input(self, mock_select):
         mock_select.select.return_value = ([], [], [])
         assert _check_esc() is False
 
-    @patch("myswat.cli.chat_cmd.select")
+    @patch("myswat.cli.progress.select")
     def test_exception(self, mock_select):
         mock_select.select.side_effect = Exception("bad fd")
         assert _check_esc() is False
 
-    @patch("myswat.cli.chat_cmd.select")
-    @patch("myswat.cli.chat_cmd.sys")
+    @patch("myswat.cli.progress.select")
+    @patch("myswat.cli.progress.sys")
     def test_non_esc_char(self, mock_sys, mock_select):
         mock_select.select.return_value = ([True], [], [])
         mock_sys.stdin.read.return_value = "a"
