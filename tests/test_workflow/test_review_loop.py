@@ -399,6 +399,25 @@ class TestRunReviewLoop:
         )
         assert isinstance(result, ReviewVerdict)
 
+    def test_initial_stage_persisted_before_dev_turn(self):
+        store, dev_sm, rev_sm, task, pid, wid = self._setup_mocks(
+            reviewer_responses=[
+                _make_agent_response(content=_json_str(verdict="lgtm", summary="Approved")),
+            ],
+        )
+
+        run_review_loop(store, dev_sm, rev_sm, task, pid, wid)
+
+        store.update_work_item_state.assert_any_call(
+            wid,
+            current_stage="review_loop_developing",
+            latest_summary=str(task)[:4000],
+            next_todos=["Developer prepare the initial proposal and implementation summary"],
+            open_issues=[],
+            last_artifact_id=None,
+            updated_by_agent_id=dev_sm.agent_id,
+        )
+
     def test_default_max_iterations_is_five(self):
         """Without explicit max_iterations the loop should allow up to 5 rounds."""
         dev_responses = [_make_agent_response(content=f"code v{i}") for i in range(5)]

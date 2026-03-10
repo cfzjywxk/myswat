@@ -120,6 +120,21 @@ def run_review_loop(
                 feedback=feedback,
             )
 
+        _persist_state(
+            stage="review_loop_developing" if iteration == 1 else "review_loop_revising",
+            summary=str(task) if iteration == 1 else (final_verdict.summary or str(task)),
+            next_todos=(
+                ["Developer prepare the initial proposal and implementation summary"]
+                if iteration == 1
+                else ["Developer address reviewer feedback and update the proposal"]
+            ),
+            open_issues=(
+                []
+                if iteration == 1
+                else (final_verdict.issues or ([final_verdict.summary] if final_verdict.summary else []))
+            ),
+            updated_by_agent_id=dev_sm.agent_id,
+        )
         console.print(f"[yellow]Developer working...[/yellow]")
         dev_response = dev_sm.send(dev_prompt, task_description=task)
 
