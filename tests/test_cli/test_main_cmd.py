@@ -615,6 +615,48 @@ class TestCommandRouting:
         result = runner.invoke(app, ["work", "add feature", "--project", "proj"])
         mock_run_work.assert_called_once()
 
+    @patch("myswat.cli.work_cmd.run_work")
+    def test_work_command_background(self, mock_run_work):
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["work", "add feature", "--project", "proj", "--background"])
+        mock_run_work.assert_called_once_with("proj", "add feature", workdir=None, background=True)
+
+    @patch("myswat.cli.work_cmd.run_background_work_item")
+    def test_work_background_worker_command(self, mock_run_background_work_item):
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
+
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            [
+                "work-background-worker",
+                "add feature",
+                "--project",
+                "proj",
+                "--work-item-id",
+                "42",
+            ],
+        )
+        mock_run_background_work_item.assert_called_once_with(
+            "proj",
+            "add feature",
+            work_item_id=42,
+            workdir=None,
+        )
+
+    @patch("myswat.cli.work_cmd.stop_work_item")
+    def test_stop_command(self, mock_stop_work_item):
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["stop", "42", "--project", "proj"])
+        mock_stop_work_item.assert_called_once_with("proj", 42)
+
     @patch("myswat.cli.feed_cmd.run_feed")
     def test_feed_command(self, mock_run_feed):
         from typer.testing import CliRunner

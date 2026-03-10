@@ -53,10 +53,44 @@ def work(
     requirement: str = typer.Argument(..., help="Requirement description"),
     project: str = typer.Option(..., "--project", "-p", help="Project slug"),
     workdir: str = typer.Option(None, "--workdir", "-w", help="Working directory override"),
+    background: bool = typer.Option(
+        False,
+        "--background",
+        help="Detach the workflow and keep it running after this terminal exits.",
+    ),
 ):
     """Run the full teamwork workflow: design -> review -> plan -> dev -> commit."""
     from myswat.cli.work_cmd import run_work
-    run_work(project, requirement, workdir=workdir)
+    run_work(project, requirement, workdir=workdir, background=background)
+
+
+@app.command(name="work-background-worker", hidden=True)
+def work_background_worker(
+    requirement: str = typer.Argument(..., help="Requirement description"),
+    project: str = typer.Option(..., "--project", "-p", help="Project slug"),
+    work_item_id: int = typer.Option(..., "--work-item-id", help="Existing work item ID"),
+    workdir: str = typer.Option(None, "--workdir", "-w", help="Working directory override"),
+):
+    """Internal detached worker entry point for `myswat work --background`."""
+    from myswat.cli.work_cmd import run_background_work_item
+
+    run_background_work_item(
+        project,
+        requirement,
+        work_item_id=work_item_id,
+        workdir=workdir,
+    )
+
+
+@app.command()
+def stop(
+    work_item_id: int = typer.Argument(..., help="Work item ID"),
+    project: str = typer.Option(..., "--project", "-p", help="Project slug"),
+):
+    """Request cancellation of a background workflow."""
+    from myswat.cli.work_cmd import stop_work_item
+
+    stop_work_item(project, work_item_id)
 
 
 @app.command()
@@ -313,8 +347,28 @@ def _print_teamwork_details(pool, item, console, details: bool = False) -> None:
 
 def _print_task_state(console, item: dict) -> None:
     metadata = item.get("metadata_json") if isinstance(item, dict) else None
+    background = metadata.get("background") if isinstance(metadata, dict) else {}
     task_state = metadata.get("task_state") if isinstance(metadata, dict) else {}
+    if isinstance(background, dict) and background:
+        console.print("[bold]Execution:[/bold]")
+        if background.get("mode"):
+            console.print(f"  Mode: {background['mode']}")
+        if background.get("state"):
+            console.print(f"  State: {background['state']}")
+        if background.get("pid"):
+            console.print(f"  PID: {background['pid']}")
+        if background.get("log_path"):
+            console.print(f"  Log: {background['log_path']}")
+        if background.get("requested_at"):
+            console.print(f"  Requested: {background['requested_at']}")
+        if background.get("started_at"):
+            console.print(f"  Started: {background['started_at']}")
+        if background.get("finished_at"):
+            console.print(f"  Finished: {background['finished_at']}")
+
     if not isinstance(task_state, dict) or not task_state:
+        if isinstance(background, dict) and background:
+            console.print()
         return
 
     if task_state.get("current_stage"):

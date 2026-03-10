@@ -118,6 +118,13 @@ myswat run -p my-project "Add error handling to the parser"
 
 ```bash
 myswat work -p my-project "Implement bloom filter for compaction"
+
+# Detach it and keep it running after this terminal exits
+myswat work -p my-project --background "Implement bloom filter for compaction"
+
+# Monitor or stop it later
+myswat task 42 -p my-project
+myswat stop 42 -p my-project
 ```
 
 Runs: tech design -> design review -> planning -> plan review -> phased implementation (per-phase code review + commit) -> GA testing -> final report.
@@ -145,10 +152,11 @@ myswat memory search "transaction isolation" -p my-project
 | `myswat learn -p <slug> [-w workdir]` | Learn project build/test/conventions |
 | `myswat chat -p <slug> [--role R]` | Interactive chat session |
 | `myswat run <task> -p <slug> [--single] [--role R] [--reviewer R]` | Run agent task |
-| `myswat work <requirement> -p <slug>` | Full teamwork workflow |
+| `myswat work <requirement> -p <slug> [--background]` | Full teamwork workflow |
 | `myswat feed <path> -p <slug> [--glob pattern]` | Ingest documents into knowledge |
 | `myswat status -p <slug>` | Show project status |
 | `myswat task <id> -p <slug>` | Show detailed status for one work item |
+| `myswat stop <id> -p <slug>` | Stop a background workflow |
 | `myswat memory search <query> -p <slug>` | Search knowledge base |
 | `myswat memory add <title> <content> -p <slug> [-c cat]` | Add knowledge manually |
 | `myswat memory list -p <slug> [-c category]` | List knowledge entries |
