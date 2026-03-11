@@ -277,6 +277,8 @@ class WorkflowEngine:
     def _dispatch_mode(self, requirement: str, result: WorkflowResult) -> WorkflowResult:
         if self._mode == WorkMode.full:
             return self._run_full(requirement, result)
+        if self._mode == WorkMode.design:
+            return self._run_design_mode(requirement, result)
         raise NotImplementedError(f"Workflow mode '{self._mode.value}' is not implemented yet.")
 
     def _run_full(self, requirement: str, result: WorkflowResult) -> WorkflowResult:
@@ -415,6 +417,98 @@ class WorkflowEngine:
             current_stage="workflow_completed" if result.success else "workflow_finished_with_issues",
             latest_summary=report[:4000],
             next_todos=[] if result.success else ["Review final report and unresolved issues"],
+            open_issues=[] if result.success else self._first_lines(report, limit=8),
+            updated_by_agent_id=self._dev.agent_id,
+        )
+        return result
+
+    def _run_design_mode(self, requirement: str, result: WorkflowResult) -> WorkflowResult:
+        # Stage 1: Tech design
+        console.print(Panel("[bold]Stage 1: Technical Design[/bold]", border_style="blue"))
+        design = self._run_design(requirement)
+        if not design:
+            console.print("[red]Dev failed to produce design. Aborting.[/red]")
+            result.final_report = "Design workflow failed: developer did not produce a technical design."
+            return result
+        result.design = design
+        if self._cancelled():
+            result.final_report = "Design workflow cancelled during technical design."
+            return result
+
+        # Stage 2: Design review
+        console.print(Panel("[bold]Stage 2: Design Review[/bold]", border_style="blue"))
+        design, iters, design_review_passed = self._run_review_loop(
+            artifact=design,
+            artifact_type="design",
+            context=f"Requirement:\n{requirement}",
+        )
+        result.design = design
+        result.design_review_iterations = iters
+        result.design_review_passed = design_review_passed
+        if self._cancelled():
+            result.final_report = "Design workflow cancelled during design review."
+            return result
+
+        console.print(Panel(Markdown(design), title="Reviewed Design", border_style="green"))
+        design = self._user_checkpoint(
+            design,
+            "design",
+            "Design reviewed by QA. Proceed to planning? [Y/n/or type feedback] ",
+        )
+        if design is None:
+            console.print("[yellow]Workflow stopped by user.[/yellow]")
+            result.final_report = "Design workflow stopped by user after design review."
+            return result
+        result.design = design
+
+        # Stage 3: Planning
+        console.print(Panel("[bold]Stage 3: Implementation Planning[/bold]", border_style="blue"))
+        plan = self._run_planning(design, requirement)
+        if not plan:
+            console.print("[red]Dev failed to produce plan. Aborting.[/red]")
+            result.final_report = "Design workflow failed: developer did not produce an implementation plan."
+            return result
+        result.plan = plan
+        if self._cancelled():
+            result.final_report = "Design workflow cancelled during planning."
+            return result
+
+        # Stage 4: Plan review
+        console.print(Panel("[bold]Stage 4: Plan Review[/bold]", border_style="blue"))
+        plan, iters, plan_review_passed = self._run_review_loop(
+            artifact=plan,
+            artifact_type="plan",
+            context=f"Requirement:\n{requirement[:2000]}\n\nApproved Design:\n{design[:4000]}",
+        )
+        result.plan = plan
+        result.plan_review_iterations = iters
+        result.plan_review_passed = plan_review_passed
+        if self._cancelled():
+            result.final_report = "Design workflow cancelled during plan review."
+            return result
+
+        console.print(Panel(Markdown(plan), title="Reviewed Plan", border_style="green"))
+        plan = self._user_checkpoint(
+            plan,
+            "plan",
+            "Plan reviewed by QA. Finish design workflow? [Y/n/or type feedback] ",
+        )
+        if plan is None:
+            console.print("[yellow]Workflow stopped by user.[/yellow]")
+            result.final_report = "Design workflow stopped by user after plan review."
+            return result
+        result.plan = plan
+
+        console.print(Panel("[bold]Stage 5: Final Report[/bold]", border_style="blue"))
+        report = self._generate_report(result, [])
+        result.final_report = report
+        result.success = result.design_review_passed and result.plan_review_passed
+
+        console.print(Panel(Markdown(report), title="Design Workflow Report", border_style="green"))
+        self._persist_task_state(
+            current_stage="workflow_completed" if result.success else "workflow_finished_with_issues",
+            latest_summary=report[:4000],
+            next_todos=[] if result.success else ["Review design report and unresolved issues"],
             open_issues=[] if result.success else self._first_lines(report, limit=8),
             updated_by_agent_id=self._dev.agent_id,
         )
@@ -1311,7 +1405,28 @@ class WorkflowEngine:
     # Report generation
     # ════════════════════════════════════════════════════════════════
 
+    def _generate_design_report(self, result: WorkflowResult) -> str:
+        total_reviews = result.design_review_iterations + result.plan_review_iterations
+        design_status = "Passed" if result.design_review_passed else "Not passed"
+        plan_status = "Passed" if result.plan_review_passed else "Not passed"
+        lines = [
+            "# Workflow Report\n",
+            f"## Requirement\n{result.requirement}\n",
+            f"## Design Review\n{design_status} after {result.design_review_iterations} review iteration(s).\n",
+            f"## Plan Review\n{plan_status} after {result.plan_review_iterations} review iteration(s).\n",
+            (
+                "\n## Totals\n"
+                f"- Total review cycles: {total_reviews}\n"
+                f"- Design review: {design_status}\n"
+                f"- Plan review: {plan_status}\n"
+            ),
+        ]
+        return "\n".join(lines)
+
     def _generate_report(self, result: WorkflowResult, completed_summaries: list[str]) -> str:
+        if self._mode == WorkMode.design:
+            return self._generate_design_report(result)
+
         # Ask dev for a narrative final report
         dev_report = ""
         if completed_summaries:

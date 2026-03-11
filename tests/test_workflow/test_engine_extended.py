@@ -11,6 +11,7 @@ import pytest
 from myswat.agents.base import AgentResponse
 from myswat.models.work_item import ReviewVerdict
 from myswat.workflow.engine import (
+    WorkMode,
     WorkflowEngine,
     _default_ask,
     PhaseResult,
@@ -57,6 +58,7 @@ def _make_engine(
     work_item_id=1,
     max_review: int = 5,
     store=None,
+    mode: WorkMode = WorkMode.full,
 ):
     """Build a WorkflowEngine with fake session managers."""
     dev_sm = make_fake_session_manager(
@@ -83,6 +85,7 @@ def _make_engine(
         project_id=1,
         work_item_id=work_item_id,
         max_review_iterations=max_review,
+        mode=mode,
         ask_user=ask,
     )
     return engine, dev_sm, qa_sms
@@ -236,6 +239,87 @@ class TestRun:
         engine, _, _ = _make_engine()
         result = engine.run("req")
         assert result.success is False
+
+
+class TestRunDesignMode:
+    """Tests for design-mode orchestration added in phase 3."""
+
+    @patch.object(WorkflowEngine, "_generate_report", return_value="# Design Report")
+    @patch.object(WorkflowEngine, "_user_checkpoint")
+    @patch.object(WorkflowEngine, "_run_review_loop")
+    @patch.object(WorkflowEngine, "_run_planning", return_value="the plan")
+    @patch.object(WorkflowEngine, "_run_design", return_value="the design")
+    def test_happy_path(
+        self, m_design, m_plan, m_review, m_checkpoint, m_report,
+    ):
+        m_review.side_effect = [
+            ("reviewed design", 1, True),
+            ("reviewed plan", 2, True),
+        ]
+        m_checkpoint.side_effect = ["approved design", "approved plan"]
+        engine, _, _ = _make_engine(mode=WorkMode.design)
+
+        result = engine.run("draft api")
+
+        assert result.design == "approved design"
+        assert result.plan == "approved plan"
+        assert result.design_review_passed is True
+        assert result.plan_review_passed is True
+        assert result.ga_test is None
+        assert result.phases == []
+        assert result.final_report == "# Design Report"
+        assert result.success is True
+        assert m_checkpoint.call_count == 2
+
+    @patch.object(WorkflowEngine, "_generate_report", return_value="# Design Report")
+    @patch.object(WorkflowEngine, "_user_checkpoint")
+    @patch.object(WorkflowEngine, "_run_review_loop")
+    @patch.object(WorkflowEngine, "_run_planning", return_value="the plan")
+    @patch.object(WorkflowEngine, "_run_design", return_value="the design")
+    def test_review_failure_keeps_success_false(
+        self, m_design, m_plan, m_review, m_checkpoint, m_report,
+    ):
+        m_review.side_effect = [
+            ("reviewed design", 1, True),
+            ("reviewed plan", 2, False),
+        ]
+        m_checkpoint.side_effect = ["approved design", "approved plan"]
+        engine, _, _ = _make_engine(mode=WorkMode.design)
+
+        result = engine.run("draft api")
+
+        assert result.design_review_passed is True
+        assert result.plan_review_passed is False
+        assert result.success is False
+        assert result.final_report == "# Design Report"
+
+    @patch.object(WorkflowEngine, "_run_planning")
+    @patch.object(WorkflowEngine, "_user_checkpoint", return_value=None)
+    @patch.object(WorkflowEngine, "_run_review_loop", return_value=("reviewed design", 1, True))
+    @patch.object(WorkflowEngine, "_run_design", return_value="the design")
+    def test_user_stop_after_design_sets_final_report(
+        self, m_design, m_review, m_checkpoint, m_planning,
+    ):
+        engine, _, _ = _make_engine(mode=WorkMode.design)
+
+        result = engine.run("draft api")
+
+        assert result.success is False
+        assert result.final_report == "Design workflow stopped by user after design review."
+        m_planning.assert_not_called()
+
+    def test_cancellation_after_design_review_sets_final_report(self):
+        engine, _, _ = _make_engine(mode=WorkMode.design)
+        result = WorkflowResult(requirement="req")
+
+        with patch.object(engine, "_run_design", return_value="the design"):
+            with patch.object(engine, "_run_review_loop", return_value=("reviewed design", 1, True)):
+                with patch.object(engine, "_cancelled", side_effect=[False, True]):
+                    result = engine._run_design_mode("req", result)
+
+        assert result.success is False
+        assert result.final_report == "Design workflow cancelled during design review."
+
 
 
 # ===================================================================
@@ -1313,6 +1397,26 @@ class TestGenerateReport:
         assert "# Workflow Report" in report
         assert "Not committed" in report
         assert "Developer's Final Summary" not in report
+
+    def test_design_mode_report_omits_development_and_ga_sections(self):
+        """Design-mode report only includes design/planning sections."""
+        engine, dev, _ = _make_engine(mode=WorkMode.design)
+        result = WorkflowResult(
+            requirement="req",
+            design_review_iterations=2,
+            design_review_passed=True,
+            plan_review_iterations=1,
+            plan_review_passed=False,
+        )
+
+        report = engine._generate_report(result, [])
+
+        dev.send.assert_not_called()
+        assert "## Design Review" in report
+        assert "## Plan Review" in report
+        assert "## Development Phases" not in report
+        assert "## GA Test" not in report
+        assert "Plan review: Not passed" in report
 
     def test_report_no_completed_summaries(self):
         """Empty completed_summaries means dev is not asked for narrative."""
