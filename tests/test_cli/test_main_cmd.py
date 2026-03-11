@@ -722,6 +722,32 @@ class TestCommandRouting:
             mode=WorkMode.full,
         )
 
+    @patch("myswat.cli.work_cmd.run_work")
+    def test_work_command_rejects_design_background(self, mock_run_work):
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["work", "add feature", "--project", "proj", "--background", "--design"])
+        assert result.exit_code != 0
+        mock_run_work.assert_not_called()
+
+    @patch("myswat.cli.work_cmd.run_work")
+    def test_work_command_background_mode_threads(self, mock_run_work):
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["work", "add feature", "--project", "proj", "--background", "--dev"])
+        assert result.exit_code == 0
+        mock_run_work.assert_called_once_with(
+            "proj",
+            "add feature",
+            workdir=None,
+            background=True,
+            mode=WorkMode.development,
+        )
+
     @patch("myswat.cli.work_cmd.run_background_work_item")
     def test_work_background_worker_command(self, mock_run_background_work_item):
         from typer.testing import CliRunner
@@ -737,13 +763,17 @@ class TestCommandRouting:
                 "proj",
                 "--work-item-id",
                 "42",
+                "--mode",
+                "development",
             ],
         )
+        assert result.exit_code == 0
         mock_run_background_work_item.assert_called_once_with(
             "proj",
             "add feature",
             work_item_id=42,
             workdir=None,
+            mode=WorkMode.development,
         )
 
     @patch("myswat.cli.work_cmd.stop_work_item")

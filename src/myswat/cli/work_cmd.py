@@ -484,7 +484,11 @@ def _launch_background_work(
     requirement: str,
     *,
     workdir: str | None = None,
+    mode: WorkMode = WorkMode.full,
 ) -> int:
+    if mode == WorkMode.design:
+        raise typer.BadParameter("Design mode cannot be combined with --background.")
+
     settings, store, proj, effective_workdir = _load_project_context(project_slug, workdir)
     dev_agent, _qa_agents = _get_workflow_agents(store, proj["id"])
 
@@ -494,6 +498,7 @@ def _launch_background_work(
         description=requirement,
         item_type="code_change",
         assigned_agent_id=dev_agent["id"],
+        metadata_json={"work_mode": mode.value},
     )
     log_path, pid_path = _background_runtime_paths(settings, project_slug, work_item_id)
 
@@ -532,6 +537,8 @@ def _launch_background_work(
         project_slug,
         "--work-item-id",
         str(work_item_id),
+        "--mode",
+        mode.value,
     ]
     if effective_workdir:
         command.extend(["--workdir", effective_workdir])
@@ -600,8 +607,11 @@ def run_background_work_item(
     *,
     work_item_id: int,
     workdir: str | None = None,
+    mode: WorkMode = WorkMode.full,
 ) -> None:
     """Entry point for the detached workflow worker."""
+    if mode == WorkMode.design:
+        raise typer.BadParameter("Design mode cannot be combined with --background.")
     _run_workflow(
         project_slug,
         requirement,
@@ -609,6 +619,7 @@ def run_background_work_item(
         work_item_id=work_item_id,
         show_monitor=False,
         background_worker=True,
+        mode=mode,
     )
 
 
@@ -621,7 +632,9 @@ def run_work(
 ) -> None:
     """Run the full teamwork workflow."""
     if background:
-        _launch_background_work(project_slug, requirement, workdir=workdir)
+        if mode == WorkMode.design:
+            raise typer.BadParameter("Design mode cannot be combined with --background.")
+        _launch_background_work(project_slug, requirement, workdir=workdir, mode=mode)
         return
 
     _run_workflow(

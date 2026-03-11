@@ -86,6 +86,8 @@ def work(
         development=development_mode,
         test=test_mode,
     )
+    if background and mode == WorkMode.design:
+        raise typer.BadParameter("Design mode cannot be combined with --background.")
     run_work(project, requirement, workdir=workdir, background=background, mode=mode)
 
 
@@ -95,6 +97,7 @@ def work_background_worker(
     project: str = typer.Option(..., "--project", "-p", help="Project slug"),
     work_item_id: int = typer.Option(..., "--work-item-id", help="Existing work item ID"),
     workdir: str = typer.Option(None, "--workdir", "-w", help="Working directory override"),
+    mode: str = typer.Option(WorkMode.full.value, "--mode", help="Workflow mode for detached worker."),
 ):
     """Internal detached worker entry point for `myswat work --background`."""
     from myswat.cli.work_cmd import run_background_work_item
@@ -104,6 +107,7 @@ def work_background_worker(
         requirement,
         work_item_id=work_item_id,
         workdir=workdir,
+        mode=WorkMode(mode),
     )
 
 

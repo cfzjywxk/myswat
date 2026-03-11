@@ -513,6 +513,12 @@ class TestRunWork:
         assert mock_engine_cls.call_args.kwargs["mode"] == WorkMode.design
         assert mock_engine_cls.call_args.kwargs["auto_approve"] is False
 
+    @patch("myswat.cli.work_cmd._launch_background_work")
+    def test_design_mode_rejected_for_background(self, mock_launch_background_work):
+        with pytest.raises(typer.BadParameter):
+            run_work("proj", "do stuff", background=True, mode=WorkMode.design)
+        mock_launch_background_work.assert_not_called()
+
     @patch("myswat.cli.work_cmd.subprocess.Popen")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
@@ -557,7 +563,7 @@ class TestRunWork:
         mock_popen.return_value = proc
 
         with patch("myswat.cli.work_cmd.console.print") as mock_console_print:
-            run_work("proj", "do stuff", background=True)
+            run_work("proj", "do stuff", background=True, mode=WorkMode.test)
 
         assert mock_popen.called
         args, kwargs = mock_popen.call_args
@@ -565,9 +571,13 @@ class TestRunWork:
         assert args[0][1:4] == ["-m", "myswat.cli.main", "work-background-worker"]
         assert "--work-item-id" in args[0]
         assert "42" in args[0]
+        assert "--mode" in args[0]
+        mode_index = args[0].index("--mode")
+        assert args[0][mode_index + 1] == "test"
         assert kwargs["start_new_session"] is True
         assert kwargs["stdin"] is not None
         assert kwargs["env"]["PYTHONUNBUFFERED"] == "1"
+        assert mock_store.create_work_item.call_args.kwargs["metadata_json"] == {"work_mode": "test"}
         mock_store.update_work_item_state.assert_any_call(
             42,
             current_stage="background_launch_pending",
@@ -644,9 +654,10 @@ class TestRunWork:
         engine.run.return_value = SimpleNamespace(success=True)
         mock_engine_cls.return_value = engine
 
-        run_background_work_item("proj", "do stuff", work_item_id=42)
+        run_background_work_item("proj", "do stuff", work_item_id=42, mode=WorkMode.development)
 
         mock_store.update_work_item_status.assert_any_call(42, "completed")
+        assert mock_engine_cls.call_args.kwargs["mode"] == WorkMode.development
         assert not pid_path.exists()
 
     @patch("myswat.cli.work_cmd._read_process_argv", return_value=[
