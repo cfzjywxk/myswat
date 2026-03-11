@@ -9,6 +9,7 @@ Multi-AI agent co-working system for software development. Agents with persisten
 - **Project learning** — `myswat learn` teaches agents how to build, test, and follow conventions for any project
 - **Multi-agent review** — developer proposes, QA reviews, iterate until LGTM
 - **Full teamwork workflow** — auto-continue through design review, planning, phased implementation, and GA testing unless a critical failure stops it
+- **Selective work modes** — `--design` for design+planning only, `--dev` for phased implementation only, `--test` for GA testing only, or default full workflow
 - **Knowledge-first context** — agents receive relevant knowledge via vector search, not bloated history
 - **Persistent task state** — work items keep current stage, summary, todos, and issues so newly started agent sessions can recover ongoing work
 - **Interactive long-task monitor** — `/work` and `/review` show MySwat-level progress, stage, todos, and `ESC` cancel hints instead of appearing stuck
@@ -117,19 +118,35 @@ myswat run -p my-project "Add error handling to the parser"
 ### 5. Full teamwork workflow
 
 ```bash
+# Full workflow (default): design -> review -> plan -> dev -> GA test -> report
 myswat work -p my-project "Implement bloom filter for compaction"
 
-# Detach it and keep it running after this terminal exits
+# Design + planning only (interactive checkpoints, no --background)
+myswat work -p my-project --design "Implement bloom filter for compaction"
+
+# Development only (phased implementation, skip design/plan)
+myswat work -p my-project --dev "Implement bloom filter for compaction"
+
+# GA testing only (no architecture-change escalation)
+myswat work -p my-project --test "Validate bloom filter correctness"
+
+# Detach and keep running after this terminal exits
 myswat work -p my-project --background "Implement bloom filter for compaction"
+myswat work -p my-project --background --dev "Implement bloom filter for compaction"
 
 # Monitor or stop it later
 myswat task 42 -p my-project
 myswat stop 42 -p my-project
 ```
 
-Runs: tech design -> design review -> planning -> plan review -> phased implementation (per-phase code review + commit) -> GA testing -> final report.
+| Mode | Flags | Stages | Success criteria |
+|------|-------|--------|------------------|
+| `full` | _(default)_ | design, design review, plan, plan review, phased dev, GA test, report | all phases committed AND GA passed |
+| `design` | `--design`, `--plan` | design, design review, plan, plan review, report | both reviews passed |
+| `development` | `--development`, `--dev` | phased dev (with informational QA review), report | all phases committed |
+| `test` | `--test`, `--ga-test` | GA test plan/review, execute tests, bug fixes, report | GA passed |
 
-`myswat work` now auto-continues by default instead of stopping for manual approvals during the workflow. In chat mode, `/work` also shows the live task monitor described above.
+`myswat work` auto-continues by default instead of stopping for manual approvals. Design mode (`--design`) keeps interactive checkpoints and cannot be combined with `--background`. In chat mode, `/work` also shows the live task monitor described above.
 
 ### 6. Feed documents
 
@@ -152,7 +169,7 @@ myswat memory search "transaction isolation" -p my-project
 | `myswat learn -p <slug> [-w workdir]` | Learn project build/test/conventions |
 | `myswat chat -p <slug> [--role R]` | Interactive chat session |
 | `myswat run <task> -p <slug> [--single] [--role R] [--reviewer R]` | Run agent task |
-| `myswat work <requirement> -p <slug> [--background]` | Full teamwork workflow |
+| `myswat work <requirement> -p <slug> [--background] [--design\|--dev\|--test]` | Full or selective teamwork workflow |
 | `myswat feed <path> -p <slug> [--glob pattern]` | Ingest documents into knowledge |
 | `myswat status -p <slug>` | Show project status |
 | `myswat task <id> -p <slug>` | Show detailed status for one work item |
@@ -175,7 +192,11 @@ User --> CLI (Typer)
           |      +--> SessionManager --> AgentRunner (codex/kimi subprocess)
           |      |                   --> Mid-session compaction (watermark-based)
           |      |
-          |      +--> WorkflowEngine (auto-continue design -> review -> plan -> dev -> GA test)
+          |      +--> WorkflowEngine (mode dispatch: full | design | development | test)
+          |      |      full:        design -> review -> plan -> dev -> GA test -> report
+          |      |      design:      design -> review -> plan -> review -> report (interactive)
+          |      |      development: phased dev -> report (no design/plan)
+          |      |      test:        GA test -> report (no arch_change escalation)
           |      |
           |      +--> MemoryRetriever --> project_ops (myswat.md cache or TiDB fallback)
           |                           --> work_item task state

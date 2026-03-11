@@ -1,9 +1,20 @@
 %% MySwat Workflow Decision & Drive Graph
 %% Generated from engine.py, review_loop.py, work_cmd.py
+%% Covers all four WorkMode paths: full, design, development, test
 
 flowchart TD
     START(["`**User: myswat work**
-    requirement`"]) --> CANCEL_CHECK_0{Cancelled?}
+    requirement`"]) --> MODE_SELECT{"`Work mode?`"}
+
+    MODE_SELECT -->|"full (default)"| CANCEL_CHECK_0{Cancelled?}
+    MODE_SELECT -->|"--design / --plan"| DESIGN_MODE_START
+    MODE_SELECT -->|"--development / --dev"| DEV_MODE_START
+    MODE_SELECT -->|"--test / --ga-test"| TEST_MODE_START
+
+    %% ════════════════════════════════════════════════════════════════
+    %% Full Mode (stages 1-7)
+    %% ════════════════════════════════════════════════════════════════
+
     CANCEL_CHECK_0 -->|Yes| ABORT_EARLY([Abort])
     CANCEL_CHECK_0 -->|No| S1
 
@@ -26,9 +37,11 @@ flowchart TD
         DR_QA_REVIEW["`**Each QA** reviews design`"]
         DR_QA_REVIEW --> DR_ALL_LGTM{All reviewers LGTM?}
 
-        DR_ALL_LGTM -->|Yes| DR_APPROVED([Design Approved])
+        DR_ALL_LGTM -->|Yes| DR_APPROVED(["`Design Approved
+        passed=True`"])
         DR_ALL_LGTM -->|No| DR_MAX{Max iterations?}
-        DR_MAX -->|Yes| DR_TIMEOUT([Max iters reached])
+        DR_MAX -->|Yes| DR_TIMEOUT(["`Max iters reached
+        passed=False`"])
         DR_MAX -->|No| DR_DEV_REVISE["`**Dev** addresses
         review comments`"]
         DR_DEV_REVISE --> DR_REVISE_OK{Dev success?}
@@ -62,9 +75,11 @@ flowchart TD
         PR_START --> PR_QA_REVIEW["`**Each QA** reviews plan`"]
         PR_QA_REVIEW --> PR_ALL_LGTM{All reviewers LGTM?}
 
-        PR_ALL_LGTM -->|Yes| PR_APPROVED([Plan Approved])
+        PR_ALL_LGTM -->|Yes| PR_APPROVED(["`Plan Approved
+        passed=True`"])
         PR_ALL_LGTM -->|No| PR_MAX{Max iterations?}
-        PR_MAX -->|Yes| PR_TIMEOUT([Max iters reached])
+        PR_MAX -->|Yes| PR_TIMEOUT(["`Max iters reached
+        passed=False`"])
         PR_MAX -->|No| PR_DEV_REVISE["`**Dev** addresses
         plan comments`"]
         PR_DEV_REVISE --> PR_START
@@ -101,9 +116,11 @@ flowchart TD
             subgraph P_CODE_REVIEW["Code Review Loop"]
                 CR_QA["`**Each QA** reviews code`"]
                 CR_QA --> CR_LGTM{All LGTM?}
-                CR_LGTM -->|Yes| CR_PASS([Code Approved])
+                CR_LGTM -->|Yes| CR_PASS(["`Code Approved
+                review_passed=True`"])
                 CR_LGTM -->|No| CR_MAX{Max iters?}
-                CR_MAX -->|Yes| CR_TIMEOUT([Max iters])
+                CR_MAX -->|Yes| CR_TIMEOUT(["`Max iters
+                review_passed=False`"])
                 CR_MAX -->|No| CR_DEV_FIX["`**Dev** addresses
                 code comments`"]
                 CR_DEV_FIX --> CR_QA
@@ -140,9 +157,11 @@ flowchart TD
             TPR_DEV["`**Dev** reviews
             test plan`"]
             TPR_DEV --> TPR_LGTM{LGTM?}
-            TPR_LGTM -->|Yes| TPR_PASS([Test plan approved])
+            TPR_LGTM -->|Yes| TPR_PASS(["`Test plan approved
+            review_passed=True`"])
             TPR_LGTM -->|No| TPR_MAX{Max iters?}
-            TPR_MAX -->|Yes| TPR_TIMEOUT([Max iters])
+            TPR_MAX -->|Yes| TPR_TIMEOUT(["`Max iters
+            review_passed=False`"])
             TPR_MAX -->|No| TPR_QA_FIX["`**QA** addresses
             comments`"]
             TPR_QA_FIX --> TPR_DEV
@@ -183,7 +202,10 @@ flowchart TD
                 BF_TYPE -->|simple_fix| BF_SIMPLE["`**Dev** fixes bug`"]
                 BF_SIMPLE --> BF_SUMMARIZE["`**Dev** summarizes fix`"]
 
-                BF_TYPE -->|arch_change| BF_ARCH
+                BF_TYPE -->|arch_change| BF_ARCH_GATE{allow_arch_fix?}
+                BF_ARCH_GATE -->|"Yes (full mode)"| BF_ARCH
+                BF_ARCH_GATE -->|"No (test mode)"| BF_UNRESOLVED(["`Unresolved: follow-up
+                with --dev or full`"])
 
                 subgraph BF_ARCH["Sub-Workflow: Architecture Bug Fix"]
                     direction TB
@@ -200,6 +222,7 @@ flowchart TD
 
             BF_SUMMARIZE --> BF_NEXT{More bugs?}
             BF_ARCH --> BF_NEXT
+            BF_UNRESOLVED --> BF_NEXT
             BF_NEXT -->|Yes| BF_EACH_BUG
             BF_NEXT -->|No| BF_RETEST
 
@@ -241,7 +264,95 @@ flowchart TD
     FINAL_STATUS["`Update work item status
     Close all sessions`"]
 
+    %% ════════════════════════════════════════════════════════════════
+    %% Design Mode (--design / --plan)
+    %% Stages 1-4 only, interactive checkpoints, no background
+    %% ════════════════════════════════════════════════════════════════
+
+    subgraph DM["Design Mode (--design / --plan)"]
+        DESIGN_MODE_START --> DM_BG_CHECK{--background?}
+        DM_BG_CHECK -->|Yes| DM_REJECT([Rejected: incompatible])
+        DM_BG_CHECK -->|No| DM_S1
+
+        DM_S1["`**Dev** produces
+        technical design`"]
+        DM_S1 --> DM_S1_OK{Dev success?}
+        DM_S1_OK -->|No| DM_ABORT([Abort])
+        DM_S1_OK -->|Yes| DM_S2
+
+        DM_S2["`Design review loop
+        (QA reviews, Dev revises)`"]
+        DM_S2 --> DM_CP1{"`**User Checkpoint**
+        Proceed to planning?`"}
+        DM_CP1 -->|N| DM_STOP([User stopped])
+        DM_CP1 -->|Y / feedback| DM_S3
+
+        DM_S3["`**Dev** creates
+        implementation plan`"]
+        DM_S3 --> DM_S3_OK{Dev success?}
+        DM_S3_OK -->|No| DM_ABORT
+        DM_S3_OK -->|Yes| DM_S4
+
+        DM_S4["`Plan review loop
+        (QA reviews, Dev revises)`"]
+        DM_S4 --> DM_CP2{"`**User Checkpoint**
+        Finish design workflow?`"}
+        DM_CP2 -->|N| DM_STOP
+        DM_CP2 -->|Y / feedback| DM_REPORT
+
+        DM_REPORT["`Mode-aware report
+        success = design_passed AND plan_passed`"]
+    end
+
+    %% ════════════════════════════════════════════════════════════════
+    %% Development Mode (--development / --dev)
+    %% Phased development only, no design/plan generation
+    %% ════════════════════════════════════════════════════════════════
+
+    subgraph DEVM["Development Mode (--development / --dev)"]
+        DEV_MODE_START --> DEVM_PARSE["`Parse phases from
+        requirement text`"]
+        DEVM_PARSE --> DEVM_LOOP
+
+        subgraph DEVM_LOOP["For each phase i/N"]
+            DEVM_CANCEL{Cancelled?}
+            DEVM_CANCEL -->|Yes| DEVM_SKIP([Skip remaining])
+            DEVM_CANCEL -->|No| DEVM_IMPL
+
+            DEVM_IMPL["`**Dev** implements phase i`"]
+            DEVM_IMPL --> DEVM_IMPL_OK{Dev success?}
+            DEVM_IMPL_OK -->|No| DEVM_FAIL([Phase failed])
+            DEVM_IMPL_OK -->|Yes| DEVM_SUMMARIZE["`**Dev** summarizes`"]
+            DEVM_SUMMARIZE --> DEVM_CR["`QA code review loop
+            (informational)`"]
+            DEVM_CR --> DEVM_COMMIT["`**Dev** commits`"]
+        end
+
+        DEVM_LOOP --> DEVM_REPORT["`Mode-aware report
+        success = all phases committed`"]
+    end
+
+    %% ════════════════════════════════════════════════════════════════
+    %% Test Mode (--test / --ga-test)
+    %% GA testing only, no design/plan/development
+    %% ════════════════════════════════════════════════════════════════
+
+    subgraph TM["Test Mode (--test / --ga-test)"]
+        TEST_MODE_START --> TM_GA["`GA test phase
+        (plan, review, execute, bug-fix loop)`"]
+        TM_GA --> TM_ARCH_NOTE["`arch_change bugs reported
+        as unresolved follow-ups
+        (allow_arch_fix=False)`"]
+        TM_ARCH_NOTE --> TM_REPORT["`Mode-aware report
+        success = GA passed`"]
+    end
+
+    %% ════════════════════════════════════════════════════════════════
+    %% Styles
+    %% ════════════════════════════════════════════════════════════════
+
     style START fill:#e1f5fe
+    style MODE_SELECT fill:#e1f5fe
     style WF_SUCCESS fill:#c8e6c9
     style WF_ISSUES fill:#fff9c4
     style ABORT fill:#ffcdd2
@@ -253,3 +364,9 @@ flowchart TD
     style BF_ABORT fill:#ffcdd2
     style GA_ABORT fill:#ffcdd2
     style GA_ABORT2 fill:#ffcdd2
+    style DM_ABORT fill:#ffcdd2
+    style DM_STOP fill:#ffcdd2
+    style DM_REJECT fill:#ffcdd2
+    style DM_REPORT fill:#c8e6c9
+    style DEVM_REPORT fill:#c8e6c9
+    style TM_REPORT fill:#c8e6c9
