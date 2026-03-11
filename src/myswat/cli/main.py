@@ -370,10 +370,26 @@ def _print_teamwork_details(pool, item, console, details: bool = False) -> None:
     console.print(tree)
 
 
+def _work_mode_value(item: dict) -> str | None:
+    metadata = item.get("metadata_json") if isinstance(item, dict) else None
+    work_mode = metadata.get("work_mode") if isinstance(metadata, dict) else None
+    if isinstance(work_mode, str) and work_mode:
+        return work_mode
+    return None
+
+
+def _display_mode(item: dict, fallback: str) -> str:
+    work_mode = _work_mode_value(item)
+    return work_mode if work_mode else fallback
+
+
 def _print_task_state(console, item: dict) -> None:
     metadata = item.get("metadata_json") if isinstance(item, dict) else None
     background = metadata.get("background") if isinstance(metadata, dict) else {}
     task_state = metadata.get("task_state") if isinstance(metadata, dict) else {}
+    work_mode = _work_mode_value(item)
+    if work_mode:
+        console.print(f"[bold]Workflow mode:[/bold] {work_mode}")
     if isinstance(background, dict) and background:
         console.print("[bold]Execution:[/bold]")
         if background.get("mode"):
@@ -518,7 +534,7 @@ def status(
                 (item["id"],),
             )
             if cycles:
-                mode = "[cyan]team[/cyan]"
+                inferred_mode = "[cyan]team[/cyan]"
                 agent_names = set()
                 for c in cycles:
                     agent_names.add(c["proposer_role"])
@@ -542,7 +558,8 @@ def status(
                         (item["id"],),
                     )
                     agents_str = ", ".join(s["role"] for s in sess_agents) if sess_agents else "-"
-                mode = "[dim]solo[/dim]"
+                inferred_mode = "[dim]solo[/dim]"
+            mode = _display_mode(item, inferred_mode)
             metadata = item.get("metadata_json") if isinstance(item, dict) else None
             task_state = metadata.get("task_state") if isinstance(metadata, dict) else {}
             stage = task_state.get("current_stage", "-") if isinstance(task_state, dict) else "-"

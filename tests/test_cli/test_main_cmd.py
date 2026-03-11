@@ -9,7 +9,7 @@ import pytest
 from click.exceptions import Exit as ClickExit
 from rich.console import Console
 
-from myswat.cli.main import _print_teamwork_details, _infer_stage_labels
+from myswat.cli.main import _display_mode, _print_teamwork_details, _infer_stage_labels
 from myswat.workflow.engine import WorkMode
 
 
@@ -332,6 +332,41 @@ class TestTaskCommand:
         task(work_item_id=7, project="proj")
         mock_teamwork.assert_called_once()
 
+    @patch("myswat.cli.main._print_teamwork_details")
+    @patch("myswat.config.settings.MySwatSettings")
+    @patch("myswat.db.connection.TiDBPool")
+    @patch("myswat.memory.store.MemoryStore")
+    def test_task_prints_workflow_mode(self, mock_store_cls, mock_pool_cls, mock_settings_cls, mock_teamwork):
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
+
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = {"id": 1, "slug": "proj", "name": "Proj"}
+        mock_store.get_work_item.return_value = {
+            "id": 7,
+            "project_id": 1,
+            "status": "in_progress",
+            "item_type": "code_change",
+            "title": "Implement feature",
+            "description": "Detailed",
+            "metadata_json": {
+                "work_mode": "development",
+                "task_state": {
+                    "current_stage": "phase_1",
+                    "latest_summary": "working",
+                },
+            },
+        }
+        mock_store_cls.return_value = mock_store
+        mock_pool_cls.return_value = MagicMock()
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["task", "7", "--project", "proj"])
+        assert result.exit_code == 0
+        assert "Workflow mode:" in result.stdout
+        assert "development" in result.stdout
+        mock_teamwork.assert_called_once()
+
     @patch("myswat.config.settings.MySwatSettings")
     @patch("myswat.db.connection.TiDBPool")
     @patch("myswat.memory.store.MemoryStore")
@@ -447,6 +482,14 @@ class TestTaskCommand:
         result = runner.invoke(app, ["status", "--project", "proj", "--details"])
         assert result.exit_code == 0
         mock_teamwork.assert_called_once()
+
+    def test_status_prefers_work_mode_metadata(self):
+        item = {"metadata_json": {"work_mode": "development"}}
+        assert _display_mode(item, "[cyan]team[/cyan]") == "development"
+
+    def test_status_falls_back_when_no_work_mode(self):
+        item = {"metadata_json": {}}
+        assert _display_mode(item, "[dim]solo[/dim]") == "[dim]solo[/dim]"
 
     @patch("myswat.config.settings.MySwatSettings")
     @patch("myswat.db.connection.TiDBPool")
