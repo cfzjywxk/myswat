@@ -257,6 +257,66 @@ class TestRunWork:
         assert any("myswat task 42 -p proj" in line for line in rendered)
         assert any("myswat status -p proj" in line for line in rendered)
 
+    @patch("myswat.cli.work_cmd._run_with_task_monitor")
+    @patch("myswat.cli.work_cmd.WorkflowEngine")
+    @patch("myswat.cli.learn_cmd.ensure_learned")
+    @patch("myswat.cli.work_cmd.MySwatSettings")
+    @patch("myswat.cli.work_cmd.TiDBPool")
+    @patch("myswat.cli.work_cmd.run_migrations")
+    @patch("myswat.cli.work_cmd.MemoryStore")
+    @patch("myswat.cli.work_cmd.SessionManager")
+    @patch("myswat.cli.work_cmd.KnowledgeCompactor")
+    def test_foreground_run_uses_task_monitor(
+        self,
+        mock_comp,
+        mock_sm_cls,
+        mock_store_cls,
+        mock_mig,
+        mock_pool_cls,
+        mock_settings_cls,
+        mock_learn,
+        mock_engine_cls,
+        mock_task_monitor,
+    ):
+        settings = MagicMock()
+        settings.compaction.threshold_turns = 200
+        settings.compaction.threshold_tokens = 800000
+        settings.workflow.max_review_iterations = 5
+        mock_settings_cls.return_value = settings
+
+        dev_row = _agent_row("developer")
+        qa_row = _agent_row("qa_main", "kimi")
+
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = {
+            "id": 1, "repo_path": "/tmp",
+        }
+
+        def get_agent_side(pid, role):
+            if role == "developer":
+                return dev_row
+            if role == "qa_main":
+                return qa_row
+            return None
+
+        mock_store.get_agent.side_effect = get_agent_side
+        mock_store.create_work_item.return_value = 42
+        mock_store_cls.return_value = mock_store
+
+        sm = MagicMock()
+        sm.session = SimpleNamespace(session_uuid="uuid")
+        sm._agent_row = qa_row
+        mock_sm_cls.return_value = sm
+
+        mock_task_monitor.return_value = SimpleNamespace(success=True)
+
+        run_work("proj", "do stuff")
+
+        mock_task_monitor.assert_called_once()
+        kwargs = mock_task_monitor.call_args.kwargs
+        assert kwargs["label"] == "Running full teamwork workflow"
+        assert kwargs["proj"]["id"] == 1
+
     @patch("myswat.cli.work_cmd.WorkflowEngine")
     @patch("myswat.cli.learn_cmd.ensure_learned")
     @patch("myswat.cli.work_cmd.MySwatSettings")

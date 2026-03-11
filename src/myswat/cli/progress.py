@@ -209,6 +209,76 @@ def _build_task_monitor_display(
     return text
 
 
+def _build_task_snapshot_display(
+    proj: dict,
+    work_item_id: int | None,
+    item: dict,
+    state: dict,
+    heading: str = "Current task",
+) -> Text:
+    """Build a stable post-run snapshot of the current work item."""
+    text = Text(f" {heading}\n", style="bold")
+
+    if work_item_id is None:
+        text.append("  Work item not created yet.\n", style="dim")
+        return text
+
+    text.append(f"  Project: {proj['slug']}  Work item: #{work_item_id}\n", style="bold")
+
+    status = _single_line_preview(item.get("status"), 40)
+    if status and status != "in_progress":
+        text.append(f"  Status: {status}\n")
+
+    stage = _single_line_preview(state.get("current_stage"), 80)
+    if stage:
+        text.append(f"  Stage: {stage}\n")
+
+    summary = _single_line_preview(state.get("latest_summary"))
+    if summary:
+        text.append(f"  Summary: {summary}\n", style="dim")
+
+    next_todos = state.get("next_todos") or []
+    if next_todos:
+        text.append("  Next:\n", style="green")
+        for todo in next_todos[:3]:
+            text.append(f"    - {_single_line_preview(todo, 100)}\n", style="green")
+
+    open_issues = state.get("open_issues") or []
+    if open_issues:
+        text.append("  Open issues:\n", style="yellow")
+        for issue in open_issues[:3]:
+            text.append(f"    - {_single_line_preview(issue, 100)}\n", style="yellow")
+
+    text.append("\n  Query from another terminal:\n", style="bold")
+    text.append(f"    myswat task {work_item_id} -p {proj['slug']}\n", style="dim")
+    text.append(f"    myswat status -p {proj['slug']}\n", style="dim")
+    return text
+
+
+def _print_task_monitor_snapshot(
+    console: Console,
+    store: "MemoryStore",
+    proj: dict,
+    work_item_id: int | None,
+    heading: str = "Current task",
+) -> None:
+    """Print a non-transient snapshot after task monitor exit."""
+    current_id, item, state = _load_task_monitor_snapshot(store, work_item_id)
+    if current_id is None:
+        return
+
+    console.print()
+    console.print(
+        _build_task_snapshot_display(
+            proj=proj,
+            work_item_id=current_id,
+            item=item,
+            state=state,
+            heading=heading,
+        )
+    )
+
+
 def _run_with_task_monitor(
     console: Console,
     store: "MemoryStore",
@@ -327,6 +397,17 @@ def _run_with_task_monitor(
                 termios.tcsetattr(fd, termios.TCSAFLUSH, old_settings)
         except Exception:
             pass
+
+    try:
+        _print_task_monitor_snapshot(
+            console=console,
+            store=store,
+            proj=proj,
+            work_item_id=work_item_ref.get("id"),
+        )
+    except Exception:
+        # Best-effort snapshot only; do not mask the task outcome.
+        pass
 
     if error[0] is not None:
         raise error[0]

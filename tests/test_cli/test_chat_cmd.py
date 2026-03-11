@@ -16,7 +16,9 @@ from myswat.cli.chat_cmd import (
     _make_runner,
     _show_status,
     _run_inline_review,
+    _run_inline_review_interactive,
     _run_workflow,
+    _run_workflow_interactive,
     _check_esc,
 )
 
@@ -235,6 +237,24 @@ class TestRunInlineReview:
         store.update_work_item_status.assert_any_call(42, "review")
 
 
+class TestRunInlineReviewInteractive:
+    @patch("myswat.cli.chat_cmd._run_with_task_monitor")
+    def test_uses_task_monitor(self, mock_task_monitor):
+        _run_inline_review_interactive(
+            store=MagicMock(),
+            proj=_proj(),
+            compactor=MagicMock(),
+            workdir="/tmp",
+            settings=MagicMock(),
+            task="do stuff",
+        )
+
+        mock_task_monitor.assert_called_once()
+        kwargs = mock_task_monitor.call_args.kwargs
+        assert kwargs["label"] == "Running dev+QA review loop"
+        assert kwargs["proj"] == _proj()
+
+
 # ---------------------------------------------------------------------------
 # _run_workflow
 # ---------------------------------------------------------------------------
@@ -366,6 +386,27 @@ class TestRunWorkflow:
             store, _proj(), compactor, "/tmp", settings, "do stuff",
             prompt_session=prompt_session,
         )
+
+
+class TestRunWorkflowInteractive:
+    @patch("myswat.cli.chat_cmd._run_with_task_monitor")
+    def test_uses_task_monitor(self, mock_task_monitor):
+        prompt_session = MagicMock()
+
+        _run_workflow_interactive(
+            store=MagicMock(),
+            proj=_proj(),
+            compactor=MagicMock(),
+            workdir="/tmp",
+            settings=MagicMock(),
+            requirement="ship feature",
+            prompt_session=prompt_session,
+        )
+
+        mock_task_monitor.assert_called_once()
+        kwargs = mock_task_monitor.call_args.kwargs
+        assert kwargs["label"] == "Running full teamwork workflow"
+        assert kwargs["proj"] == _proj()
 
 
 # ---------------------------------------------------------------------------
