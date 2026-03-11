@@ -10,6 +10,7 @@ from click.exceptions import Exit as ClickExit
 from rich.console import Console
 
 from myswat.cli.main import _print_teamwork_details, _infer_stage_labels
+from myswat.workflow.engine import WorkMode
 
 
 # ---------------------------------------------------------------------------
@@ -613,7 +614,54 @@ class TestCommandRouting:
 
         runner = CliRunner()
         result = runner.invoke(app, ["work", "add feature", "--project", "proj"])
-        mock_run_work.assert_called_once()
+        assert result.exit_code == 0
+        mock_run_work.assert_called_once_with(
+            "proj",
+            "add feature",
+            workdir=None,
+            background=False,
+            mode=WorkMode.full,
+        )
+
+    @patch("myswat.cli.work_cmd.run_work")
+    def test_work_command_mode_aliases(self, mock_run_work):
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
+
+        runner = CliRunner()
+        cases = [
+            ("--design", WorkMode.design),
+            ("--plan", WorkMode.design),
+            ("--development", WorkMode.development),
+            ("--dev", WorkMode.development),
+            ("--test", WorkMode.test),
+            ("--ga-test", WorkMode.test),
+        ]
+        for flag, expected_mode in cases:
+            mock_run_work.reset_mock()
+            result = runner.invoke(app, ["work", "add feature", "--project", "proj", flag])
+            assert result.exit_code == 0
+            mock_run_work.assert_called_once_with(
+                "proj",
+                "add feature",
+                workdir=None,
+                background=False,
+                mode=expected_mode,
+            )
+
+    @patch("myswat.cli.work_cmd.run_work")
+    def test_work_command_rejects_multiple_mode_flags(self, mock_run_work):
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
+
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["work", "add feature", "--project", "proj", "--design", "--test"],
+        )
+        assert result.exit_code != 0
+        assert result.exception is not None
+        mock_run_work.assert_not_called()
 
     @patch("myswat.cli.work_cmd.run_work")
     def test_work_command_background(self, mock_run_work):
@@ -622,7 +670,14 @@ class TestCommandRouting:
 
         runner = CliRunner()
         result = runner.invoke(app, ["work", "add feature", "--project", "proj", "--background"])
-        mock_run_work.assert_called_once_with("proj", "add feature", workdir=None, background=True)
+        assert result.exit_code == 0
+        mock_run_work.assert_called_once_with(
+            "proj",
+            "add feature",
+            workdir=None,
+            background=True,
+            mode=WorkMode.full,
+        )
 
     @patch("myswat.cli.work_cmd.run_background_work_item")
     def test_work_background_worker_command(self, mock_run_background_work_item):

@@ -6,6 +6,7 @@ import typer
 
 from myswat.cli.progress import _describe_process_event
 from myswat.cli.memory_cmd import memory_app
+from myswat.workflow.engine import WorkMode
 
 app = typer.Typer(
     name="myswat",
@@ -48,6 +49,21 @@ def run(
         run_with_review(project, task, developer_role=role, reviewer_role=reviewer, workdir=workdir)
 
 
+def _resolve_work_mode(*, design: bool, development: bool, test: bool) -> WorkMode:
+    selected = []
+    if design:
+        selected.append(WorkMode.design)
+    if development:
+        selected.append(WorkMode.development)
+    if test:
+        selected.append(WorkMode.test)
+    if len(selected) > 1:
+        raise typer.BadParameter(
+            "Choose only one of --design/--plan, --development/--dev, or --test/--ga-test."
+        )
+    return selected[0] if selected else WorkMode.full
+
+
 @app.command()
 def work(
     requirement: str = typer.Argument(..., help="Requirement description"),
@@ -58,10 +74,19 @@ def work(
         "--background",
         help="Detach the workflow and keep it running after this terminal exits.",
     ),
+    design_mode: bool = typer.Option(False, "--design", "--plan", help="Run design + planning only."),
+    development_mode: bool = typer.Option(False, "--development", "--dev", help="Run development only."),
+    test_mode: bool = typer.Option(False, "--test", "--ga-test", help="Run GA testing only."),
 ):
-    """Run the full teamwork workflow: design -> review -> plan -> dev -> commit."""
+    """Run the teamwork workflow in full or selected foreground mode."""
     from myswat.cli.work_cmd import run_work
-    run_work(project, requirement, workdir=workdir, background=background)
+
+    mode = _resolve_work_mode(
+        design=design_mode,
+        development=development_mode,
+        test=test_mode,
+    )
+    run_work(project, requirement, workdir=workdir, background=background, mode=mode)
 
 
 @app.command(name="work-background-worker", hidden=True)

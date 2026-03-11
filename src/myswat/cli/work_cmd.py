@@ -26,7 +26,7 @@ from myswat.db.connection import TiDBPool
 from myswat.db.schema import run_migrations
 from myswat.memory.compactor import KnowledgeCompactor
 from myswat.memory.store import MemoryStore
-from myswat.workflow.engine import WorkflowEngine
+from myswat.workflow.engine import WorkMode, WorkflowEngine
 
 console = Console()
 
@@ -284,6 +284,7 @@ def _run_workflow(
     work_item_id: int | None = None,
     show_monitor: bool,
     background_worker: bool,
+    mode: WorkMode = WorkMode.full,
 ) -> int:
     settings, store, proj, effective_workdir = _load_project_context(project_slug, workdir)
 
@@ -334,6 +335,7 @@ def _run_workflow(
             description=requirement,
             item_type="code_change",
             assigned_agent_id=dev_agent["id"],
+            metadata_json={"work_mode": mode.value},
         )
     else:
         existing_item = store.get_work_item(work_item_id)
@@ -396,7 +398,8 @@ def _run_workflow(
         project_id=proj["id"],
         work_item_id=work_item_id,
         max_review_iterations=settings.workflow.max_review_iterations,
-        auto_approve=True,
+        mode=mode,
+        auto_approve=(mode != WorkMode.design),
         should_cancel=cancel_event.is_set,
     )
 
@@ -414,7 +417,7 @@ def _run_workflow(
                 console=console,
                 store=store,
                 proj=proj,
-                label="Running full teamwork workflow",
+                label="Running full teamwork workflow" if mode == WorkMode.full else f"Running {mode.value} teamwork workflow",
                 worker_fn=_worker,
                 work_item_ref=work_item_ref,
                 cancel_targets=cancel_targets,
@@ -614,6 +617,7 @@ def run_work(
     requirement: str,
     workdir: str | None = None,
     background: bool = False,
+    mode: WorkMode = WorkMode.full,
 ) -> None:
     """Run the full teamwork workflow."""
     if background:
@@ -626,6 +630,7 @@ def run_work(
         workdir=workdir,
         show_monitor=True,
         background_worker=False,
+        mode=mode,
     )
 
 

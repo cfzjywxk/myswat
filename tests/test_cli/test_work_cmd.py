@@ -11,6 +11,8 @@ import pytest
 import typer
 from click.exceptions import Exit as ClickExit
 
+from myswat.workflow.engine import WorkMode
+
 from myswat.cli.work_cmd import (
     _build_background_env,
     _make_runner,
@@ -196,6 +198,9 @@ class TestRunWork:
 
         run_work("proj", "do stuff")
         mock_store.update_work_item_status.assert_any_call(42, "completed")
+        assert mock_store.create_work_item.call_args.kwargs["metadata_json"] == {"work_mode": "full"}
+        assert mock_engine_cls.call_args.kwargs["mode"] == WorkMode.full
+        assert mock_engine_cls.call_args.kwargs["auto_approve"] is True
 
     @patch("myswat.cli.work_cmd.WorkflowEngine")
     @patch("myswat.cli.learn_cmd.ensure_learned")
@@ -455,6 +460,58 @@ class TestRunWork:
         mock_engine_cls.return_value = engine
 
         run_work("proj", "do stuff")
+
+    @patch("myswat.cli.work_cmd.WorkflowEngine")
+    @patch("myswat.cli.learn_cmd.ensure_learned")
+    @patch("myswat.cli.work_cmd.MySwatSettings")
+    @patch("myswat.cli.work_cmd.TiDBPool")
+    @patch("myswat.cli.work_cmd.run_migrations")
+    @patch("myswat.cli.work_cmd.MemoryStore")
+    @patch("myswat.cli.work_cmd.SessionManager")
+    @patch("myswat.cli.work_cmd.KnowledgeCompactor")
+    def test_design_mode_threads_to_engine_and_persists_metadata(
+        self, mock_comp, mock_sm_cls, mock_store_cls, mock_mig,
+        mock_pool_cls, mock_settings_cls, mock_learn, mock_engine_cls,
+    ):
+        settings = MagicMock()
+        settings.compaction.threshold_turns = 200
+        settings.compaction.threshold_tokens = 800000
+        settings.workflow.max_review_iterations = 5
+        mock_settings_cls.return_value = settings
+
+        dev_row = _agent_row("developer")
+        qa_row = _agent_row("qa_main", "kimi")
+
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = {
+            "id": 1, "repo_path": "/tmp",
+        }
+
+        def get_agent_side(pid, role):
+            if role == "developer":
+                return dev_row
+            if role == "qa_main":
+                return qa_row
+            return None
+
+        mock_store.get_agent.side_effect = get_agent_side
+        mock_store.create_work_item.return_value = 42
+        mock_store_cls.return_value = mock_store
+
+        sm = MagicMock()
+        sm.session = SimpleNamespace(session_uuid="uuid")
+        sm._agent_row = qa_row
+        mock_sm_cls.return_value = sm
+
+        engine = MagicMock()
+        engine.run.return_value = SimpleNamespace(success=True)
+        mock_engine_cls.return_value = engine
+
+        run_work("proj", "do stuff", mode=WorkMode.design)
+
+        assert mock_store.create_work_item.call_args.kwargs["metadata_json"] == {"work_mode": "design"}
+        assert mock_engine_cls.call_args.kwargs["mode"] == WorkMode.design
+        assert mock_engine_cls.call_args.kwargs["auto_approve"] is False
 
     @patch("myswat.cli.work_cmd.subprocess.Popen")
     @patch("myswat.cli.work_cmd.MySwatSettings")
