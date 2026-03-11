@@ -120,13 +120,15 @@ def test_review_cycles_use_distinct_artifacts_across_stages() -> None:
         ask_user=lambda _prompt: "y",
     )
 
-    design, design_iters = engine._run_review_loop("design artifact", "design", context="req")
-    plan, plan_iters = engine._run_review_loop("plan artifact", "plan", context="req")
+    design, design_iters, design_passed = engine._run_review_loop("design artifact", "design", context="req")
+    plan, plan_iters, plan_passed = engine._run_review_loop("plan artifact", "plan", context="req")
 
     assert design == "design artifact"
     assert plan == "plan artifact"
     assert design_iters == 1
     assert plan_iters == 1
+    assert design_passed is True
+    assert plan_passed is True
     assert len(store.artifacts) == 2
     assert [artifact["artifact_type"] for artifact in store.artifacts] == ["design_doc", "proposal"]
     assert len(store.cycles) == 2
@@ -162,10 +164,11 @@ def test_review_cycles_track_new_artifact_each_iteration() -> None:
         ask_user=lambda _prompt: "y",
     )
 
-    artifact, iterations = engine._run_review_loop("initial design artifact", "design", context="req")
+    artifact, iterations, passed = engine._run_review_loop("initial design artifact", "design", context="req")
 
     assert artifact == "revised design artifact"
     assert iterations == 2
+    assert passed is True
     assert len(store.artifacts) == 2
     assert [cycle["artifact_id"] for cycle in store.cycles] == [100, 101]
     assert [update["verdict"] for update in store.verdict_updates] == ["changes_requested", "lgtm"]

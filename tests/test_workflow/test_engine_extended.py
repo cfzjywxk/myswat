@@ -129,8 +129,8 @@ class TestRun:
     ):
         # Setup return values
         m_review.side_effect = [
-            ("reviewed design", 1),  # design review
-            ("reviewed plan", 1),    # plan review
+            ("reviewed design", 1, True),  # design review
+            ("reviewed plan", 1, True),    # plan review
         ]
         m_checkpoint.side_effect = [
             "approved design",  # after design review
@@ -152,6 +152,8 @@ class TestRun:
         assert result.ga_test.passed is True
         assert result.final_report == "# Report"
         assert result.success is True
+        assert result.design_review_passed is True
+        assert result.plan_review_passed is True
 
     @patch.object(WorkflowEngine, "_run_design", return_value="")
     def test_design_fails_aborts(self, m_design):
@@ -160,7 +162,7 @@ class TestRun:
         assert result.design == ""
         assert result.success is False
 
-    @patch.object(WorkflowEngine, "_run_review_loop", return_value=("design", 1))
+    @patch.object(WorkflowEngine, "_run_review_loop", return_value=("design", 1, True))
     @patch.object(WorkflowEngine, "_run_design", return_value="the design")
     def test_user_rejects_design_aborts(self, m_design, m_review):
         engine, _, _ = _make_engine(ask_return="n")
@@ -174,7 +176,7 @@ class TestRun:
     @patch.object(WorkflowEngine, "_run_planning", return_value="")
     @patch.object(WorkflowEngine, "_run_design", return_value="design")
     def test_planning_fails_aborts(self, m_design, m_plan, m_review, m_cp):
-        m_review.return_value = ("design", 1)
+        m_review.return_value = ("design", 1, True)
         m_cp.return_value = "design"
         engine, _, _ = _make_engine()
         result = engine.run("req")
@@ -186,7 +188,7 @@ class TestRun:
     @patch.object(WorkflowEngine, "_run_planning", return_value="plan")
     @patch.object(WorkflowEngine, "_run_design", return_value="design")
     def test_user_rejects_plan_aborts(self, m_design, m_plan, m_review, m_cp):
-        m_review.side_effect = [("design", 1), ("plan", 1)]
+        m_review.side_effect = [("design", 1, True), ("plan", 1, True)]
         m_cp.side_effect = ["design", None]  # accept design, reject plan
         engine, _, _ = _make_engine()
         result = engine.run("req")
@@ -203,7 +205,7 @@ class TestRun:
     def test_ga_test_aborted(
         self, m_design, m_plan, m_review, m_cp, m_phases, m_phase, m_ga, m_report,
     ):
-        m_review.side_effect = [("design", 1), ("plan", 1)]
+        m_review.side_effect = [("design", 1, True), ("plan", 1, True)]
         m_cp.side_effect = ["design", "plan"]
         m_phase.return_value = PhaseResult(
             name="p1", summary="s", review_iterations=1, committed=True,
@@ -225,7 +227,7 @@ class TestRun:
     def test_not_committed_means_not_success(
         self, m_design, m_plan, m_review, m_cp, m_phases, m_phase, m_ga, m_report,
     ):
-        m_review.side_effect = [("design", 1), ("plan", 1)]
+        m_review.side_effect = [("design", 1, True), ("plan", 1, True)]
         m_cp.side_effect = ["design", "plan"]
         m_phase.return_value = PhaseResult(
             name="p1", summary="s", review_iterations=1, committed=False,
@@ -309,7 +311,7 @@ class TestRunPhase:
             max_review=1,
         )
         # Override _run_review_loop to avoid complexity
-        with patch.object(engine, "_run_review_loop", return_value=("reviewed", 1)):
+        with patch.object(engine, "_run_review_loop", return_value=("reviewed", 1, True)):
             result = engine._run_phase(
                 phase_name="core",
                 phase_index=1,
@@ -320,6 +322,7 @@ class TestRunPhase:
                 completed_summaries=["prev phase"],
             )
         assert result.committed is True
+        assert result.review_passed is True
         assert result.review_iterations == 1
 
     def test_summary_fails_uses_impl_content(self):
@@ -333,7 +336,7 @@ class TestRunPhase:
             qa_responses=[_lgtm_json()],
             max_review=1,
         )
-        with patch.object(engine, "_run_review_loop", return_value=("impl content", 1)):
+        with patch.object(engine, "_run_review_loop", return_value=("impl content", 1, True)):
             result = engine._run_phase(
                 phase_name="core",
                 phase_index=1,
@@ -356,7 +359,7 @@ class TestRunPhase:
             qa_responses=[_lgtm_json()],
             max_review=1,
         )
-        with patch.object(engine, "_run_review_loop", return_value=("reviewed", 1)):
+        with patch.object(engine, "_run_review_loop", return_value=("reviewed", 1, True)):
             result = engine._run_phase(
                 phase_name="core",
                 phase_index=1,
@@ -367,6 +370,33 @@ class TestRunPhase:
                 completed_summaries=[],
             )
         assert result.committed is False
+        assert result.review_passed is True
+
+
+    def test_review_not_passed_is_recorded_but_commit_still_attempted(self):
+        """Phase review remains informational in phase 2."""
+        engine, dev, _ = _make_engine(
+            dev_responses=[
+                "impl done",
+                "summary",
+                "committed",
+            ],
+            qa_responses=[_changes_json(["follow-up"])],
+            max_review=1,
+        )
+        with patch.object(engine, "_run_review_loop", return_value=("reviewed", 1, False)):
+            result = engine._run_phase(
+                phase_name="core",
+                phase_index=1,
+                total_phases=1,
+                requirement="req",
+                design="design",
+                plan="plan",
+                completed_summaries=[],
+            )
+        assert result.committed is True
+        assert result.review_passed is False
+
 
 
 # ===================================================================
@@ -391,9 +421,10 @@ class TestRunGATestPhase:
             max_review=1,
         )
         # _run_review_loop returns the reviewed plan
-        with patch.object(engine, "_run_review_loop", return_value=("test plan", 1)):
+        with patch.object(engine, "_run_review_loop", return_value=("test plan", 1, True)):
             result = engine._run_ga_test_phase("req", "design", "plan", "summary")
         assert result.aborted is True
+        assert result.test_plan_review_passed is True
 
     def test_qa_fails_test_execution(self):
         """When QA fails to execute tests, return early."""
@@ -402,7 +433,7 @@ class TestRunGATestPhase:
             ask_return="y",
             max_review=1,
         )
-        with patch.object(engine, "_run_review_loop", return_value=("test plan", 1)):
+        with patch.object(engine, "_run_review_loop", return_value=("test plan", 1, True)):
             result = engine._run_ga_test_phase("req", "design", "plan", "summary")
         assert not result.passed
 
@@ -414,9 +445,10 @@ class TestRunGATestPhase:
             ask_return="y",
             max_review=1,
         )
-        with patch.object(engine, "_run_review_loop", return_value=("test plan", 1)):
+        with patch.object(engine, "_run_review_loop", return_value=("test plan", 1, True)):
             result = engine._run_ga_test_phase("req", "design", "plan", "summary")
         assert result.passed is True
+        assert result.test_plan_review_passed is True
         assert result.bugs_found == 0
 
     def test_bug_fix_loop_single_round(self):
@@ -435,7 +467,7 @@ class TestRunGATestPhase:
             ask_return="y",
             max_review=1,
         )
-        with patch.object(engine, "_run_review_loop", return_value=("test plan", 1)):
+        with patch.object(engine, "_run_review_loop", return_value=("test plan", 1, True)):
             with patch.object(engine, "_run_bug_fix", return_value=BugFixResult(
                 title="bug1", fixed=True, summary="fixed it",
             )):
@@ -462,7 +494,7 @@ class TestRunGATestPhase:
             ask_return="y",
             max_review=1,
         )
-        with patch.object(engine, "_run_review_loop", return_value=("test plan", 1)):
+        with patch.object(engine, "_run_review_loop", return_value=("test plan", 1, True)):
             with patch.object(engine, "_run_bug_fix", return_value=BugFixResult(
                 title="bug1", fixed=False, summary="couldn't fix",
             )):
@@ -484,7 +516,7 @@ class TestRunGATestPhase:
             ask_return="y",
             max_review=1,
         )
-        with patch.object(engine, "_run_review_loop", return_value=("test plan", 1)):
+        with patch.object(engine, "_run_review_loop", return_value=("test plan", 1, True)):
             with patch.object(engine, "_run_bug_fix", return_value=BugFixResult(
                 title="x", fixed=True, summary="f",
             )):
@@ -507,7 +539,7 @@ class TestRunGATestPhase:
             ask_return="y",
             max_review=1,
         )
-        with patch.object(engine, "_run_review_loop", return_value=("test plan", 1)):
+        with patch.object(engine, "_run_review_loop", return_value=("test plan", 1, True)):
             with patch.object(engine, "_run_bug_fix", return_value=BugFixResult(
                 title="bug1", fixed=True, summary="fixed",
             )):
@@ -539,7 +571,7 @@ class TestRunGATestPhase:
             BugFixResult(title="b2", fixed=True, summary="f2"),
         ]
         fix_iter = iter(fix_results)
-        with patch.object(engine, "_run_review_loop", return_value=("test plan", 1)):
+        with patch.object(engine, "_run_review_loop", return_value=("test plan", 1, True)):
             with patch.object(engine, "_run_bug_fix", side_effect=lambda *a, **k: next(fix_iter)):
                 result = engine._run_ga_test_phase("req", "design", "plan", "summary")
 
@@ -555,7 +587,7 @@ class TestRunGATestPhase:
             ask_return="y",
             max_review=1,
         )
-        with patch.object(engine, "_run_review_loop", return_value=("test plan", 1)):
+        with patch.object(engine, "_run_review_loop", return_value=("test plan", 1, True)):
             result = engine._run_ga_test_phase("req", "design", "plan", "summary")
         # For immediate pass, test_report is the exec output
         assert result.test_report == pass_output
@@ -574,12 +606,27 @@ class TestRunGATestPhase:
             ask_return="y",
             max_review=1,
         )
-        with patch.object(engine, "_run_review_loop", return_value=("test plan", 1)):
+        with patch.object(engine, "_run_review_loop", return_value=("test plan", 1, True)):
             with patch.object(engine, "_run_bug_fix", return_value=BugFixResult(
                 title="b1", fixed=True, summary="f",
             )):
                 result = engine._run_ga_test_phase("req", "design", "plan", "summary")
         assert result.test_report == ""
+
+
+    def test_test_plan_review_flag_can_be_false_while_ga_passes(self):
+        """Review outcome is recorded even when the later GA run passes."""
+        pass_output = json.dumps({"status": "pass"})
+        engine, dev, qas = _make_engine(
+            qa_responses=["test plan", pass_output],
+            ask_return="y",
+            max_review=1,
+        )
+        with patch.object(engine, "_run_review_loop", return_value=("test plan", 1, False)):
+            result = engine._run_ga_test_phase("req", "design", "plan", "summary")
+        assert result.test_plan_review_passed is False
+        assert result.passed is True
+
 
 
 # ===================================================================
@@ -692,7 +739,7 @@ class TestRunBugFixArchChange:
         """User rejects bug fix design."""
         engine, _, _ = _make_engine()
         with patch.object(engine, "_run_design", return_value="new design"):
-            with patch.object(engine, "_run_review_loop", return_value=("reviewed", 1)):
+            with patch.object(engine, "_run_review_loop", return_value=("reviewed", 1, True)):
                 with patch.object(engine, "_user_checkpoint", return_value=None):
                     result = engine._run_bug_fix_arch_change(
                         {"title": "bug"}, "req", "design",
@@ -703,7 +750,7 @@ class TestRunBugFixArchChange:
         """Planning fails after design approval."""
         engine, _, _ = _make_engine()
         with patch.object(engine, "_run_design", return_value="design"):
-            with patch.object(engine, "_run_review_loop", return_value=("design", 1)):
+            with patch.object(engine, "_run_review_loop", return_value=("design", 1, True)):
                 with patch.object(engine, "_user_checkpoint", return_value="design"):
                     with patch.object(engine, "_run_planning", return_value=""):
                         result = engine._run_bug_fix_arch_change(
@@ -717,7 +764,7 @@ class TestRunBugFixArchChange:
         engine, _, _ = _make_engine()
         with patch.object(engine, "_run_design", return_value="design"):
             with patch.object(engine, "_run_review_loop", side_effect=[
-                ("design", 1), ("plan", 1),
+                ("design", 1, True), ("plan", 1, True),
             ]):
                 with patch.object(engine, "_user_checkpoint", side_effect=[
                     "design", None,  # accept design, reject plan
@@ -734,7 +781,7 @@ class TestRunBugFixArchChange:
         phase_result = PhaseResult(name="fix-phase", summary="done", review_iterations=1, committed=True)
         with patch.object(engine, "_run_design", return_value="new design"):
             with patch.object(engine, "_run_review_loop", side_effect=[
-                ("reviewed design", 1), ("reviewed plan", 1),
+                ("reviewed design", 1, True), ("reviewed plan", 1, True),
             ]):
                 with patch.object(engine, "_user_checkpoint", side_effect=[
                     "approved design", "approved plan",
@@ -747,6 +794,8 @@ class TestRunBugFixArchChange:
                                     "req", "design",
                                 )
         assert result.success is True
+        assert result.design_review_passed is True
+        assert result.plan_review_passed is True
         assert len(result.phases) == 1
         assert result.phases[0].committed is True
         assert "critical bug" in result.final_report
@@ -756,7 +805,7 @@ class TestRunBugFixArchChange:
         engine, _, _ = _make_engine()
         phase_result = PhaseResult(name="p", summary="s", review_iterations=1, committed=False)
         with patch.object(engine, "_run_design", return_value="d"):
-            with patch.object(engine, "_run_review_loop", side_effect=[("d", 1), ("p", 1)]):
+            with patch.object(engine, "_run_review_loop", side_effect=[("d", 1, True), ("p", 1, True)]):
                 with patch.object(engine, "_user_checkpoint", side_effect=["d", "p"]):
                     with patch.object(engine, "_run_planning", return_value="p"):
                         with patch.object(engine, "_parse_phases", return_value=["p"]):
@@ -772,7 +821,7 @@ class TestRunBugFixArchChange:
         pr1 = PhaseResult(name="p1", summary="s1", review_iterations=1, committed=True)
         pr2 = PhaseResult(name="p2", summary="s2", review_iterations=1, committed=True)
         with patch.object(engine, "_run_design", return_value="d"):
-            with patch.object(engine, "_run_review_loop", side_effect=[("d", 1), ("p", 1)]):
+            with patch.object(engine, "_run_review_loop", side_effect=[("d", 1, True), ("p", 1, True)]):
                 with patch.object(engine, "_user_checkpoint", side_effect=["d", "p"]):
                     with patch.object(engine, "_run_planning", return_value="p"):
                         with patch.object(engine, "_parse_phases", return_value=["p1", "p2"]):
@@ -799,12 +848,13 @@ class TestRunReviewLoopEdgeCases:
         engine, dev, qas = _make_engine(store=store, max_review=1)
         # QA returns LGTM
         qas[0].send.return_value = _ok(_lgtm_json())
-        result, iters = engine._run_review_loop(
+        result, iters, passed = engine._run_review_loop(
             artifact="artifact text",
             artifact_type="design",
             context="ctx",
         )
         assert iters == 1
+        assert passed is True
         assert result == "artifact text"
 
     def test_reviewer_failure_continues(self):
@@ -813,15 +863,13 @@ class TestRunReviewLoopEdgeCases:
         # First QA fails, second QA gives LGTM
         qas[0].send.return_value = _fail()
         qas[1].send.return_value = _ok(_lgtm_json())
-        result, iters = engine._run_review_loop(
+        result, iters, passed = engine._run_review_loop(
             artifact="artifact",
             artifact_type="code",
             context="ctx",
         )
-        # Because first reviewer failed (continues), second said LGTM,
-        # but all_lgtm stays True only if all reviewers who responded said LGTM.
-        # A failed reviewer is skipped (continue), so all_lgtm stays True.
         assert iters == 1
+        assert passed is False
 
     def test_reviewer_verdict_with_summary_no_issues(self):
         """Non-lgtm verdict with summary but no issues uses summary as issue."""
@@ -838,12 +886,13 @@ class TestRunReviewLoopEdgeCases:
         # iter 2: lgtm
         qas[0].send.side_effect = [_ok(verdict_json), _ok(_lgtm_json())]
         dev.send.return_value = _ok("addressed version")
-        result, iters = engine._run_review_loop(
+        result, iters, passed = engine._run_review_loop(
             artifact="original",
             artifact_type="design",
             context="ctx",
         )
         assert iters == 2
+        assert passed is True
 
     def test_proposer_fails_to_address_breaks(self):
         """When proposer fails to address comments, loop breaks."""
@@ -851,12 +900,13 @@ class TestRunReviewLoopEdgeCases:
         changes = _changes_json(["issue 1"])
         qas[0].send.return_value = _ok(changes)
         dev.send.return_value = _fail()  # proposer fails to address
-        result, iters = engine._run_review_loop(
+        result, iters, passed = engine._run_review_loop(
             artifact="original",
             artifact_type="code",
             context="ctx",
         )
         assert iters == 3  # returns max_review when loop ends early via break
+        assert passed is False
 
     def test_max_iterations_unreviewed_artifact_persisted(self):
         """At max iterations, the final unreviewed artifact is persisted."""
@@ -868,12 +918,13 @@ class TestRunReviewLoopEdgeCases:
         qas[0].send.return_value = _ok(changes)
         dev.send.return_value = _ok("revised")
 
-        result, iters = engine._run_review_loop(
+        result, iters, passed = engine._run_review_loop(
             artifact="original",
             artifact_type="design",
             context="ctx",
         )
         assert iters == 1
+        assert passed is False
         assert result == "revised"
         # The last create_artifact call should be the unreviewed final revision
         last_create_call = store.create_artifact.call_args_list[-1]
@@ -891,11 +942,12 @@ class TestRunReviewLoopEdgeCases:
         dev.send.return_value = _ok("revised")
 
         # Should not raise
-        result, iters = engine._run_review_loop(
+        result, iters, passed = engine._run_review_loop(
             artifact="original",
             artifact_type="design",
             context="ctx",
         )
+        assert passed is False
         assert result == "revised"
 
     def test_review_cycle_persistence_error(self):
@@ -905,12 +957,13 @@ class TestRunReviewLoopEdgeCases:
         store.create_review_cycle.side_effect = Exception("DB error")
         engine, dev, qas = _make_engine(store=store, max_review=1)
         qas[0].send.return_value = _ok(_lgtm_json())
-        result, iters = engine._run_review_loop(
+        result, iters, passed = engine._run_review_loop(
             artifact="artifact",
             artifact_type="design",
             context="ctx",
         )
         assert iters == 1
+        assert passed is True
 
     def test_lgtm_verdict_with_summary_printed(self):
         """LGTM verdict with summary is accepted."""
@@ -921,12 +974,13 @@ class TestRunReviewLoopEdgeCases:
             "summary": "Great work!",
         })
         qas[0].send.return_value = _ok(verdict)
-        result, iters = engine._run_review_loop(
+        result, iters, passed = engine._run_review_loop(
             artifact="good artifact",
             artifact_type="code",
             context="ctx",
         )
         assert iters == 1
+        assert passed is True
         assert result == "good artifact"
 
     def test_no_work_item_id_skips_persistence(self):
@@ -934,11 +988,12 @@ class TestRunReviewLoopEdgeCases:
         store = MagicMock()
         engine, dev, qas = _make_engine(store=store, work_item_id=None, max_review=1)
         qas[0].send.return_value = _ok(_lgtm_json())
-        result, iters = engine._run_review_loop(
+        result, iters, passed = engine._run_review_loop(
             artifact="artifact",
             artifact_type="design",
             context="ctx",
         )
+        assert passed is True
         store.create_artifact.assert_not_called()
         store.create_review_cycle.assert_not_called()
 
@@ -947,7 +1002,7 @@ class TestRunReviewLoopEdgeCases:
         engine, dev, qas = _make_engine(max_review=1)
         # Use QA as proposer, dev as reviewer
         dev.send.return_value = _ok(_lgtm_json())
-        result, iters = engine._run_review_loop(
+        result, iters, passed = engine._run_review_loop(
             artifact="test plan",
             artifact_type="test_plan",
             context="ctx",
@@ -955,6 +1010,7 @@ class TestRunReviewLoopEdgeCases:
             reviewers=[dev],
         )
         assert iters == 1
+        assert passed is True
         # dev was used as reviewer
         dev.send.assert_called_once()
 
@@ -1324,6 +1380,7 @@ class TestDataClasses:
 
     def test_phase_result_defaults(self):
         pr = PhaseResult(name="p", summary="s", review_iterations=1)
+        assert pr.review_passed is False
         assert pr.committed is False
 
     def test_bug_fix_result_defaults(self):
@@ -1335,6 +1392,7 @@ class TestDataClasses:
     def test_ga_test_result_defaults(self):
         ga = GATestResult()
         assert ga.test_plan == ""
+        assert ga.test_plan_review_passed is False
         assert ga.bugs_found == 0
         assert ga.bug_fixes == []
         assert ga.passed is False
@@ -1343,7 +1401,9 @@ class TestDataClasses:
     def test_workflow_result_defaults(self):
         wr = WorkflowResult(requirement="req")
         assert wr.design == ""
+        assert wr.design_review_passed is False
         assert wr.plan == ""
+        assert wr.plan_review_passed is False
         assert wr.phases == []
         assert wr.ga_test is None
         assert wr.final_report == ""
@@ -1407,12 +1467,13 @@ class TestReviewLoopPlanReviewPrompt:
     def test_review_loop_with_plan_artifact_type(self):
         engine, dev, qas = _make_engine(max_review=1)
         qas[0].send.return_value = _ok(_lgtm_json())
-        result, iters = engine._run_review_loop(
+        result, iters, passed = engine._run_review_loop(
             artifact="plan content",
             artifact_type="plan",
             context="ctx",
         )
         assert iters == 1
+        assert passed is True
         # Verify the QA reviewer was called with a prompt containing the plan
         call_args = qas[0].send.call_args[0][0]
         assert "plan content" in call_args

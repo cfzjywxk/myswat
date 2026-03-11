@@ -83,6 +83,7 @@ class PhaseResult:
     name: str
     summary: str
     review_iterations: int
+    review_passed: bool = False
     committed: bool = False
 
 
@@ -98,6 +99,7 @@ class BugFixResult:
 class GATestResult:
     test_plan: str = ""
     test_plan_review_iterations: int = 0
+    test_plan_review_passed: bool = False
     test_report: str = ""
     bugs_found: int = 0
     bugs_fixed: int = 0
@@ -111,8 +113,10 @@ class WorkflowResult:
     requirement: str
     design: str = ""
     design_review_iterations: int = 0
+    design_review_passed: bool = False
     plan: str = ""
     plan_review_iterations: int = 0
+    plan_review_passed: bool = False
     phases: list[PhaseResult] = field(default_factory=list)
     ga_test: GATestResult | None = None
     final_report: str = ""
@@ -290,13 +294,14 @@ class WorkflowEngine:
 
         # Stage 2: Design review (all QA must LGTM)
         console.print(Panel("[bold]Stage 2: Design Review[/bold]", border_style="blue"))
-        design, iters = self._run_review_loop(
+        design, iters, design_review_passed = self._run_review_loop(
             artifact=design,
             artifact_type="design",
             context=f"Requirement:\n{requirement}",
         )
         result.design = design
         result.design_review_iterations = iters
+        result.design_review_passed = design_review_passed
         if self._cancelled():
             result.final_report = "Workflow cancelled during design review."
             return result
@@ -324,13 +329,14 @@ class WorkflowEngine:
 
         # Stage 4: Plan review (QA + user approval)
         console.print(Panel("[bold]Stage 4: Plan Review[/bold]", border_style="blue"))
-        plan, iters = self._run_review_loop(
+        plan, iters, plan_review_passed = self._run_review_loop(
             artifact=plan,
             artifact_type="plan",
             context=f"Requirement:\n{requirement[:2000]}\n\nApproved Design:\n{design[:4000]}",
         )
         result.plan = plan
         result.plan_review_iterations = iters
+        result.plan_review_passed = plan_review_passed
         if self._cancelled():
             result.final_report = "Workflow cancelled during plan review."
             return result
@@ -534,7 +540,7 @@ class WorkflowEngine:
         )
 
         # Step 3: QA review loop
-        reviewed_summary, review_iters = self._run_review_loop(
+        reviewed_summary, review_iters, review_passed = self._run_review_loop(
             artifact=summary,
             artifact_type="code",
             context=(
@@ -543,7 +549,12 @@ class WorkflowEngine:
             ),
         )
         if self._cancelled():
-            return PhaseResult(name=phase_name, summary="Cancelled by user.", review_iterations=review_iters)
+            return PhaseResult(
+                name=phase_name,
+                summary="Cancelled by user.",
+                review_iterations=review_iters,
+                review_passed=review_passed,
+            )
 
         # Step 4: Dev commits
         console.print(f"[yellow]Dev committing phase {phase_index}...[/yellow]")
@@ -570,6 +581,7 @@ class WorkflowEngine:
             name=phase_name,
             summary=reviewed_summary[:2000],
             review_iterations=review_iters,
+            review_passed=review_passed,
             committed=committed,
         )
 
@@ -629,7 +641,7 @@ class WorkflowEngine:
 
         # Step 2: Dev + User review test plan
         console.print(Panel("[bold]Test Plan Review[/bold]", border_style="cyan"))
-        test_plan, iters = self._run_review_loop(
+        test_plan, iters, test_plan_review_passed = self._run_review_loop(
             artifact=test_plan,
             artifact_type="test_plan",
             context=f"Requirement:\n{requirement[:2000]}",
@@ -638,6 +650,7 @@ class WorkflowEngine:
         )
         result.test_plan = test_plan
         result.test_plan_review_iterations = iters
+        result.test_plan_review_passed = test_plan_review_passed
 
         # User checkpoint on test plan
         console.print(Panel(Markdown(test_plan), title="Reviewed Test Plan", border_style="green"))
@@ -888,13 +901,14 @@ class WorkflowEngine:
         sub.design = sub_design
 
         # Design review
-        sub_design, iters = self._run_review_loop(
+        sub_design, iters, design_review_passed = self._run_review_loop(
             artifact=sub_design,
             artifact_type="design",
             context=f"Bug fix design:\n{bug_req[:2000]}",
         )
         sub.design = sub_design
         sub.design_review_iterations = iters
+        sub.design_review_passed = design_review_passed
 
         # User checkpoint
         console.print(Panel(Markdown(sub_design), title="Bug Fix Design", border_style="yellow"))
@@ -914,13 +928,14 @@ class WorkflowEngine:
         sub.plan = sub_plan
 
         # Plan review
-        sub_plan, iters = self._run_review_loop(
+        sub_plan, iters, plan_review_passed = self._run_review_loop(
             artifact=sub_plan,
             artifact_type="plan",
             context=f"Bug fix:\n{bug_req[:2000]}",
         )
         sub.plan = sub_plan
         sub.plan_review_iterations = iters
+        sub.plan_review_passed = plan_review_passed
 
         # User checkpoint
         console.print(Panel(Markdown(sub_plan), title="Bug Fix Plan", border_style="yellow"))
@@ -982,8 +997,8 @@ class WorkflowEngine:
         context: str = "",
         proposer: "SessionManager | None" = None,
         reviewers: "list[SessionManager] | None" = None,
-    ) -> tuple[str, int]:
-        """Run multi-reviewer loop. Returns (final_artifact, iterations).
+    ) -> tuple[str, int, bool]:
+        """Run multi-reviewer loop. Returns (final_artifact, iterations, passed).
 
         By default: proposer=dev, reviewers=QA(s).
         For test plan review: proposer=QA, reviewers=[dev].
@@ -1106,7 +1121,7 @@ class WorkflowEngine:
                     last_artifact_id=artifact_id,
                     updated_by_agent_id=prop.agent_id,
                 )
-                return current, iteration
+                return current, iteration, True
 
             # Proposer addresses comments
             console.print(f"\n[yellow]{prop.agent_role} addressing {len(all_issues)} comment(s)...[/yellow]")
@@ -1167,7 +1182,7 @@ class WorkflowEngine:
                     console.print(f"[dim red]Warning: Failed to persist final artifact: {e}[/dim red]")
 
         console.print(f"[yellow]Max iterations reached for {artifact_type} review.[/yellow]")
-        return current, self._max_review
+        return current, self._max_review, False
 
     def _review_artifact_type(self, artifact_type: str) -> str:
         if artifact_type == "design":
