@@ -2,9 +2,9 @@
 
 import json
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
-from myswat.workflow.engine import WorkflowEngine, _extract_json_block
+from myswat.workflow.engine import WorkMode, WorkflowEngine, _extract_json_block
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +428,7 @@ class TestWorkflowEngineInit:
         assert engine._project_id == "proj-default"
         assert engine._work_item_id is None
         assert engine._max_review == 5
+        assert engine._mode == WorkMode.full
         assert engine._ask is not None
         assert callable(engine._ask)
 
@@ -474,6 +475,7 @@ class TestWorkflowEngineInit:
             project_id="proj-full",
             work_item_id="wi-full",
             max_review_iterations=2,
+            mode=WorkMode.test,
             ask_user=custom_ask,
         )
         assert engine._store is mock_store
@@ -482,6 +484,7 @@ class TestWorkflowEngineInit:
         assert engine._project_id == "proj-full"
         assert engine._work_item_id == "wi-full"
         assert engine._max_review == 2
+        assert engine._mode == WorkMode.test
         assert engine._ask is custom_ask
 
     def test_empty_qa_sms_list(self, mock_store, mock_dev_sm):
@@ -492,6 +495,37 @@ class TestWorkflowEngineInit:
             project_id="proj-1",
         )
         assert engine._qas == []
+
+
+class TestWorkflowModeDispatch:
+    """Tests for the phase-1 mode dispatch scaffold."""
+
+    def test_run_dispatches_to_full_mode(self, engine):
+        expected = MagicMock()
+
+        with patch.object(engine, "_run_full", return_value=expected) as mock_run_full:
+            result = engine.run("build feature")
+
+        assert result is expected
+        mock_run_full.assert_called_once()
+        requirement, dispatch_result = mock_run_full.call_args.args
+        assert requirement == "build feature"
+        assert dispatch_result.requirement == "build feature"
+        engine._store.update_work_item_state.assert_called_once()
+        engine._store.append_work_item_process_event.assert_called_once()
+
+    @pytest.mark.parametrize("mode", [WorkMode.design, WorkMode.development, WorkMode.test])
+    def test_non_full_modes_raise_not_implemented(self, mock_store, mock_dev_sm, mock_qa_sms, mode):
+        engine = WorkflowEngine(
+            store=mock_store,
+            dev_sm=mock_dev_sm,
+            qa_sms=mock_qa_sms,
+            project_id="proj-mode",
+            mode=mode,
+        )
+
+        with pytest.raises(NotImplementedError, match=mode.value):
+            engine.run("build feature")
 
 
 # ===================================================================

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import TYPE_CHECKING, Callable
 
 from rich.console import Console
@@ -69,6 +70,13 @@ MAX_GA_BUGS = 5
 
 
 # ── Data classes ──
+
+
+class WorkMode(StrEnum):
+    full = "full"
+    design = "design"
+    development = "development"
+    test = "test"
 
 @dataclass
 class PhaseResult:
@@ -163,6 +171,7 @@ class WorkflowEngine:
         project_id: int,
         work_item_id: int | None = None,
         max_review_iterations: int = 5,
+        mode: WorkMode = WorkMode.full,
         ask_user: Callable[[str], str] | None = None,
         auto_approve: bool = False,
         should_cancel: Callable[[], bool] | None = None,
@@ -173,6 +182,7 @@ class WorkflowEngine:
         self._project_id = project_id
         self._work_item_id = work_item_id
         self._max_review = max_review_iterations
+        self._mode = WorkMode(mode)
         self._ask = ask_user or _default_ask
         self._auto_approve = auto_approve
         self._should_cancel = should_cancel
@@ -258,6 +268,14 @@ class WorkflowEngine:
             to_role=self._dev.agent_role,
             updated_by_agent_id=self._dev.agent_id,
         )
+        return self._dispatch_mode(requirement, result)
+
+    def _dispatch_mode(self, requirement: str, result: WorkflowResult) -> WorkflowResult:
+        if self._mode == WorkMode.full:
+            return self._run_full(requirement, result)
+        raise NotImplementedError(f"Workflow mode '{self._mode.value}' is not implemented yet.")
+
+    def _run_full(self, requirement: str, result: WorkflowResult) -> WorkflowResult:
 
         # Stage 1: Tech design
         console.print(Panel("[bold]Stage 1: Technical Design[/bold]", border_style="blue"))
