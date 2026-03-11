@@ -536,18 +536,49 @@ class TestWorkflowModeDispatch:
         engine._store.update_work_item_state.assert_called_once()
         engine._store.append_work_item_process_event.assert_called_once()
 
-    @pytest.mark.parametrize("mode", [WorkMode.development, WorkMode.test])
-    def test_non_full_modes_raise_not_implemented(self, mock_store, mock_dev_sm, mock_qa_sms, mode):
+    def test_run_dispatches_to_development_mode(self, mock_store, mock_dev_sm, mock_qa_sms):
         engine = WorkflowEngine(
             store=mock_store,
             dev_sm=mock_dev_sm,
             qa_sms=mock_qa_sms,
-            project_id="proj-mode",
-            mode=mode,
+            project_id="proj-development",
+            work_item_id="wi-development",
+            mode=WorkMode.development,
         )
+        expected = MagicMock()
 
-        with pytest.raises(NotImplementedError, match=mode.value):
-            engine.run("build feature")
+        with patch.object(engine, "_run_development_mode", return_value=expected) as mock_run_development_mode:
+            result = engine.run("build feature")
+
+        assert result is expected
+        mock_run_development_mode.assert_called_once()
+        requirement, dispatch_result = mock_run_development_mode.call_args.args
+        assert requirement == "build feature"
+        assert dispatch_result.requirement == "build feature"
+        engine._store.update_work_item_state.assert_called_once()
+        engine._store.append_work_item_process_event.assert_called_once()
+
+    def test_run_dispatches_to_test_mode(self, mock_store, mock_dev_sm, mock_qa_sms):
+        engine = WorkflowEngine(
+            store=mock_store,
+            dev_sm=mock_dev_sm,
+            qa_sms=mock_qa_sms,
+            project_id="proj-test",
+            work_item_id="wi-test",
+            mode=WorkMode.test,
+        )
+        expected = MagicMock()
+
+        with patch.object(engine, "_run_test_mode", return_value=expected) as mock_run_test_mode:
+            result = engine.run("build feature")
+
+        assert result is expected
+        mock_run_test_mode.assert_called_once()
+        requirement, dispatch_result = mock_run_test_mode.call_args.args
+        assert requirement == "build feature"
+        assert dispatch_result.requirement == "build feature"
+        engine._store.update_work_item_state.assert_called_once()
+        engine._store.append_work_item_process_event.assert_called_once()
 
 
 # ===================================================================

@@ -279,6 +279,10 @@ class WorkflowEngine:
             return self._run_full(requirement, result)
         if self._mode == WorkMode.design:
             return self._run_design_mode(requirement, result)
+        if self._mode == WorkMode.development:
+            return self._run_development_mode(requirement, result)
+        if self._mode == WorkMode.test:
+            return self._run_test_mode(requirement, result)
         raise NotImplementedError(f"Workflow mode '{self._mode.value}' is not implemented yet.")
 
     def _run_full(self, requirement: str, result: WorkflowResult) -> WorkflowResult:
@@ -514,6 +518,79 @@ class WorkflowEngine:
         )
         return result
 
+    def _run_development_mode(self, requirement: str, result: WorkflowResult) -> WorkflowResult:
+        console.print(Panel("[bold]Stage 1: Development[/bold]", border_style="blue"))
+        phases = self._parse_phases(requirement)
+        console.print(f"[dim]Parsed {len(phases)} phase(s) from requirement.[/dim]")
+        completed_summaries: list[str] = []
+
+        for i, phase in enumerate(phases, 1):
+            if self._cancelled():
+                result.final_report = f"Development workflow cancelled before phase {i}."
+                return result
+            console.print(f"\n[bold cyan]{'='*60}[/bold cyan]")
+            console.print(f"[bold cyan]Phase {i}/{len(phases)}: {phase}[/bold cyan]")
+            console.print(f"[bold cyan]{'='*60}[/bold cyan]")
+
+            phase_result = self._run_phase(
+                phase_name=phase,
+                phase_index=i,
+                total_phases=len(phases),
+                requirement=requirement,
+                design=requirement,
+                plan=requirement,
+                completed_summaries=completed_summaries,
+            )
+            result.phases.append(phase_result)
+            completed_summaries.append(f"Phase {i} ({phase}): {phase_result.summary[:500]}")
+            if self._cancelled():
+                result.final_report = f"Development workflow cancelled during phase {i}."
+                return result
+
+        console.print(Panel("[bold]Stage 2: Final Report[/bold]", border_style="blue"))
+        report = self._generate_report(result, completed_summaries)
+        result.final_report = report
+        result.success = all(p.committed for p in result.phases) if result.phases else False
+
+        console.print(Panel(Markdown(report), title="Development Workflow Report", border_style="green"))
+        self._persist_task_state(
+            current_stage="workflow_completed" if result.success else "workflow_finished_with_issues",
+            latest_summary=report[:4000],
+            next_todos=[] if result.success else ["Review development report and unresolved issues"],
+            open_issues=[] if result.success else self._first_lines(report, limit=8),
+            updated_by_agent_id=self._dev.agent_id,
+        )
+        return result
+
+    def _run_test_mode(self, requirement: str, result: WorkflowResult) -> WorkflowResult:
+        console.print(Panel("[bold]Stage 1: GA Test[/bold]", border_style="blue"))
+        ga_result = self._run_ga_test_phase(
+            requirement,
+            requirement,
+            "",
+            requirement,
+            allow_arch_fix=False,
+        )
+        result.ga_test = ga_result
+        if self._cancelled():
+            result.final_report = "Test workflow cancelled during GA testing."
+            return result
+
+        console.print(Panel("[bold]Stage 2: Final Report[/bold]", border_style="blue"))
+        report = self._generate_report(result, [])
+        result.final_report = report
+        result.success = ga_result.passed
+
+        console.print(Panel(Markdown(report), title="Test Workflow Report", border_style="green"))
+        self._persist_task_state(
+            current_stage="workflow_completed" if result.success else "workflow_finished_with_issues",
+            latest_summary=report[:4000],
+            next_todos=[] if result.success else ["Review test report and unresolved issues"],
+            open_issues=[] if result.success else self._first_lines(report, limit=8),
+            updated_by_agent_id=self._dev.agent_id,
+        )
+        return result
+
     # ════════════════════════════════════════════════════════════════
     # Stage implementations
     # ════════════════════════════════════════════════════════════════
@@ -689,6 +766,8 @@ class WorkflowEngine:
         design: str,
         plan: str,
         dev_summary: str,
+        *,
+        allow_arch_fix: bool = True,
     ) -> GATestResult:
         result = GATestResult()
         if self._cancelled():
@@ -826,13 +905,36 @@ class WorkflowEngine:
                 if bug.get("description"):
                     console.print(f"[dim]{bug['description'][:200]}[/dim]")
 
-                bug_fix = self._run_bug_fix(bug, requirement, design)
+                bug_fix = self._run_bug_fix(
+                    bug,
+                    requirement,
+                    design,
+                    allow_arch_fix=allow_arch_fix,
+                )
                 result.bug_fixes.append(bug_fix)
                 if bug_fix.fixed:
                     result.bugs_fixed += 1
                     console.print(f"[green]Bug fixed: {bug_fix.title}[/green]")
                 else:
                     console.print(f"[red]Bug fix failed: {bug_fix.title}[/red]")
+
+            unresolved_arch_changes = [
+                bf for bf in result.bug_fixes
+                if bf.arch_change and not bf.fixed
+            ]
+            if unresolved_arch_changes and not allow_arch_fix:
+                self._persist_task_state(
+                    current_stage="ga_test_arch_change_required",
+                    latest_summary=test_output[:4000],
+                    next_todos=["Review architecture-change findings and plan follow-up work"],
+                    open_issues=[bf.title for bf in unresolved_arch_changes[:10]],
+                    updated_by_agent_id=qa_lead.agent_id,
+                )
+                console.print(
+                    "[yellow]Architecture-change findings recorded for follow-up. "
+                    "Skipping automatic re-test.[/yellow]"
+                )
+                break
 
             # QA re-tests after all fixes in this round
             console.print("\n[yellow]QA re-running tests after bug fixes...[/yellow]")
@@ -916,7 +1018,14 @@ class WorkflowEngine:
     # Bug fix workflow
     # ════════════════════════════════════════════════════════════════
 
-    def _run_bug_fix(self, bug: dict, requirement: str, design: str) -> BugFixResult:
+    def _run_bug_fix(
+        self,
+        bug: dict,
+        requirement: str,
+        design: str,
+        *,
+        allow_arch_fix: bool = True,
+    ) -> BugFixResult:
         title = bug.get("title", "Unknown bug")
         result = BugFixResult(title=title)
         if self._cancelled():
@@ -943,6 +1052,14 @@ class WorkflowEngine:
 
         if assessment == "arch_change":
             result.arch_change = True
+            if not allow_arch_fix:
+                console.print(
+                    "[bold yellow]Bug requires architecture change. "
+                    "Recording follow-up work instead of launching a redesign workflow.[/bold yellow]"
+                )
+                result.fixed = False
+                result.summary = "Requires architecture change follow-up; test-only mode does not launch redesign."
+                return result
             console.print(
                 f"[bold yellow]Bug requires architecture change. "
                 f"Running full design->dev sub-workflow...[/bold yellow]"
@@ -1423,9 +1540,94 @@ class WorkflowEngine:
         ]
         return "\n".join(lines)
 
+    def _generate_development_report(self, result: WorkflowResult, completed_summaries: list[str]) -> str:
+        dev_report = ""
+        if completed_summaries:
+            prompt = DEV_FINAL_REPORT.format(
+                completed_phases="\n".join(completed_summaries),
+            )
+            response = self._dev.send(prompt, task_description="Final report")
+            if response.success:
+                dev_report = response.content
+
+        lines = [
+            "# Workflow Report\n",
+            f"## Requirement\n{result.requirement}\n",
+            "## Development Phases\n",
+        ]
+        for i, phase in enumerate(result.phases, 1):
+            status = "Committed" if phase.committed else "Not committed"
+            review_status = "Passed" if phase.review_passed else "Not passed"
+            lines.append(
+                f"### Phase {i}: {phase.name}\n"
+                f"- Status: {status}\n"
+                f"- Review: {review_status}\n"
+                f"- Review iterations: {phase.review_iterations}\n"
+                f"- Summary: {phase.summary[:300]}\n"
+            )
+
+        total_reviews = sum(p.review_iterations for p in result.phases)
+        committed = sum(1 for p in result.phases if p.committed)
+        lines.append(
+            f"\n## Totals\n"
+            f"- Phases: {len(result.phases)} ({committed} committed)\n"
+            f"- Total review cycles: {total_reviews}\n"
+        )
+        if dev_report:
+            lines.append(f"\n## Developer's Final Summary\n{dev_report}\n")
+        return "\n".join(lines)
+
+    def _generate_test_report(self, result: WorkflowResult) -> str:
+        ga = result.ga_test
+        test_plan_status = "Passed" if (ga and ga.test_plan_review_passed) else "Not passed"
+        lines = [
+            "# Workflow Report\n",
+            f"## Requirement\n{result.requirement}\n",
+        ]
+        if ga:
+            lines.append(
+                f"## Test Plan Review\n"
+                f"{test_plan_status} after {ga.test_plan_review_iterations} review iteration(s).\n"
+            )
+            lines.append("## GA Test\n")
+            if ga.aborted:
+                lines.append(
+                    f"**ABORTED** — {ga.bugs_found} bugs found (limit: {MAX_GA_BUGS}).\n"
+                    f"Bugs fixed: {ga.bugs_fixed}. Manual intervention required.\n"
+                )
+            elif ga.passed:
+                lines.append("**PASSED** — All tests passed.\n")
+            else:
+                lines.append(f"**INCOMPLETE** — Bugs found: {ga.bugs_found}, Fixed: {ga.bugs_fixed}\n")
+
+            if ga.bug_fixes:
+                lines.append("### Bug Fixes\n")
+                for bf in ga.bug_fixes:
+                    fix_type = "arch change" if bf.arch_change else "simple fix"
+                    fix_status = "Fixed" if bf.fixed else "Not fixed"
+                    lines.append(f"- **{bf.title}** ({fix_type}): {fix_status}\n")
+                    if bf.summary:
+                        lines.append(f"  {bf.summary[:200]}\n")
+
+            if ga.test_report:
+                lines.append(f"\n### QA Test Report\n{ga.test_report[:2000]}\n")
+
+            lines.append(
+                f"\n## Totals\n"
+                f"- Total review cycles: {ga.test_plan_review_iterations}\n"
+                f"- Test plan review: {test_plan_status}\n"
+                f"- GA test: {'Passed' if ga.passed else 'Failed/Incomplete'}\n"
+                f"- Bugs found: {ga.bugs_found}, fixed: {ga.bugs_fixed}\n"
+            )
+        return "\n".join(lines)
+
     def _generate_report(self, result: WorkflowResult, completed_summaries: list[str]) -> str:
         if self._mode == WorkMode.design:
             return self._generate_design_report(result)
+        if self._mode == WorkMode.development:
+            return self._generate_development_report(result, completed_summaries)
+        if self._mode == WorkMode.test:
+            return self._generate_test_report(result)
 
         # Ask dev for a narrative final report
         dev_report = ""

@@ -322,6 +322,86 @@ class TestRunDesignMode:
 
 
 
+class TestRunDevelopmentMode:
+    """Tests for development-mode orchestration added in phase 4."""
+
+    @patch.object(WorkflowEngine, "_generate_report", return_value="# Development Report")
+    @patch.object(WorkflowEngine, "_run_phase")
+    @patch.object(WorkflowEngine, "_parse_phases", return_value=["phase-A"])
+    def test_happy_path(self, m_phases, m_run_phase, m_report):
+        m_run_phase.return_value = PhaseResult(
+            name="phase-A", summary="done", review_iterations=1, review_passed=True, committed=True,
+        )
+        engine, _, _ = _make_engine(mode=WorkMode.development)
+
+        result = engine.run("implement feature")
+
+        assert result.success is True
+        assert result.final_report == "# Development Report"
+        assert len(result.phases) == 1
+        assert result.phases[0].committed is True
+        kwargs = m_run_phase.call_args.kwargs
+        assert kwargs["design"] == "implement feature"
+        assert kwargs["plan"] == "implement feature"
+
+    @patch.object(WorkflowEngine, "_generate_report", return_value="# Development Report")
+    @patch.object(WorkflowEngine, "_run_phase")
+    def test_phase_parsing_fallback_from_requirement(self, m_run_phase, m_report):
+        m_run_phase.return_value = PhaseResult(
+            name="Full implementation", summary="done", review_iterations=1, review_passed=True, committed=True,
+        )
+        engine, _, _ = _make_engine(mode=WorkMode.development)
+
+        result = engine.run("Just do everything at once, no structure here.")
+
+        assert result.success is True
+        assert m_run_phase.call_args.kwargs["phase_name"] == "Full implementation"
+
+    @patch.object(WorkflowEngine, "_generate_report", return_value="# Development Report")
+    @patch.object(WorkflowEngine, "_run_phase")
+    @patch.object(WorkflowEngine, "_parse_phases", return_value=["phase-A"])
+    def test_uncommitted_phase_keeps_success_false(self, m_phases, m_run_phase, m_report):
+        m_run_phase.return_value = PhaseResult(
+            name="phase-A", summary="failed commit", review_iterations=1, review_passed=True, committed=False,
+        )
+        engine, _, _ = _make_engine(mode=WorkMode.development)
+
+        result = engine.run("implement feature")
+
+        assert result.success is False
+        assert result.final_report == "# Development Report"
+
+
+class TestRunTestMode:
+    """Tests for test-mode orchestration added in phase 4."""
+
+    @patch.object(WorkflowEngine, "_generate_report", return_value="# Test Report")
+    @patch.object(WorkflowEngine, "_run_ga_test_phase")
+    def test_happy_path(self, m_ga, m_report):
+        m_ga.return_value = GATestResult(passed=True)
+        engine, _, _ = _make_engine(mode=WorkMode.test)
+
+        result = engine.run("validate release")
+
+        assert result.success is True
+        assert result.final_report == "# Test Report"
+        assert result.ga_test.passed is True
+        assert m_ga.call_args.kwargs["allow_arch_fix"] is False
+        assert m_ga.call_args.args == ("validate release", "validate release", "", "validate release")
+
+    @patch.object(WorkflowEngine, "_generate_report", return_value="# Test Report")
+    @patch.object(WorkflowEngine, "_run_ga_test_phase")
+    def test_failed_ga_keeps_success_false(self, m_ga, m_report):
+        m_ga.return_value = GATestResult(passed=False)
+        engine, _, _ = _make_engine(mode=WorkMode.test)
+
+        result = engine.run("validate release")
+
+        assert result.success is False
+        assert result.final_report == "# Test Report"
+
+
+
 # ===================================================================
 # 3. _run_design  (lines 296-303)
 # ===================================================================
@@ -710,6 +790,33 @@ class TestRunGATestPhase:
             result = engine._run_ga_test_phase("req", "design", "plan", "summary")
         assert result.test_plan_review_passed is False
         assert result.passed is True
+
+
+
+    def test_allow_arch_fix_false_skips_arch_change_subworkflow(self):
+        """Test-only GA runs record arch-change findings without escalation."""
+        bugs_output = json.dumps({
+            "bugs": [{"title": "big bug", "severity": "major", "description": "needs redesign"}]
+        })
+        engine, dev, qas = _make_engine(
+            dev_responses=[json.dumps({"assessment": "arch_change"})],
+            qa_responses=["test plan", bugs_output, "final test report"],
+            ask_return="y",
+            max_review=1,
+        )
+        with patch.object(engine, "_run_review_loop", return_value=("test plan", 1, True)):
+            with patch.object(engine, "_run_bug_fix_arch_change") as mock_arch_fix:
+                result = engine._run_ga_test_phase(
+                    "req", "design", "plan", "summary", allow_arch_fix=False,
+                )
+
+        mock_arch_fix.assert_not_called()
+        assert result.passed is False
+        assert result.aborted is False
+        assert result.bug_fixes[0].arch_change is True
+        assert result.bug_fixes[0].fixed is False
+        assert "follow-up" in result.bug_fixes[0].summary.lower()
+        assert result.test_report == "final test report"
 
 
 
@@ -1417,6 +1524,49 @@ class TestGenerateReport:
         assert "## Development Phases" not in report
         assert "## GA Test" not in report
         assert "Plan review: Not passed" in report
+
+    def test_development_mode_report_omits_design_and_ga_sections(self):
+        """Development-mode report only includes development content."""
+        engine, dev, _ = _make_engine(mode=WorkMode.development)
+        dev.send.return_value = _ok("narrative")
+        result = WorkflowResult(
+            requirement="req",
+            phases=[
+                PhaseResult(name="p1", summary="s", review_iterations=1, review_passed=False, committed=True),
+            ],
+        )
+
+        report = engine._generate_report(result, ["Phase 1: s"])
+
+        assert "## Development Phases" in report
+        assert "## Design Review" not in report
+        assert "## Plan Review" not in report
+        assert "## GA Test" not in report
+        assert "Review: Not passed" in report
+
+    def test_test_mode_report_omits_design_and_development_sections(self):
+        """Test-mode report only includes test-related sections."""
+        engine, dev, _ = _make_engine(mode=WorkMode.test)
+        result = WorkflowResult(
+            requirement="req",
+            ga_test=GATestResult(
+                passed=False,
+                test_plan_review_iterations=1,
+                test_plan_review_passed=False,
+                bugs_found=2,
+                bugs_fixed=1,
+            ),
+        )
+
+        report = engine._generate_report(result, [])
+
+        dev.send.assert_not_called()
+        assert "## Test Plan Review" in report
+        assert "## GA Test" in report
+        assert "## Design Review" not in report
+        assert "## Plan Review" not in report
+        assert "## Development Phases" not in report
+        assert "Test plan review: Not passed" in report
 
     def test_report_no_completed_summaries(self):
         """Empty completed_summaries means dev is not asked for narrative."""
