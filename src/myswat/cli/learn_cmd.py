@@ -23,6 +23,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from myswat.agents.factory import make_runner_from_row
 from myswat.cli.progress import _SPINNER_FRAMES, _coerce_live_lines, _fmt_duration
 from myswat.config.settings import MySwatSettings
 from myswat.db.connection import TiDBPool
@@ -248,25 +249,6 @@ def _format_agent_instructions(instructions: list[tuple[str, str]]) -> str:
         parts.append(f"#### {name}\n```\n{content}\n```")
     return "\n\n".join(parts)
 
-
-def _make_runner(agent_row: dict):
-    """Create an AgentRunner for the architect agent."""
-    from myswat.agents.codex_runner import CodexRunner
-    from myswat.agents.kimi_runner import KimiRunner
-
-    backend = agent_row["cli_backend"]
-    cli_path = agent_row["cli_path"]
-    model = agent_row["model_name"]
-    extra_flags = json.loads(agent_row["cli_extra_args"]) if agent_row.get("cli_extra_args") else []
-
-    if backend == "codex":
-        return CodexRunner(cli_path=cli_path, model=model, extra_flags=extra_flags)
-    elif backend == "kimi":
-        return KimiRunner(cli_path=cli_path, model=model, extra_flags=extra_flags)
-    else:
-        raise typer.BadParameter(f"Unknown CLI backend: {backend}")
-
-
 def _validate_learned(data: dict) -> list[str]:
     """Return a list of fatal validation errors (empty = OK)."""
     errors: list[str] = []
@@ -483,7 +465,7 @@ def run_learn(project_slug: str, workdir: str | None = None) -> None:
         console.print("[red]Architect agent not found. Run 'myswat init' first.[/red]")
         raise typer.Exit(1)
 
-    runner = _make_runner(arch_agent)
+    runner = make_runner_from_row(arch_agent, settings=settings)
     runner.workdir = str(repo_path)
     _stage_done(
         console,

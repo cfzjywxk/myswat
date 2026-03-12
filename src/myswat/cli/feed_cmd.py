@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import typer
@@ -17,8 +16,7 @@ console = Console()
 
 def _get_ingester(store: MemoryStore, proj: dict, settings: MySwatSettings, no_ai: bool):
     """Create a DocumentIngester with optional AI runner."""
-    from myswat.agents.codex_runner import CodexRunner
-    from myswat.agents.kimi_runner import KimiRunner
+    from myswat.agents.factory import make_runner_from_row
     from myswat.memory.ingester import DocumentIngester
 
     runner = None
@@ -26,11 +24,7 @@ def _get_ingester(store: MemoryStore, proj: dict, settings: MySwatSettings, no_a
         agents = store.list_agents(proj["id"])
         for a in agents:
             if a["cli_backend"] == settings.compaction.compaction_backend:
-                extra_flags = json.loads(a["cli_extra_args"]) if a.get("cli_extra_args") else []
-                if a["cli_backend"] == "codex":
-                    runner = CodexRunner(cli_path=a["cli_path"], model=a["model_name"], extra_flags=extra_flags)
-                elif a["cli_backend"] == "kimi":
-                    runner = KimiRunner(cli_path=a["cli_path"], model=a["model_name"], extra_flags=extra_flags)
+                runner = make_runner_from_row(a, settings=settings)
                 break
 
     return DocumentIngester(store=store, runner=runner)

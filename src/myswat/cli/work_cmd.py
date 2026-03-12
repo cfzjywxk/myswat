@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import shlex
 import signal
@@ -17,8 +16,7 @@ import typer
 from rich.console import Console
 
 from myswat.agents.base import AgentRunner
-from myswat.agents.codex_runner import CodexRunner
-from myswat.agents.kimi_runner import KimiRunner
+from myswat.agents.factory import make_runner_from_row
 from myswat.agents.session_manager import SessionManager
 from myswat.cli.progress import _run_with_task_monitor
 from myswat.config.settings import MySwatSettings
@@ -35,21 +33,6 @@ _BACKGROUND_SIGNAL_SET = tuple(
     for name in ("SIGTERM", "SIGHUP", "SIGINT")
     if (sig := getattr(signal, name, None)) is not None
 )
-
-
-def _make_runner(agent_row: dict) -> AgentRunner:
-    backend = agent_row["cli_backend"]
-    cli_path = agent_row["cli_path"]
-    model = agent_row["model_name"]
-    extra_flags = json.loads(agent_row["cli_extra_args"]) if agent_row.get("cli_extra_args") else []
-
-    if backend == "codex":
-        return CodexRunner(cli_path=cli_path, model=model, extra_flags=extra_flags)
-    elif backend == "kimi":
-        return KimiRunner(cli_path=cli_path, model=model, extra_flags=extra_flags)
-    else:
-        raise typer.BadParameter(f"Unknown CLI backend: {backend}")
-
 
 def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
@@ -295,10 +278,10 @@ def _run_workflow(
 
     dev_agent, qa_agents = _get_workflow_agents(store, proj["id"])
 
-    dev_runner = _make_runner(dev_agent)
+    dev_runner = make_runner_from_row(dev_agent, settings=settings)
     dev_runner.workdir = effective_workdir
 
-    compaction_runner = _make_runner(dev_agent)
+    compaction_runner = make_runner_from_row(dev_agent, settings=settings)
     compactor = KnowledgeCompactor(
         store=store,
         runner=compaction_runner,
@@ -316,7 +299,7 @@ def _run_workflow(
 
     qa_sms: list[SessionManager] = []
     for qa_agent in qa_agents:
-        qa_runner = _make_runner(qa_agent)
+        qa_runner = make_runner_from_row(qa_agent, settings=settings)
         qa_runner.workdir = effective_workdir
         qa_sms.append(
             SessionManager(

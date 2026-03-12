@@ -1,8 +1,6 @@
 """Tests for myswat.cli.work_cmd."""
 
 from __future__ import annotations
-
-import json
 import signal
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -15,46 +13,10 @@ from myswat.workflow.engine import WorkMode
 
 from myswat.cli.work_cmd import (
     _build_background_env,
-    _make_runner,
     run_background_work_item,
     run_work,
     stop_work_item,
 )
-
-
-# ---------------------------------------------------------------------------
-# _make_runner
-# ---------------------------------------------------------------------------
-class TestMakeRunner:
-    def test_codex(self):
-        row = {
-            "cli_backend": "codex", "cli_path": "codex",
-            "model_name": "gpt-5", "cli_extra_args": None,
-        }
-        assert _make_runner(row) is not None
-
-    def test_kimi(self):
-        row = {
-            "cli_backend": "kimi", "cli_path": "kimi",
-            "model_name": "k2", "cli_extra_args": None,
-        }
-        assert _make_runner(row) is not None
-
-    def test_unknown_raises(self):
-        row = {
-            "cli_backend": "unknown", "cli_path": "x",
-            "model_name": "m", "cli_extra_args": None,
-        }
-        with pytest.raises(typer.BadParameter):
-            _make_runner(row)
-
-    def test_extra_args(self):
-        row = {
-            "cli_backend": "codex", "cli_path": "codex",
-            "model_name": "gpt-5",
-            "cli_extra_args": json.dumps(["--flag"]),
-        }
-        assert _make_runner(row) is not None
 
 
 # ---------------------------------------------------------------------------

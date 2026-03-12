@@ -78,7 +78,7 @@ class TestRunLearn:
 
     @patch("myswat.cli.learn_cmd._store_learned_knowledge")
     @patch("myswat.cli.learn_cmd._write_myswat_md")
-    @patch("myswat.cli.learn_cmd._make_runner")
+    @patch("myswat.cli.learn_cmd.make_runner_from_row")
     @patch("myswat.cli.learn_cmd.MySwatSettings")
     @patch("myswat.cli.learn_cmd.TiDBPool")
     @patch("myswat.cli.learn_cmd.run_migrations")
@@ -101,7 +101,7 @@ class TestRunLearn:
 
     @patch("myswat.cli.learn_cmd._store_learned_knowledge")
     @patch("myswat.cli.learn_cmd._write_myswat_md")
-    @patch("myswat.cli.learn_cmd._make_runner")
+    @patch("myswat.cli.learn_cmd.make_runner_from_row")
     @patch("myswat.cli.learn_cmd.MySwatSettings")
     @patch("myswat.cli.learn_cmd.TiDBPool")
     @patch("myswat.cli.learn_cmd.run_migrations")
@@ -128,7 +128,7 @@ class TestRunLearn:
 
     @patch("myswat.cli.learn_cmd._store_learned_knowledge")
     @patch("myswat.cli.learn_cmd._write_myswat_md")
-    @patch("myswat.cli.learn_cmd._make_runner")
+    @patch("myswat.cli.learn_cmd.make_runner_from_row")
     @patch("myswat.workflow.engine._extract_json_block")
     @patch("myswat.cli.learn_cmd.MySwatSettings")
     @patch("myswat.cli.learn_cmd.TiDBPool")
@@ -158,7 +158,7 @@ class TestRunLearn:
 
     @patch("myswat.cli.learn_cmd._store_learned_knowledge")
     @patch("myswat.cli.learn_cmd._write_myswat_md")
-    @patch("myswat.cli.learn_cmd._make_runner")
+    @patch("myswat.cli.learn_cmd.make_runner_from_row")
     @patch("myswat.workflow.engine._extract_json_block")
     @patch("myswat.cli.learn_cmd.MySwatSettings")
     @patch("myswat.cli.learn_cmd.TiDBPool")
@@ -189,7 +189,7 @@ class TestRunLearn:
 
     @patch("myswat.cli.learn_cmd._store_learned_knowledge")
     @patch("myswat.cli.learn_cmd._write_myswat_md")
-    @patch("myswat.cli.learn_cmd._make_runner")
+    @patch("myswat.cli.learn_cmd.make_runner_from_row")
     @patch("myswat.workflow.engine._extract_json_block")
     @patch("myswat.cli.learn_cmd.MySwatSettings")
     @patch("myswat.cli.learn_cmd.TiDBPool")
@@ -234,7 +234,7 @@ class TestRunLearn:
 
     @patch("myswat.cli.learn_cmd._store_learned_knowledge")
     @patch("myswat.cli.learn_cmd._write_myswat_md")
-    @patch("myswat.cli.learn_cmd._make_runner")
+    @patch("myswat.cli.learn_cmd.make_runner_from_row")
     @patch("myswat.workflow.engine._extract_json_block")
     @patch("myswat.cli.learn_cmd.MySwatSettings")
     @patch("myswat.cli.learn_cmd.TiDBPool")

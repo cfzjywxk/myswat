@@ -19,7 +19,7 @@ Multi-AI agent co-working system for software development. Agents with persisten
 
 - Python 3.12+
 - [TiDB Cloud](https://tidbcloud.com) account (free tier works)
-- At least one AI CLI tool: [Codex CLI](https://github.com/openai/codex) (`codex`) or Kimi CLI (`kimi`)
+- At least one AI CLI tool: [Codex CLI](https://github.com/openai/codex) (`codex`), Claude Code (`claude`), or Kimi CLI (`kimi`)
 - (Optional) `FlagEmbedding` for vector search with BGE-M3
 
 ## Installation
@@ -51,12 +51,34 @@ ssl_ca = "/etc/ssl/certs/ca-certificates.crt"
 
 [agents]
 codex_path = "codex"
+claude_path = "claude"
 kimi_path = "kimi"
+claude_required_ip = "154.28.2.59"
+architect_backend = "codex"
 developer_model = "gpt-5.4"
 qa_main_model = "kimi-code/kimi-for-coding"
 ```
 
 Or use environment variables: `MYSWAT_TIDB_HOST`, `MYSWAT_TIDB_PASSWORD`, etc.
+
+To seed new projects against Claude instead of Codex/Kimi, set per-role backends before `myswat init`, for example:
+
+```toml
+[agents]
+architect_backend = "claude"
+developer_backend = "claude"
+qa_main_backend = "claude"
+qa_vice_backend = "claude"
+claude_path = "claude"
+architect_model = "claude-sonnet-4-6"
+developer_model = "claude-sonnet-4-6"
+qa_main_model = "claude-sonnet-4-6"
+qa_vice_model = "claude-sonnet-4-6"
+```
+
+When using Claude, MySwat validates the launch environment before every `claude` subprocess start: both `http_proxy` and `https_proxy` must be set, and `curl ipinfo.io` must report `154.28.2.59`. If that check fails, the workflow aborts before Claude is started.
+
+By default, Claude runners also add `--dangerously-skip-permissions` for non-interactive automation. Override `claude_default_flags` or provide an explicit Claude permission flag if you want a different permission model.
 
 ## Quick Start
 
@@ -189,7 +211,7 @@ User --> CLI (Typer)
           |
           +--> myswat work/run/chat
           |      |
-          |      +--> SessionManager --> AgentRunner (codex/kimi subprocess)
+          |      +--> SessionManager --> AgentRunner (codex/claude/kimi subprocess)
           |      |                   --> Mid-session compaction (watermark-based)
           |      |
           |      +--> WorkflowEngine (mode dispatch: full | design | development | test)

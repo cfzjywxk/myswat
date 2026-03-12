@@ -10,6 +10,8 @@ from typing import Any, TYPE_CHECKING
 
 from rich.console import Console
 
+from myswat.config.settings import MySwatSettings
+
 if TYPE_CHECKING:
     from myswat.memory.store import MemoryStore
 
@@ -66,25 +68,14 @@ class WorkflowError:
         }
 
 
-def _build_runner(agent_row: dict):
+def _build_runner(agent_row: dict, settings=None):
     """Create a lightweight runner for the architect agent."""
-    from myswat.agents.codex_runner import CodexRunner
-    from myswat.agents.kimi_runner import KimiRunner
+    from myswat.agents.factory import make_runner_from_row
 
-    backend = agent_row["cli_backend"]
-    cli_path = agent_row["cli_path"]
-    model = agent_row["model_name"]
-    extra_flags = (
-        json.loads(agent_row["cli_extra_args"])
-        if agent_row.get("cli_extra_args")
-        else []
-    )
-
-    if backend == "codex":
-        return CodexRunner(cli_path=cli_path, model=model, extra_flags=extra_flags)
-    elif backend == "kimi":
-        return KimiRunner(cli_path=cli_path, model=model, extra_flags=extra_flags)
-    return None
+    try:
+        return make_runner_from_row(agent_row, settings=settings)
+    except Exception:
+        return None
 
 
 def _consult_architect(
@@ -98,7 +89,7 @@ def _consult_architect(
         if not arch_agent:
             return None
 
-        runner = _build_runner(arch_agent)
+        runner = _build_runner(arch_agent, settings=MySwatSettings())
         if not runner:
             return None
 

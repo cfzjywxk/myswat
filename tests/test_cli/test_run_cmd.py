@@ -1,8 +1,6 @@
 """Tests for myswat.cli.run_cmd."""
 
 from __future__ import annotations
-
-import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, PropertyMock
 
@@ -13,55 +11,9 @@ from click.exceptions import Exit as ClickExit
 from myswat.agents.base import AgentResponse
 from myswat.cli.run_cmd import (
     _find_compaction_runner,
-    _make_runner,
     run_single,
     run_with_review,
 )
-
-
-# ---------------------------------------------------------------------------
-# _make_runner
-# ---------------------------------------------------------------------------
-class TestMakeRunner:
-    def test_codex_backend(self):
-        row = {
-            "cli_backend": "codex",
-            "cli_path": "codex",
-            "model_name": "gpt-5",
-            "cli_extra_args": None,
-        }
-        runner = _make_runner(row, MagicMock())
-        assert runner is not None
-
-    def test_kimi_backend(self):
-        row = {
-            "cli_backend": "kimi",
-            "cli_path": "kimi",
-            "model_name": "k2",
-            "cli_extra_args": None,
-        }
-        runner = _make_runner(row, MagicMock())
-        assert runner is not None
-
-    def test_unknown_backend_raises(self):
-        row = {
-            "cli_backend": "unknown",
-            "cli_path": "x",
-            "model_name": "m",
-            "cli_extra_args": None,
-        }
-        with pytest.raises(typer.BadParameter, match="Unknown CLI backend"):
-            _make_runner(row, MagicMock())
-
-    def test_extra_args_parsed(self):
-        row = {
-            "cli_backend": "codex",
-            "cli_path": "codex",
-            "model_name": "gpt-5",
-            "cli_extra_args": json.dumps(["--verbose"]),
-        }
-        runner = _make_runner(row, MagicMock())
-        assert runner is not None
 
 
 # ---------------------------------------------------------------------------

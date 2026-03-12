@@ -87,6 +87,13 @@ class TestAgentSettings:
         settings = AgentSettings()
         assert settings.codex_path == "codex"
         assert settings.kimi_path == "kimi"
+        assert settings.claude_path == "claude"
+        assert settings.claude_required_ip == "154.28.2.59"
+        assert settings.claude_ip_check_timeout_seconds == 10
+        assert settings.architect_backend == "codex"
+        assert settings.developer_backend == "codex"
+        assert settings.qa_main_backend == "kimi"
+        assert settings.qa_vice_backend == "kimi"
         assert settings.developer_model == "gpt-5.4"
         assert settings.architect_model == "gpt-5.4"
         assert settings.qa_main_model == "kimi-code/kimi-for-coding"
@@ -107,10 +114,21 @@ class TestAgentSettings:
         ]
         assert settings.kimi_default_flags == expected
 
+    def test_default_claude_flags(self):
+        settings = AgentSettings()
+        expected = [
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--dangerously-skip-permissions",
+        ]
+        assert settings.claude_default_flags == expected
+
     def test_list_fields_are_lists(self):
         settings = AgentSettings()
         assert isinstance(settings.codex_default_flags, list)
         assert isinstance(settings.kimi_default_flags, list)
+        assert isinstance(settings.claude_default_flags, list)
 
     def test_env_override_developer_model(self, monkeypatch):
         monkeypatch.setenv("MYSWAT_AGENTS_DEVELOPER_MODEL", "gpt-6")
@@ -131,6 +149,26 @@ class TestAgentSettings:
         monkeypatch.setenv("MYSWAT_AGENTS_KIMI_PATH", "/opt/kimi")
         settings = AgentSettings()
         assert settings.kimi_path == "/opt/kimi"
+
+    def test_env_override_claude_path(self, monkeypatch):
+        monkeypatch.setenv("MYSWAT_AGENTS_CLAUDE_PATH", "/opt/claude")
+        settings = AgentSettings()
+        assert settings.claude_path == "/opt/claude"
+
+    def test_env_override_claude_required_ip(self, monkeypatch):
+        monkeypatch.setenv("MYSWAT_AGENTS_CLAUDE_REQUIRED_IP", "203.0.113.10")
+        settings = AgentSettings()
+        assert settings.claude_required_ip == "203.0.113.10"
+
+    def test_env_override_claude_ip_check_timeout_seconds(self, monkeypatch):
+        monkeypatch.setenv("MYSWAT_AGENTS_CLAUDE_IP_CHECK_TIMEOUT_SECONDS", "7")
+        settings = AgentSettings()
+        assert settings.claude_ip_check_timeout_seconds == 7
+
+    def test_env_override_role_backend(self, monkeypatch):
+        monkeypatch.setenv("MYSWAT_AGENTS_DEVELOPER_BACKEND", "claude")
+        settings = AgentSettings()
+        assert settings.developer_backend == "claude"
 
     def test_env_override_qa_main_model(self, monkeypatch):
         monkeypatch.setenv("MYSWAT_AGENTS_QA_MAIN_MODEL", "custom/qa-model")

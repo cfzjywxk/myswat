@@ -9,7 +9,7 @@ import pytest
 
 from myswat.agents.base import AgentResponse
 from myswat.agents.session_manager import SessionManager
-from myswat.models.session import Session
+from myswat.models.session import Session, SessionTurn
 
 
 def _make_sm(store=None, runner=None, agent_row=None, compactor=None):
@@ -48,6 +48,7 @@ class TestCreateOrResume:
         sm, store, _ = _make_sm()
         existing = Session(id=5, agent_id=1, session_uuid="existing-uuid")
         store.get_active_session.return_value = existing
+        store.get_session_turns.return_value = []
 
         session = sm.create_or_resume()
 
@@ -59,12 +60,31 @@ class TestCreateOrResume:
         sm, store, _ = _make_sm()
         existing = Session(id=8, agent_id=1, session_uuid="work-item-uuid", work_item_id=42)
         store.get_active_session.return_value = existing
+        store.get_session_turns.return_value = []
 
         session = sm.create_or_resume(work_item_id=42)
 
         assert session.id == 8
         store.get_active_session.assert_called_once_with(1, work_item_id=42)
         store.create_session.assert_not_called()
+
+    def test_resumes_existing_session_restores_cli_session_id(self):
+        sm, store, runner = _make_sm()
+        existing = Session(id=9, agent_id=1, session_uuid="resume-uuid")
+        store.get_active_session.return_value = existing
+        store.get_session_turns.return_value = [
+            SessionTurn(
+                session_id=9,
+                turn_index=0,
+                role="assistant",
+                content="hello",
+                metadata_json={"cli_session_id": "restored-session-id"},
+            )
+        ]
+
+        sm.create_or_resume()
+
+        runner.restore_session.assert_called_once_with("restored-session-id")
 
 
 class TestSend:

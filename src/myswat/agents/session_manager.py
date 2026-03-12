@@ -19,7 +19,7 @@ class SessionManager:
     """Manages the lifecycle of a single agent session with TiDB persistence.
 
     Architecture:
-    - The underlying AI CLI (codex/kimi) maintains its OWN persistent session.
+    - The underlying AI CLI (codex/kimi/claude) maintains its OWN persistent session.
     - The first send() builds TiDB context and injects it as system context.
     - Subsequent send() calls resume the SAME AI session — no context rebuild.
     - The AI remembers all prior conversation naturally via its own session state.
@@ -65,6 +65,7 @@ class SessionManager:
         existing = self._store.get_active_session(self._agent_row["id"], work_item_id=work_item_id)
         if existing:
             self._session = existing
+            self._restore_cli_session(existing.id)
             return existing
 
         session = self._store.create_session(
@@ -74,6 +75,24 @@ class SessionManager:
         )
         self._session = session
         return session
+
+    def _restore_cli_session(self, session_id: int) -> None:
+        """Restore the last persisted CLI session ID for a resumed TiDB session."""
+        try:
+            turns = self._store.get_session_turns(session_id)
+        except Exception:
+            return
+
+        for turn in reversed(turns):
+            if turn.role != "assistant":
+                continue
+            metadata = turn.metadata_json
+            if not isinstance(metadata, dict):
+                continue
+            cli_session_id = metadata.get("cli_session_id")
+            if isinstance(cli_session_id, str) and cli_session_id:
+                self._runner.restore_session(cli_session_id)
+                return
 
     def reset_ai_session(self) -> None:
         """Reset the underlying AI CLI session.

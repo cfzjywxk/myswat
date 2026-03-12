@@ -86,6 +86,17 @@ class TestBuildRunner:
         assert runner is not None
         assert "--fast" in runner.extra_flags
 
+    def test_claude_runner(self):
+        row = {
+            "cli_backend": "claude",
+            "cli_path": "/usr/bin/claude",
+            "model_name": "claude-sonnet-4-6",
+            "cli_extra_args": '["--print"]',
+        }
+        runner = _build_runner(row)
+        assert runner is not None
+        assert "--print" in runner.extra_flags
+
     def test_unknown_backend(self):
         row = {
             "cli_backend": "unknown",
@@ -97,6 +108,29 @@ class TestBuildRunner:
 
 
 class TestConsultArchitect:
+    @patch("myswat.workflow.error_handler.MySwatSettings")
+    @patch("myswat.workflow.error_handler._build_runner")
+    def test_passes_settings_to_runner_builder(self, mock_build, mock_settings_cls):
+        store = MagicMock()
+        agent_row = {
+            "id": 1, "cli_backend": "claude", "cli_path": "claude",
+            "model_name": "claude-sonnet-4-6", "cli_extra_args": None,
+        }
+        store.get_agent.return_value = agent_row
+        err = WorkflowError(error=ValueError("test"), stage="test")
+
+        settings = MagicMock()
+        mock_settings_cls.return_value = settings
+        mock_runner = MagicMock()
+        mock_runner.invoke.return_value = AgentResponse(
+            content="Root cause: X. Fix: do Y.", exit_code=0,
+        )
+        mock_build.return_value = mock_runner
+
+        _consult_architect(err, store, project_id=1)
+
+        mock_build.assert_called_once_with(agent_row, settings=settings)
+
     def test_returns_suggestion_on_success(self):
         store = MagicMock()
         store.get_agent.return_value = {

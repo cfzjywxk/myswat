@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import threading
 from typing import Callable
@@ -16,8 +15,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from myswat.agents.base import AgentRunner
-from myswat.agents.codex_runner import CodexRunner
-from myswat.agents.kimi_runner import KimiRunner
+from myswat.agents.factory import make_runner_from_row
 from myswat.agents.session_manager import SessionManager
 from myswat.cli.progress import (
     _build_live_display,
@@ -57,30 +55,16 @@ HELP_TEXT = """
 def _make_compaction_runner(
     store: MemoryStore, proj: dict, settings: MySwatSettings,
 ) -> AgentRunner | None:
-    """Create a runner for knowledge compaction. Uses the first available codex agent."""
-    # Try to find a codex agent for compaction
+    """Create a runner for knowledge compaction using the configured backend."""
+    # Try to find an agent matching the configured compaction backend.
     agents = store.list_agents(proj["id"])
     for a in agents:
         if a["cli_backend"] == settings.compaction.compaction_backend:
-            return _make_runner(a)
+            return make_runner_from_row(a, settings=settings)
     # Fallback: use any agent
     if agents:
-        return _make_runner(agents[0])
+        return make_runner_from_row(agents[0], settings=settings)
     return None
-
-
-def _make_runner(agent_row: dict) -> AgentRunner:
-    backend = agent_row["cli_backend"]
-    cli_path = agent_row["cli_path"]
-    model = agent_row["model_name"]
-    extra_flags = json.loads(agent_row["cli_extra_args"]) if agent_row.get("cli_extra_args") else []
-
-    if backend == "codex":
-        return CodexRunner(cli_path=cli_path, model=model, extra_flags=extra_flags)
-    elif backend == "kimi":
-        return KimiRunner(cli_path=cli_path, model=model, extra_flags=extra_flags)
-    else:
-        raise typer.BadParameter(f"Unknown CLI backend: {backend}")
 
 
 def _extract_delegation(text: str) -> str | None:
@@ -128,7 +112,7 @@ def run_chat(
     from myswat.cli.learn_cmd import ensure_learned
     ensure_learned(store, project_slug, proj["id"], effective_workdir)
 
-    # Create a lightweight runner for compaction (uses codex by default)
+    # Create a lightweight runner for compaction (uses the configured backend)
     compaction_runner = _make_compaction_runner(store, proj, settings)
     compactor = KnowledgeCompactor(
         store=store,
@@ -141,13 +125,13 @@ def run_chat(
     current_role = role
     sm: SessionManager | None = None
 
-    def _switch_agent(new_role: str) -> SessionManager:
+    def _switch_agent(new_role: str, runner_settings: MySwatSettings) -> SessionManager:
         """Create a new SessionManager for the given role."""
         agent_row = store.get_agent(proj["id"], new_role)
         if not agent_row:
             console.print(f"[red]Agent role '{new_role}' not found.[/red]")
             return None
-        runner = _make_runner(agent_row)
+        runner = make_runner_from_row(agent_row, settings=runner_settings)
         runner.workdir = effective_workdir
         new_sm = SessionManager(
             store=store, runner=runner, agent_row=agent_row,
@@ -169,7 +153,7 @@ def run_chat(
         f"[dim]Enter to submit · Alt+Enter for new line · Paste supported[/dim]",
         border_style="blue",
     ))
-    sm = _switch_agent(current_role)
+    sm = _switch_agent(current_role, settings)
     if sm is None:
         raise typer.Exit(1)
 
@@ -231,7 +215,7 @@ def run_chat(
                 if sm:
                     with console.status("[dim]Saving session to TiDB...[/dim]", spinner="dots"):
                         sm.close()
-                new_sm = _switch_agent(new_role)
+                new_sm = _switch_agent(new_role, settings)
                 if new_sm:
                     sm = new_sm
                     current_role = new_role
@@ -290,7 +274,7 @@ def run_chat(
                 if sm:
                     with console.status("[dim]Saving session to TiDB...[/dim]", spinner="dots"):
                         sm.close()
-                sm = _switch_agent(current_role)
+                sm = _switch_agent(current_role, settings)
 
             elif cmd == "/work":
                 if not arg:
@@ -302,7 +286,7 @@ def run_chat(
                 _run_workflow_interactive(
                     store, proj, compactor, effective_workdir, settings, arg, prompt_session,
                 )
-                sm = _switch_agent(current_role)
+                sm = _switch_agent(current_role, settings)
 
             elif cmd == "/review":
                 if not arg:
@@ -315,7 +299,7 @@ def run_chat(
                     store, proj, compactor, effective_workdir, settings, arg,
                 )
                 # Reopen chat session after review
-                sm = _switch_agent(current_role)
+                sm = _switch_agent(current_role, settings)
 
             else:
                 console.print(f"[dim]Unknown command: {cmd}. Type /help for commands.[/dim]")
@@ -324,7 +308,7 @@ def run_chat(
 
         # Regular message — send to agent
         if sm is None:
-            sm = _switch_agent(current_role)
+            sm = _switch_agent(current_role, settings)
             if sm is None:
                 continue
 
@@ -365,7 +349,7 @@ def run_chat(
                         }
                     ],
                 )
-                sm = _switch_agent(current_role)
+                sm = _switch_agent(current_role, settings)
         else:
             console.print(Panel(
                 response.content,
@@ -493,11 +477,11 @@ def _run_inline_review(
         console.print("[red]Missing developer or qa_main agent.[/red]")
         return
 
-    dev_runner = _make_runner(dev_agent)
+    dev_runner = make_runner_from_row(dev_agent, settings=settings)
     dev_runner.workdir = workdir
     if register_cancel_target:
         register_cancel_target(dev_runner)
-    reviewer_runner = _make_runner(reviewer_agent)
+    reviewer_runner = make_runner_from_row(reviewer_agent, settings=settings)
     reviewer_runner.workdir = workdir
     if register_cancel_target:
         register_cancel_target(reviewer_runner)
@@ -583,7 +567,7 @@ def _run_workflow(
         console.print("[red]Missing developer agent.[/red]")
         return
 
-    dev_runner = _make_runner(dev_agent)
+    dev_runner = make_runner_from_row(dev_agent, settings=settings)
     dev_runner.workdir = workdir
     if register_cancel_target:
         register_cancel_target(dev_runner)
@@ -597,7 +581,7 @@ def _run_workflow(
     for qa_role in ("qa_main", "qa_vice"):
         qa_agent = store.get_agent(proj["id"], qa_role)
         if qa_agent:
-            qa_runner = _make_runner(qa_agent)
+            qa_runner = make_runner_from_row(qa_agent, settings=settings)
             qa_runner.workdir = workdir
             if register_cancel_target:
                 register_cancel_target(qa_runner)

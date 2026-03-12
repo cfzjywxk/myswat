@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import threading
 
 import typer
@@ -10,8 +9,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from myswat.agents.base import AgentRunner
-from myswat.agents.codex_runner import CodexRunner
-from myswat.agents.kimi_runner import KimiRunner
+from myswat.agents.factory import make_runner_from_row
 from myswat.agents.session_manager import SessionManager
 from myswat.cli.progress import _fmt_duration, _run_with_task_monitor, _send_with_timer
 from myswat.config.settings import MySwatSettings
@@ -30,32 +28,10 @@ def _find_compaction_runner(
     agents = store.list_agents(proj["id"])
     for a in agents:
         if a["cli_backend"] == settings.compaction.compaction_backend:
-            return _make_runner(a, settings)
+            return make_runner_from_row(a, settings=settings)
     if agents:
-        return _make_runner(agents[0], settings)
+        return make_runner_from_row(agents[0], settings=settings)
     return None
-
-
-def _make_runner(agent_row: dict, settings: MySwatSettings) -> AgentRunner:
-    """Create the appropriate AgentRunner from a DB agent row."""
-    backend = agent_row["cli_backend"]
-    cli_path = agent_row["cli_path"]
-    model = agent_row["model_name"]
-    extra_flags = json.loads(agent_row["cli_extra_args"]) if agent_row.get("cli_extra_args") else []
-    workdir = None
-
-    if backend == "codex":
-        return CodexRunner(
-            cli_path=cli_path, model=model,
-            workdir=workdir, extra_flags=extra_flags,
-        )
-    elif backend == "kimi":
-        return KimiRunner(
-            cli_path=cli_path, model=model,
-            workdir=workdir, extra_flags=extra_flags,
-        )
-    else:
-        raise typer.BadParameter(f"Unknown CLI backend: {backend}")
 
 
 def run_single(
@@ -89,7 +65,7 @@ def run_single(
         raise typer.Exit(1)
 
     # Create runner with optional workdir override
-    runner = _make_runner(agent_row, settings)
+    runner = make_runner_from_row(agent_row, settings=settings)
     if workdir:
         runner.workdir = workdir
     elif proj.get("repo_path"):
@@ -194,9 +170,9 @@ def run_with_review(
         raise typer.Exit(1)
 
     # Create runners
-    dev_runner = _make_runner(dev_agent, settings)
+    dev_runner = make_runner_from_row(dev_agent, settings=settings)
     dev_runner.workdir = effective_workdir
-    reviewer_runner = _make_runner(reviewer_agent, settings)
+    reviewer_runner = make_runner_from_row(reviewer_agent, settings=settings)
     reviewer_runner.workdir = effective_workdir
 
     # Create session managers with compactor

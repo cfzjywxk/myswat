@@ -10,7 +10,6 @@ from myswat.cli.learn_cmd import (
     _read_agent_instructions,
     _format_file_contents,
     _format_agent_instructions,
-    _make_runner,
     _validate_learned,
     _store_learned_knowledge,
     _write_myswat_md,
@@ -667,65 +666,6 @@ class TestEnsureLearned:
             # If passed positionally, the second arg should be the workdir.
             args = mock_run.call_args.args
             assert tmp_path in args or str(tmp_path) in [str(a) for a in args]
-
-
-# ---------------------------------------------------------------------------
-# _make_runner
-# ---------------------------------------------------------------------------
-class TestMakeRunner:
-    """Tests for _make_runner."""
-
-    @patch("myswat.agents.codex_runner.CodexRunner")
-    def test_codex_backend(self, MockCodex):
-        agent_row = {
-            "cli_backend": "codex",
-            "cli_path": "/usr/bin/codex",
-            "model_name": "gpt-5",
-            "cli_extra_args": None,
-        }
-        result = _make_runner(agent_row)
-        MockCodex.assert_called_once_with(
-            cli_path="/usr/bin/codex", model="gpt-5", extra_flags=[],
-        )
-
-    @patch("myswat.agents.kimi_runner.KimiRunner")
-    def test_kimi_backend(self, MockKimi):
-        agent_row = {
-            "cli_backend": "kimi",
-            "cli_path": "/usr/bin/kimi",
-            "model_name": "kimi-2",
-            "cli_extra_args": None,
-        }
-        result = _make_runner(agent_row)
-        MockKimi.assert_called_once_with(
-            cli_path="/usr/bin/kimi", model="kimi-2", extra_flags=[],
-        )
-
-    @patch("myswat.agents.codex_runner.CodexRunner")
-    def test_extra_args_parsed_from_json(self, MockCodex):
-        import json
-        agent_row = {
-            "cli_backend": "codex",
-            "cli_path": "codex",
-            "model_name": "gpt-5",
-            "cli_extra_args": json.dumps(["--verbose", "--timeout=60"]),
-        }
-        _make_runner(agent_row)
-        MockCodex.assert_called_once_with(
-            cli_path="codex", model="gpt-5",
-            extra_flags=["--verbose", "--timeout=60"],
-        )
-
-    def test_unknown_backend_raises(self):
-        import typer
-        agent_row = {
-            "cli_backend": "unknown",
-            "cli_path": "foo",
-            "model_name": "bar",
-            "cli_extra_args": None,
-        }
-        with pytest.raises(typer.BadParameter, match="Unknown CLI backend"):
-            _make_runner(agent_row)
 
 
 # ---------------------------------------------------------------------------

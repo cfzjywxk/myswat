@@ -49,7 +49,6 @@ class TestSeedDefaultAgents:
 
     def test_partial_existing(self):
         store = MagicMock()
-        call_count = [0]
 
         def get_agent_side(pid, role):
             if role == "architect":
@@ -69,6 +68,34 @@ class TestSeedDefaultAgents:
 
         _seed_default_agents(store, settings, 1)
         assert store.create_agent.call_count == 3
+
+    def test_uses_configured_backends(self):
+        store = MagicMock()
+        store.get_agent.return_value = None
+        settings = MagicMock()
+        settings.agents.architect_model = "claude-sonnet-4-6"
+        settings.agents.developer_model = "claude-sonnet-4-6"
+        settings.agents.qa_main_model = "kimi"
+        settings.agents.qa_vice_model = "gpt-5"
+        settings.agents.architect_backend = "claude"
+        settings.agents.developer_backend = "claude"
+        settings.agents.qa_main_backend = "kimi"
+        settings.agents.qa_vice_backend = "codex"
+        settings.agents.codex_path = "codex"
+        settings.agents.kimi_path = "kimi"
+        settings.agents.claude_path = "claude"
+        settings.agents.codex_default_flags = ["--json"]
+        settings.agents.kimi_default_flags = ["--print"]
+        settings.agents.claude_default_flags = ["--print", "--output-format", "stream-json"]
+
+        _seed_default_agents(store, settings, 1)
+
+        create_calls = store.create_agent.call_args_list
+        assert create_calls[0].kwargs["cli_backend"] == "claude"
+        assert create_calls[0].kwargs["cli_path"] == "claude"
+        assert create_calls[1].kwargs["cli_backend"] == "claude"
+        assert create_calls[2].kwargs["cli_backend"] == "kimi"
+        assert create_calls[3].kwargs["cli_backend"] == "codex"
 
 
 # ---------------------------------------------------------------------------

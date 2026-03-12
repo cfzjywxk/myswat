@@ -87,41 +87,88 @@ If you handle it yourself, just respond normally without the delegate block.
 """
 
 
+def _setting_str(settings_obj, name: str, default: str) -> str:
+    value = getattr(settings_obj, name, None)
+    return value if isinstance(value, str) and value else default
+
+
+def _setting_list(settings_obj, name: str, default: list[str]) -> list[str]:
+    value = getattr(settings_obj, name, None)
+    return list(value) if isinstance(value, list) else list(default)
+
+
+def _backend_path_and_flags(agent_settings, backend: str) -> tuple[str, list[str]]:
+    if backend == "codex":
+        return (
+            _setting_str(agent_settings, "codex_path", "codex"),
+            _setting_list(agent_settings, "codex_default_flags", ["--full-auto", "--json"]),
+        )
+    if backend == "kimi":
+        return (
+            _setting_str(agent_settings, "kimi_path", "kimi"),
+            _setting_list(
+                agent_settings,
+                "kimi_default_flags",
+                ["--print", "--output-format", "text", "--yolo", "--final-message-only"],
+            ),
+        )
+    if backend == "claude":
+        return (
+            _setting_str(agent_settings, "claude_path", "claude"),
+            _setting_list(
+                agent_settings,
+                "claude_default_flags",
+                ["--print", "--output-format", "stream-json", "--dangerously-skip-permissions"],
+            ),
+        )
+    raise typer.BadParameter(f"Unknown CLI backend: {backend}")
+
+
 def _seed_default_agents(store: MemoryStore, settings: MySwatSettings, project_id: int) -> None:
     """Create the 4 default agent roles if they don't exist."""
+    architect_backend = _setting_str(settings.agents, "architect_backend", "codex")
+    developer_backend = _setting_str(settings.agents, "developer_backend", "codex")
+    qa_main_backend = _setting_str(settings.agents, "qa_main_backend", "kimi")
+    qa_vice_backend = _setting_str(settings.agents, "qa_vice_backend", "kimi")
+
+    architect_path, architect_flags = _backend_path_and_flags(settings.agents, architect_backend)
+    developer_path, developer_flags = _backend_path_and_flags(settings.agents, developer_backend)
+    qa_main_path, qa_main_flags = _backend_path_and_flags(settings.agents, qa_main_backend)
+    qa_vice_path, qa_vice_flags = _backend_path_and_flags(settings.agents, qa_vice_backend)
+
     agent_defs = [
         {
             "role": "architect",
             "display_name": "Architect / PM",
-            "cli_backend": "codex",
+            "cli_backend": architect_backend,
             "model_name": settings.agents.architect_model,
-            "cli_path": settings.agents.codex_path,
-            "cli_extra_args": settings.agents.codex_default_flags,
+            "cli_path": architect_path,
+            "cli_extra_args": architect_flags,
             "system_prompt": ARCHITECT_SYSTEM_PROMPT,
         },
         {
             "role": "developer",
             "display_name": "Developer",
-            "cli_backend": "codex",
+            "cli_backend": developer_backend,
             "model_name": settings.agents.developer_model,
-            "cli_path": settings.agents.codex_path,
-            "cli_extra_args": settings.agents.codex_default_flags,
+            "cli_path": developer_path,
+            "cli_extra_args": developer_flags,
         },
         {
             "role": "qa_main",
             "display_name": "QA (Primary)",
-            "cli_backend": "kimi",
+            "cli_backend": qa_main_backend,
             "model_name": settings.agents.qa_main_model,
-            "cli_path": settings.agents.kimi_path,
-            "cli_extra_args": settings.agents.kimi_default_flags,
+            "cli_path": qa_main_path,
+            "cli_extra_args": qa_main_flags,
         },
         {
             "role": "qa_vice",
             "display_name": "QA (Secondary)",
-            "cli_backend": "kimi",
+            "cli_backend": qa_vice_backend,
             "model_name": settings.agents.qa_vice_model,
-            "cli_path": settings.agents.kimi_path,
-            "cli_extra_args": settings.agents.kimi_default_flags,
+            "cli_path": qa_vice_path,
+            "cli_extra_args": qa_vice_flags,
         },
     ]
 

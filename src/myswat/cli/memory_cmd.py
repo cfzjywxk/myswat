@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -153,8 +152,7 @@ def compact(
     project: str = typer.Option(..., "--project", "-p", help="Project slug"),
 ):
     """Compact all completed sessions into knowledge entries."""
-    from myswat.agents.codex_runner import CodexRunner
-    from myswat.agents.kimi_runner import KimiRunner
+    from myswat.agents.factory import make_runner_from_row
     from myswat.memory.compactor import KnowledgeCompactor
 
     settings = MySwatSettings()
@@ -170,23 +168,11 @@ def compact(
     agents = store.list_agents(proj["id"])
     runner = None
     for a in agents:
-        backend = a["cli_backend"]
-        cli_path = a["cli_path"]
-        model = a["model_name"]
-        extra_flags = json.loads(a["cli_extra_args"]) if a.get("cli_extra_args") else []
-        if backend == settings.compaction.compaction_backend:
-            if backend == "codex":
-                runner = CodexRunner(cli_path=cli_path, model=model, extra_flags=extra_flags)
-            elif backend == "kimi":
-                runner = KimiRunner(cli_path=cli_path, model=model, extra_flags=extra_flags)
+        if a["cli_backend"] == settings.compaction.compaction_backend:
+            runner = make_runner_from_row(a, settings=settings)
             break
     if runner is None and agents:
-        a = agents[0]
-        extra_flags = json.loads(a["cli_extra_args"]) if a.get("cli_extra_args") else []
-        if a["cli_backend"] == "codex":
-            runner = CodexRunner(cli_path=a["cli_path"], model=a["model_name"], extra_flags=extra_flags)
-        elif a["cli_backend"] == "kimi":
-            runner = KimiRunner(cli_path=a["cli_path"], model=a["model_name"], extra_flags=extra_flags)
+        runner = make_runner_from_row(agents[0], settings=settings)
 
     if runner is None:
         console.print("[red]No agents available for compaction.[/red]")

@@ -1,8 +1,6 @@
 """Tests for myswat.cli.chat_cmd."""
 
 from __future__ import annotations
-
-import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, PropertyMock
 
@@ -13,7 +11,6 @@ from click.exceptions import Exit as ClickExit
 from myswat.agents.base import AgentResponse
 from myswat.cli.chat_cmd import (
     _make_compaction_runner,
-    _make_runner,
     _show_status,
     _run_inline_review,
     _run_inline_review_interactive,
@@ -36,29 +33,6 @@ def _agent_row(role="developer", backend="codex"):
 
 def _proj():
     return {"id": 1, "slug": "proj", "name": "Proj", "repo_path": "/tmp"}
-
-
-# ---------------------------------------------------------------------------
-# _make_runner
-# ---------------------------------------------------------------------------
-class TestMakeRunner:
-    def test_codex(self):
-        r = _make_runner(_agent_row("dev", "codex"))
-        assert r is not None
-
-    def test_kimi(self):
-        r = _make_runner(_agent_row("dev", "kimi"))
-        assert r is not None
-
-    def test_unknown_raises(self):
-        with pytest.raises(typer.BadParameter):
-            _make_runner(_agent_row("dev", "unknown"))
-
-    def test_extra_args(self):
-        row = _agent_row()
-        row["cli_extra_args"] = json.dumps(["--flag"])
-        r = _make_runner(row)
-        assert r is not None
 
 
 # ---------------------------------------------------------------------------

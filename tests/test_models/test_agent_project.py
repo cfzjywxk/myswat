@@ -195,9 +195,9 @@ class TestAgent:
         )
         assert agent.role == role
 
-    @pytest.mark.parametrize("backend", ["codex", "kimi"])
+    @pytest.mark.parametrize("backend", ["codex", "kimi", "claude"])
     def test_cli_backend_values_are_accepted(self, backend: str):
-        """Both documented cli_backend values should be accepted."""
+        """All documented cli_backend values should be accepted."""
         agent = Agent(
             project_id=1,
             role="developer",

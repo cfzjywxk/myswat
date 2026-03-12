@@ -28,7 +28,8 @@ class AgentRunner(ABC):
 
     Supports persistent AI sessions and live output streaming.
     The first invoke() starts a new CLI session, subsequent calls resume
-    the same session via CLI-specific mechanisms (codex exec resume / kimi -S).
+    the same session via CLI-specific mechanisms (codex exec resume /
+    kimi -S / claude --resume).
 
     Live output: stdout lines are accumulated in `live_output` as the subprocess
     runs. Callers can read this from another thread to display progress.
@@ -74,6 +75,10 @@ class AgentRunner(ABC):
         """Clear the CLI session ID, forcing a fresh AI session on next invoke()."""
         self._cli_session_id = None
         self._turn_count = 0
+
+    def restore_session(self, session_id: str | None) -> None:
+        """Restore a previously persisted CLI session ID."""
+        self._cli_session_id = session_id
 
     @abstractmethod
     def build_command(self, prompt: str, system_context: str | None = None) -> list[str]:

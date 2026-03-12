@@ -24,6 +24,13 @@ class TiDBSettings(BaseSettings):
 class AgentSettings(BaseSettings):
     codex_path: str = "codex"
     kimi_path: str = "kimi"
+    claude_path: str = "claude"
+    claude_required_ip: str = "154.28.2.59"
+    claude_ip_check_timeout_seconds: int = 10
+    architect_backend: str = "codex"
+    developer_backend: str = "codex"
+    qa_main_backend: str = "kimi"
+    qa_vice_backend: str = "kimi"
     developer_model: str = "gpt-5.4"
     architect_model: str = "gpt-5.4"
     qa_main_model: str = "kimi-code/kimi-for-coding"
@@ -33,6 +40,12 @@ class AgentSettings(BaseSettings):
     )
     kimi_default_flags: list[str] = Field(
         default=["--print", "--output-format", "text", "--yolo", "--final-message-only"],
+    )
+    # Security tradeoff: MySwat runs non-interactive agent workflows and relies
+    # on outer sandbox/proxy controls rather than Claude permission prompts.
+    # Override this with an explicit Claude permission flag if needed.
+    claude_default_flags: list[str] = Field(
+        default=["--print", "--output-format", "stream-json", "--dangerously-skip-permissions"],
     )
 
     model_config = {"env_prefix": "MYSWAT_AGENTS_"}
