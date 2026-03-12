@@ -14,7 +14,6 @@ from myswat.agents.codex_runner import CodexRunner
 from myswat.agents.kimi_runner import KimiRunner
 from myswat.config.settings import MySwatSettings
 
-_DEFAULT_CLAUDE_REQUIRED_IP = "154.28.2.59"
 _DEFAULT_CLAUDE_IP_CHECK_TIMEOUT_SECONDS = 10
 
 
@@ -45,10 +44,17 @@ def _claude_required_ip(settings: MySwatSettings | None) -> str:
     value = _nested_attr(settings, "agents", "claude_required_ip")
     if isinstance(value, str) and value:
         return value
+    # Env fallback is mainly for callers that do not provide a populated
+    # MySwatSettings object. When settings comes from MySwatSettings(), pydantic
+    # will already have folded this env var into settings.agents.
     env_value = os.environ.get("MYSWAT_AGENTS_CLAUDE_REQUIRED_IP")
     if env_value:
         return env_value
-    return _DEFAULT_CLAUDE_REQUIRED_IP
+    raise typer.BadParameter(
+        "Claude runner requires `claude_required_ip` to be set in "
+        "`~/.myswat/config.toml` under [agents] or via "
+        "`MYSWAT_AGENTS_CLAUDE_REQUIRED_IP`."
+    )
 
 
 def _claude_ip_check_timeout_seconds(settings: MySwatSettings | None) -> int:

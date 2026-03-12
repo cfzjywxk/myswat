@@ -88,15 +88,15 @@ class TestAgentSettings:
         assert settings.codex_path == "codex"
         assert settings.kimi_path == "kimi"
         assert settings.claude_path == "claude"
-        assert settings.claude_required_ip == "154.28.2.59"
+        assert settings.claude_required_ip == ""
         assert settings.claude_ip_check_timeout_seconds == 10
         assert settings.architect_backend == "codex"
         assert settings.developer_backend == "codex"
-        assert settings.qa_main_backend == "kimi"
+        assert settings.qa_main_backend == "claude"
         assert settings.qa_vice_backend == "kimi"
         assert settings.developer_model == "gpt-5.4"
         assert settings.architect_model == "gpt-5.4"
-        assert settings.qa_main_model == "kimi-code/kimi-for-coding"
+        assert settings.qa_main_model == "claude-opus-4-6"
         assert settings.qa_vice_model == "kimi-code/kimi-for-coding"
 
     def test_default_codex_flags(self):

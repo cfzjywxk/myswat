@@ -55,8 +55,13 @@ claude_path = "claude"
 kimi_path = "kimi"
 claude_required_ip = "154.28.2.59"
 architect_backend = "codex"
+developer_backend = "codex"
+qa_main_backend = "claude"
+qa_vice_backend = "kimi"
+architect_model = "gpt-5.4"
 developer_model = "gpt-5.4"
-qa_main_model = "kimi-code/kimi-for-coding"
+qa_main_model = "claude-opus-4-6"
+qa_vice_model = "kimi-code/kimi-for-coding"
 ```
 
 Or use environment variables: `MYSWAT_TIDB_HOST`, `MYSWAT_TIDB_PASSWORD`, etc.
@@ -72,11 +77,11 @@ qa_vice_backend = "claude"
 claude_path = "claude"
 architect_model = "claude-sonnet-4-6"
 developer_model = "claude-sonnet-4-6"
-qa_main_model = "claude-sonnet-4-6"
+qa_main_model = "claude-opus-4-6"
 qa_vice_model = "claude-sonnet-4-6"
 ```
 
-When using Claude, MySwat validates the launch environment before every `claude` subprocess start: both `http_proxy` and `https_proxy` must be set, and `curl ipinfo.io` must report `154.28.2.59`. If that check fails, the workflow aborts before Claude is started.
+When using Claude, MySwat validates the launch environment before every `claude` subprocess start: both `http_proxy` and `https_proxy` must be set, and `curl ipinfo.io` must report `154.28.2.59`. If that check fails, the workflow aborts before Claude is started. During `myswat init`, if the default Claude-backed `qa_main` role cannot find the `claude` binary, initialization aborts and asks you to either install/configure Claude or change `qa_main_backend` to `codex` or `kimi`. The default `qa_main` seed uses `claude-opus-4-6` with `--effort high`.
 
 By default, Claude runners also add `--dangerously-skip-permissions` for non-interactive automation. Override `claude_default_flags` or provide an explicit Claude permission flag if you want a different permission model.
 

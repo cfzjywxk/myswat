@@ -10,8 +10,6 @@ from collections.abc import Iterable
 
 from myswat.agents.base import AgentRunner
 
-_DEFAULT_REQUIRED_IP = "154.28.2.59"
-
 
 class ClaudeEnvironmentError(RuntimeError):
     """Raised when the required Claude proxy/IP environment is not available."""
@@ -35,7 +33,7 @@ class ClaudeRunner(AgentRunner):
         workdir: str | None = None,
         extra_flags: list[str] | None = None,
         timeout: int | None = None,
-        required_ip: str = _DEFAULT_REQUIRED_IP,
+        required_ip: str = "",
         ip_check_timeout_seconds: int = 10,
     ) -> None:
         super().__init__(
@@ -48,6 +46,10 @@ class ClaudeRunner(AgentRunner):
         self._requested_session_id: str | None = None
         self._required_ip = required_ip
         self._ip_check_timeout_seconds = ip_check_timeout_seconds
+        if not self._required_ip:
+            raise ClaudeEnvironmentError(
+                "Claude runner requires a configured target IP before launch."
+            )
 
     def _base_flags(self) -> list[str]:
         flags: list[str] = []

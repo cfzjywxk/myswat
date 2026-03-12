@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -97,6 +100,14 @@ def _setting_list(settings_obj, name: str, default: list[str]) -> list[str]:
     return list(value) if isinstance(value, list) else list(default)
 
 
+def _ensure_flag_value(flags: list[str], flag: str, value: str) -> list[str]:
+    result = list(flags)
+    if any(item == flag or item.startswith(flag + "=") for item in result):
+        return result
+    result.extend([flag, value])
+    return result
+
+
 def _backend_path_and_flags(agent_settings, backend: str) -> tuple[str, list[str]]:
     if backend == "codex":
         return (
@@ -124,17 +135,54 @@ def _backend_path_and_flags(agent_settings, backend: str) -> tuple[str, list[str
     raise typer.BadParameter(f"Unknown CLI backend: {backend}")
 
 
+def _is_cli_available(cli_path: str) -> bool:
+    if not cli_path:
+        return False
+    if "/" in cli_path or cli_path.startswith("."):
+        target = Path(cli_path).expanduser()
+        return target.is_file() and os.access(target, os.X_OK)
+    return shutil.which(cli_path) is not None
+
+
+def _validate_pending_default_agents(agent_defs: list[dict], store: MemoryStore, project_id: int) -> None:
+    # We only fail fast for Claude-backed defaults because qa_main now defaults to
+    # Claude and a missing `claude` binary would otherwise create a broken default
+    # review setup. Other backends remain configurable but are not hard-blocked here.
+    missing_claude_roles = [
+        agent_def["role"]
+        for agent_def in agent_defs
+        if agent_def["cli_backend"] == "claude"
+        and not store.get_agent(project_id, agent_def["role"])
+        and not _is_cli_available(agent_def["cli_path"])
+    ]
+    if not missing_claude_roles:
+        return
+
+    roles_text = ", ".join(missing_claude_roles)
+    console.print(
+        "[red]Claude CLI is required for the default QA configuration but was not found.[/red]"
+    )
+    console.print(
+        f"[dim]Missing Claude-backed role(s): {roles_text}. "
+        "Install `claude`, set [agents].claude_path, or configure "
+        "[agents].qa_main_backend to `codex` or `kimi` before running `myswat init`.[/dim]"
+    )
+    raise typer.Exit(1)
+
+
 def _seed_default_agents(store: MemoryStore, settings: MySwatSettings, project_id: int) -> None:
     """Create the 4 default agent roles if they don't exist."""
     architect_backend = _setting_str(settings.agents, "architect_backend", "codex")
     developer_backend = _setting_str(settings.agents, "developer_backend", "codex")
-    qa_main_backend = _setting_str(settings.agents, "qa_main_backend", "kimi")
+    qa_main_backend = _setting_str(settings.agents, "qa_main_backend", "claude")
     qa_vice_backend = _setting_str(settings.agents, "qa_vice_backend", "kimi")
 
     architect_path, architect_flags = _backend_path_and_flags(settings.agents, architect_backend)
     developer_path, developer_flags = _backend_path_and_flags(settings.agents, developer_backend)
     qa_main_path, qa_main_flags = _backend_path_and_flags(settings.agents, qa_main_backend)
     qa_vice_path, qa_vice_flags = _backend_path_and_flags(settings.agents, qa_vice_backend)
+    if qa_main_backend == "claude":
+        qa_main_flags = _ensure_flag_value(qa_main_flags, "--effort", "high")
 
     agent_defs = [
         {
@@ -171,6 +219,8 @@ def _seed_default_agents(store: MemoryStore, settings: MySwatSettings, project_i
             "cli_extra_args": qa_vice_flags,
         },
     ]
+
+    _validate_pending_default_agents(agent_defs, store, project_id)
 
     for agent_def in agent_defs:
         existing = store.get_agent(project_id, agent_def["role"])

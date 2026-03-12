@@ -93,6 +93,21 @@ class TestMakeRunnerFromRow:
             ip_check_timeout_seconds=9,
         )
 
+    def test_claude_backend_requires_configured_ip(self, monkeypatch):
+        row = {
+            "cli_backend": "claude",
+            "cli_path": "claude",
+            "model_name": "claude-opus-4-6",
+            "cli_extra_args": None,
+        }
+        settings = MagicMock()
+        settings.agents.claude_required_ip = ""
+        settings.agents.claude_ip_check_timeout_seconds = 10
+        monkeypatch.delenv("MYSWAT_AGENTS_CLAUDE_REQUIRED_IP", raising=False)
+
+        with pytest.raises(typer.BadParameter, match="claude_required_ip"):
+            make_runner_from_row(row, settings=settings)
+
     @patch("myswat.agents.factory.CodexRunner")
     def test_extra_args_parsed_from_json(self, MockCodex):
         row = {

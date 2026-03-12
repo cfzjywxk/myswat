@@ -8,46 +8,97 @@ import pytest
 import typer
 from click.exceptions import Exit as ClickExit
 
-from myswat.cli.init_cmd import _slugify, _seed_default_agents, run_init
+from myswat.cli.init_cmd import (
+    _ensure_flag_value,
+    _is_cli_available,
+    _seed_default_agents,
+    _slugify,
+    run_init,
+)
+
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+class TestInitHelpers:
+    def test_ensure_flag_value_adds_missing_flag(self):
+        assert _ensure_flag_value(["--print"], "--effort", "high") == [
+            "--print", "--effort", "high",
+        ]
+
+    def test_ensure_flag_value_preserves_existing_flag(self):
+        assert _ensure_flag_value(["--print", "--effort", "medium"], "--effort", "high") == [
+            "--print", "--effort", "medium",
+        ]
+
+    def test_ensure_flag_value_preserves_existing_equals_style_flag(self):
+        assert _ensure_flag_value(["--print", "--effort=medium"], "--effort", "high") == [
+            "--print", "--effort=medium",
+        ]
+
+    def test_is_cli_available_empty_string_false(self):
+        assert _is_cli_available("") is False
+
+    def test_is_cli_available_nonexistent_absolute_path_false(self, tmp_path):
+        missing = tmp_path / "missing-claude"
+        assert _is_cli_available(str(missing)) is False
+
+    @patch("myswat.cli.init_cmd.shutil.which", return_value="/usr/bin/claude")
+    def test_is_cli_available_bare_name_found_in_path_true(self, mock_which):
+        assert _is_cli_available("claude") is True
+        mock_which.assert_called_once_with("claude")
+
+    def test_is_cli_available_executable_path_true(self, tmp_path):
+        target = tmp_path / "claude"
+        target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        target.chmod(0o755)
+        assert _is_cli_available(str(target)) is True
 
 
 # ---------------------------------------------------------------------------
 # _seed_default_agents
 # ---------------------------------------------------------------------------
 class TestSeedDefaultAgents:
-    def test_creates_4_agents(self):
+    @patch("myswat.cli.init_cmd._is_cli_available", return_value=True)
+    def test_creates_4_agents(self, mock_available):
         store = MagicMock()
         store.get_agent.return_value = None
         settings = MagicMock()
         settings.agents.architect_model = "gpt-5"
         settings.agents.developer_model = "gpt-5"
-        settings.agents.qa_main_model = "kimi"
+        settings.agents.qa_main_model = "claude-opus-4-6"
         settings.agents.qa_vice_model = "kimi"
         settings.agents.codex_path = "codex"
+        settings.agents.claude_path = "claude"
         settings.agents.kimi_path = "kimi"
         settings.agents.codex_default_flags = ["--json"]
+        settings.agents.claude_default_flags = ["--print"]
         settings.agents.kimi_default_flags = ["--print"]
 
         _seed_default_agents(store, settings, 1)
         assert store.create_agent.call_count == 4
 
-    def test_skips_existing_agents(self):
+    @patch("myswat.cli.init_cmd._is_cli_available", return_value=True)
+    def test_skips_existing_agents(self, mock_available):
         store = MagicMock()
         store.get_agent.return_value = {"id": 1}  # all exist
         settings = MagicMock()
         settings.agents.architect_model = "gpt-5"
         settings.agents.developer_model = "gpt-5"
-        settings.agents.qa_main_model = "kimi"
+        settings.agents.qa_main_model = "claude-opus-4-6"
         settings.agents.qa_vice_model = "kimi"
         settings.agents.codex_path = "codex"
+        settings.agents.claude_path = "claude"
         settings.agents.kimi_path = "kimi"
         settings.agents.codex_default_flags = ["--json"]
+        settings.agents.claude_default_flags = ["--print"]
         settings.agents.kimi_default_flags = ["--print"]
 
         _seed_default_agents(store, settings, 1)
         store.create_agent.assert_not_called()
 
-    def test_partial_existing(self):
+    @patch("myswat.cli.init_cmd._is_cli_available", return_value=True)
+    def test_partial_existing(self, mock_available):
         store = MagicMock()
 
         def get_agent_side(pid, role):
@@ -59,17 +110,20 @@ class TestSeedDefaultAgents:
         settings = MagicMock()
         settings.agents.architect_model = "gpt-5"
         settings.agents.developer_model = "gpt-5"
-        settings.agents.qa_main_model = "kimi"
+        settings.agents.qa_main_model = "claude-opus-4-6"
         settings.agents.qa_vice_model = "kimi"
         settings.agents.codex_path = "codex"
+        settings.agents.claude_path = "claude"
         settings.agents.kimi_path = "kimi"
         settings.agents.codex_default_flags = ["--json"]
+        settings.agents.claude_default_flags = ["--print"]
         settings.agents.kimi_default_flags = ["--print"]
 
         _seed_default_agents(store, settings, 1)
         assert store.create_agent.call_count == 3
 
-    def test_uses_configured_backends(self):
+    @patch("myswat.cli.init_cmd._is_cli_available", return_value=True)
+    def test_uses_configured_backends(self, mock_available):
         store = MagicMock()
         store.get_agent.return_value = None
         settings = MagicMock()
@@ -95,7 +149,52 @@ class TestSeedDefaultAgents:
         assert create_calls[0].kwargs["cli_path"] == "claude"
         assert create_calls[1].kwargs["cli_backend"] == "claude"
         assert create_calls[2].kwargs["cli_backend"] == "kimi"
+        assert "--effort" not in create_calls[2].kwargs["cli_extra_args"]
         assert create_calls[3].kwargs["cli_backend"] == "codex"
+
+    @patch("myswat.cli.init_cmd._is_cli_available", return_value=False)
+    def test_default_qamain_claude_unavailable_aborts_before_creating_agents(self, mock_available):
+        store = MagicMock()
+        store.get_agent.return_value = None
+        settings = MagicMock()
+        settings.agents.architect_model = "gpt-5"
+        settings.agents.developer_model = "gpt-5"
+        settings.agents.qa_main_model = "claude-opus-4-6"
+        settings.agents.qa_vice_model = "kimi"
+        settings.agents.codex_path = "codex"
+        settings.agents.claude_path = "claude"
+        settings.agents.kimi_path = "kimi"
+        settings.agents.codex_default_flags = ["--json"]
+        settings.agents.claude_default_flags = ["--print"]
+        settings.agents.kimi_default_flags = ["--print"]
+
+        with pytest.raises(ClickExit):
+            _seed_default_agents(store, settings, 1)
+
+        store.create_agent.assert_not_called()
+
+    @patch("myswat.cli.init_cmd._is_cli_available", return_value=True)
+    def test_default_qamain_claude_gets_high_effort(self, mock_available):
+        store = MagicMock()
+        store.get_agent.return_value = None
+        settings = MagicMock()
+        settings.agents.architect_model = "gpt-5"
+        settings.agents.developer_model = "gpt-5"
+        settings.agents.qa_main_model = "claude-opus-4-6"
+        settings.agents.qa_vice_model = "kimi"
+        settings.agents.codex_path = "codex"
+        settings.agents.claude_path = "claude"
+        settings.agents.kimi_path = "kimi"
+        settings.agents.codex_default_flags = ["--json"]
+        settings.agents.claude_default_flags = ["--print"]
+        settings.agents.kimi_default_flags = ["--print"]
+
+        _seed_default_agents(store, settings, 1)
+
+        qa_main_call = store.create_agent.call_args_list[2]
+        assert qa_main_call.kwargs["cli_backend"] == "claude"
+        assert qa_main_call.kwargs["model_name"] == "claude-opus-4-6"
+        assert qa_main_call.kwargs["cli_extra_args"] == ["--print", "--effort", "high"]
 
 
 # ---------------------------------------------------------------------------

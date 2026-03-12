@@ -16,6 +16,7 @@ def runner():
         cli_path="/usr/bin/claude",
         model="claude-sonnet-4-6",
         extra_flags=[],
+        required_ip="154.28.2.59",
     )
 
 

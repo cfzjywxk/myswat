@@ -93,7 +93,10 @@ class TestBuildRunner:
             "model_name": "claude-sonnet-4-6",
             "cli_extra_args": '["--print"]',
         }
-        runner = _build_runner(row)
+        settings = MagicMock()
+        settings.agents.claude_required_ip = "154.28.2.59"
+        settings.agents.claude_ip_check_timeout_seconds = 10
+        runner = _build_runner(row, settings=settings)
         assert runner is not None
         assert "--print" in runner.extra_flags
 
