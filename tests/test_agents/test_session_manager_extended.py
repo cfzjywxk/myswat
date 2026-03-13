@@ -1,4 +1,4 @@
-"""Extended tests for SessionManager covering _update_progress, _check_mid_session_compaction, close, and _compact."""
+"""Extended tests for SessionManager covering _update_progress, _check_mid_session_compaction, close, and _compact_final."""
 
 import io
 import sys
@@ -257,17 +257,16 @@ class TestCheckMidSessionCompaction:
             agent_id=1,
             mark_compacted=False,
         )
-        store.delete_compacted_turns.assert_called_once_with(5)
+        store.delete_compacted_turns.assert_not_called()
         store.reset_session_token_count.assert_called_once_with(5)
 
-    def test_prints_to_stderr_when_ids_and_deleted(self):
+    def test_prints_to_stderr_when_ids_created(self):
         compactor = MagicMock()
         compactor.should_compact.return_value = True
         compactor.compact_session.return_value = [1, 2, 3]
 
         sm, store, _ = _make_sm(compactor=compactor)
-        session = _attach_session(sm)
-        store.delete_compacted_turns.return_value = 5
+        _attach_session(sm)
 
         captured = io.StringIO()
         with patch("sys.stderr", captured):
@@ -276,23 +275,22 @@ class TestCheckMidSessionCompaction:
         output = captured.getvalue()
         assert "mid-session compaction" in output
         assert "3 knowledge entries created" in output
-        assert "5 old turns deleted" in output
+        assert "old turns deleted" not in output
 
-    def test_no_stderr_when_ids_empty_and_deleted_zero(self):
+    def test_no_stderr_when_ids_empty(self):
         compactor = MagicMock()
         compactor.should_compact.return_value = True
         compactor.compact_session.return_value = []
 
         sm, store, _ = _make_sm(compactor=compactor)
         _attach_session(sm)
-        store.delete_compacted_turns.return_value = 0
 
         captured = io.StringIO()
         with patch("sys.stderr", captured):
             sm._check_mid_session_compaction()
 
         output = captured.getvalue()
-        # ids=[] and deleted=0 are both falsy, so no print
+        # ids=[] is falsy, so no print
         assert output == ""
 
     def test_catches_exceptions_during_compaction(self):
@@ -311,13 +309,13 @@ class TestCheckMidSessionCompaction:
         assert "Failed" in output
         assert "compaction failed" in output
 
-    def test_catches_exceptions_from_delete_compacted_turns(self):
+    def test_catches_exceptions_from_reset_session_token_count(self):
         compactor = MagicMock()
         compactor.should_compact.return_value = True
         compactor.compact_session.return_value = [1]
         sm, store, _ = _make_sm(compactor=compactor)
         _attach_session(sm)
-        store.delete_compacted_turns.side_effect = RuntimeError("delete failed")
+        store.reset_session_token_count.side_effect = RuntimeError("reset failed")
 
         captured = io.StringIO()
         with patch("sys.stderr", captured):
@@ -351,104 +349,81 @@ class TestClose:
 
     def test_runs_compaction_on_close_when_compactor_says_yes(self):
         compactor = MagicMock()
-        compactor.should_compact.return_value = True
         compactor.compact_session.return_value = [1, 2]
 
         sm, store, _ = _make_sm(compactor=compactor)
-        session = _attach_session(sm, session_id=30)
-        store.get_session.return_value = None
-
-        sm.close()
-
-        store.close_session.assert_called_once_with(30)
-        compactor.compact_session.assert_called_once()
-
-    def test_no_compaction_when_compactor_says_no(self):
-        compactor = MagicMock()
-        compactor.should_compact.return_value = False
-
-        sm, store, _ = _make_sm(compactor=compactor)
         _attach_session(sm, session_id=30)
-        store.get_session.return_value = None
 
         sm.close()
 
         store.close_session.assert_called_once_with(30)
-        compactor.compact_session.assert_not_called()
+        compactor.compact_session.assert_called_once_with(
+            session_id=30,
+            project_id=1,
+            agent_id=1,
+            mark_compacted=True,
+        )
 
     def test_no_compaction_when_compactor_is_none(self):
         sm, store, _ = _make_sm()
         _attach_session(sm, session_id=30)
-        store.get_session.return_value = None
 
         sm.close()
 
         store.close_session.assert_called_once_with(30)
 
-    def test_deletes_archived_session_when_status_compacted(self):
+    def test_close_does_not_delete_archived_session_when_status_compacted(self):
         sm, store, _ = _make_sm()
         _attach_session(sm, session_id=50)
-        # store.get_session returns a dict with "status" key
         store.get_session.return_value = {"status": "compacted"}
 
         sm.close()
 
-        store.delete_archived_session.assert_called_once_with(50)
-
-    def test_no_delete_archived_when_status_not_compacted(self):
-        sm, store, _ = _make_sm()
-        _attach_session(sm, session_id=50)
-        store.get_session.return_value = {"status": "closed"}
-
-        sm.close()
-
         store.delete_archived_session.assert_not_called()
 
-    def test_no_delete_archived_when_get_session_returns_none(self):
+    def test_close_does_not_query_session_status_for_delete(self):
         sm, store, _ = _make_sm()
         _attach_session(sm, session_id=50)
-        store.get_session.return_value = None
 
         sm.close()
 
+        store.get_session.assert_not_called()
         store.delete_archived_session.assert_not_called()
 
     def test_close_with_compaction_and_compacted_status(self):
-        """Full close flow: compaction runs AND session ends up compacted."""
+        """Full close flow: compaction runs and raw rows are preserved."""
         compactor = MagicMock()
-        compactor.should_compact.return_value = True
         compactor.compact_session.return_value = [1]
 
         sm, store, _ = _make_sm(compactor=compactor)
         _attach_session(sm, session_id=60)
-        store.get_session.return_value = {"status": "compacted"}
 
         sm.close()
 
         store.close_session.assert_called_once_with(60)
         compactor.compact_session.assert_called_once()
-        store.delete_archived_session.assert_called_once_with(60)
+        store.delete_archived_session.assert_not_called()
 
 
 # ===========================================================================
-# _compact
+# _compact_final
 # ===========================================================================
 
 
-class TestCompact:
-    """Tests for SessionManager._compact."""
+class TestCompactFinal:
+    """Tests for SessionManager._compact_final."""
 
     def test_returns_when_session_is_none(self):
         compactor = MagicMock()
         sm, store, _ = _make_sm(compactor=compactor)
         # no session
-        sm._compact()
+        sm._compact_final()
         compactor.compact_session.assert_not_called()
 
     def test_returns_when_compactor_is_none(self):
         sm, store, _ = _make_sm()
         _attach_session(sm)
-        sm._compact()
+        sm._compact_final()
         # Nothing should happen, no error
 
     def test_calls_compact_session_with_mark_compacted_true(self):
@@ -458,7 +433,7 @@ class TestCompact:
         sm, store, _ = _make_sm(compactor=compactor)
         _attach_session(sm, session_id=15)
 
-        sm._compact()
+        sm._compact_final()
 
         compactor.compact_session.assert_called_once_with(
             session_id=15,
@@ -476,12 +451,12 @@ class TestCompact:
 
         captured = io.StringIO()
         with patch("sys.stderr", captured):
-            sm._compact()
+            sm._compact_final()
 
         output = captured.getvalue()
         assert "[compaction]" in output
         assert "2 knowledge entries" in output
-        assert "session archived" in output
+        assert "session preserved" in output
 
     def test_no_stderr_when_ids_empty(self):
         compactor = MagicMock()
@@ -492,7 +467,7 @@ class TestCompact:
 
         captured = io.StringIO()
         with patch("sys.stderr", captured):
-            sm._compact()
+            sm._compact_final()
 
         output = captured.getvalue()
         assert output == ""
@@ -506,7 +481,7 @@ class TestCompact:
 
         captured = io.StringIO()
         with patch("sys.stderr", captured):
-            sm._compact()
+            sm._compact_final()
 
         output = captured.getvalue()
         assert "[compaction] Failed" in output

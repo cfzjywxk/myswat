@@ -234,14 +234,12 @@ class SessionManager:
                 agent_id=self._agent_row["id"],
                 mark_compacted=False,
             )
-            deleted = self._store.delete_compacted_turns(self._session.id)
             self._store.reset_session_token_count(self._session.id)
 
-            if ids or deleted:
+            if ids:
                 import sys
                 print(
-                    f"[mid-session compaction] {len(ids)} knowledge entries created, "
-                    f"{deleted} old turns deleted "
+                    f"[mid-session compaction] {len(ids)} knowledge entries created "
                     f"(session {self._session.session_uuid[:8]})",
                     file=sys.stderr,
                 )
@@ -250,22 +248,17 @@ class SessionManager:
             print(f"[mid-session compaction] Failed: {e}", file=sys.stderr)
 
     def close(self) -> None:
-        """Close the session, run final compaction, and clean up turns."""
+        """Close the session and run final compaction without deleting raw turns."""
         if self._session is None:
             return
 
         self._store.close_session(self._session.id)
 
-        if self._compactor and self._compactor.should_compact(self._session.id):
-            self._compact()
+        if self._compactor:
+            self._compact_final()
 
-        if self._store.get_session(self._session.id):
-            session = self._store.get_session(self._session.id)
-            if session and session.get("status") == "compacted":
-                self._store.delete_archived_session(self._session.id)
-
-    def _compact(self) -> None:
-        """Run knowledge compaction on the closed session, then delete turns."""
+    def _compact_final(self) -> None:
+        """Run final knowledge compaction on a closed session without deletion."""
         if self._session is None or self._compactor is None:
             return
         try:
@@ -277,7 +270,10 @@ class SessionManager:
             )
             if ids:
                 import sys
-                print(f"[compaction] Created {len(ids)} knowledge entries, session archived", file=sys.stderr)
+                print(
+                    f"[compaction] Created {len(ids)} knowledge entries, session preserved",
+                    file=sys.stderr,
+                )
         except Exception as e:
             import sys
             print(f"[compaction] Failed: {e}", file=sys.stderr)

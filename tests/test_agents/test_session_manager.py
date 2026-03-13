@@ -183,12 +183,13 @@ class TestMidSessionCompaction:
         type(runner).is_session_started = PropertyMock(return_value=True)
         runner.invoke.return_value = AgentResponse(content="ok", exit_code=0)
         store.count_session_turns.return_value = 2
-        store.delete_compacted_turns.return_value = 10
 
         sm.send("test")
 
         compactor.should_compact.assert_called()
         compactor.compact_session.assert_called_once()
+        store.delete_compacted_turns.assert_not_called()
+        store.reset_session_token_count.assert_called_once_with(1)
 
     def test_compaction_failure_does_not_crash(self):
         compactor = MagicMock()
