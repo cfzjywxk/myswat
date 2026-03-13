@@ -30,8 +30,12 @@ TRANSCRIPT:
 """
 
 
-def parse_compaction_output(raw_output: str) -> list[dict[str, Any]]:
-    """Parse the AI agent's JSON output into knowledge items."""
+def parse_compaction_output(raw_output: str) -> tuple[list[dict[str, Any]], bool]:
+    """Parse the AI agent's JSON output into knowledge items.
+
+    Returns ``(items, ok)`` where ``ok`` distinguishes a valid empty array
+    from malformed or missing JSON output.
+    """
     text = raw_output.strip()
 
     # Handle markdown code blocks
@@ -54,11 +58,11 @@ def parse_compaction_output(raw_output: str) -> list[dict[str, Any]]:
     try:
         items = json.loads(text)
         if isinstance(items, list):
-            return items
+            return items, True
     except json.JSONDecodeError:
         pass
 
-    return []
+    return [], False
 
 
 class KnowledgeCompactor:
@@ -76,7 +80,7 @@ class KnowledgeCompactor:
         self,
         store: MemoryStore,
         runner: AgentRunner | None = None,
-        threshold_turns: int = 10,
+        threshold_turns: int = 50,
         threshold_tokens: int = 5000,
     ) -> None:
         self._store = store
@@ -85,30 +89,38 @@ class KnowledgeCompactor:
         self._threshold_tokens = threshold_tokens
 
     def should_compact(self, session_id: int) -> bool:
-        """Check if uncompacted turns have exceeded thresholds."""
+        """Check if uncompacted turns have exceeded the turn threshold."""
         session = self._store.get_session(session_id)
         if not session:
             return False
         if session.get("status") == "compacted":
             return False
-        # Only count turns that haven't been compacted yet
         uncompacted = self._store.count_uncompacted_turns(session_id)
-        token_est = session.get("token_count_est", 0) or 0
-        return uncompacted >= self._threshold_turns or token_est >= self._threshold_tokens
+        return uncompacted >= self._threshold_turns
+
+    @staticmethod
+    def _build_transcript_from_turns(
+        turns: list[Any], max_chars: int = 100000,
+    ) -> tuple[str, list[Any]]:
+        """Build a transcript and return the turns actually included."""
+        lines = []
+        included_turns = []
+        total = 0
+        for turn in turns:
+            line = f"[{turn.role.upper()}]: {turn.content}"
+            if total + len(line) > max_chars:
+                lines.append("[... transcript truncated ...]")
+                break
+            lines.append(line)
+            included_turns.append(turn)
+            total += len(line)
+        return "\n\n".join(lines), included_turns
 
     def build_transcript(self, session_id: int, max_chars: int = 100000) -> str:
         """Build a text transcript from session turns."""
         turns = self._store.get_session_turns(session_id)
-        lines = []
-        total = 0
-        for turn in turns:
-            line = f"[{turn.role.upper()}]: {turn.content}"
-            total += len(line)
-            if total > max_chars:
-                lines.append("[... transcript truncated ...]")
-                break
-            lines.append(line)
-        return "\n\n".join(lines)
+        transcript, _included_turns = self._build_transcript_from_turns(turns, max_chars=max_chars)
+        return transcript
 
     def compact_session(
         self, session_id: int, project_id: int, agent_id: int | None = None,
@@ -117,7 +129,8 @@ class KnowledgeCompactor:
         """Compact a session into knowledge entries.
 
         Args:
-            mark_compacted: If True, mark session status as 'compacted' after.
+            mark_compacted: If True, attempt to mark session as fully compacted
+                after successful processing of all remaining turns.
                 If False (mid-session compaction), session stays 'active' and
                 turns are preserved — they just get "covered" by knowledge entries
                 so the retriever prefers compacted knowledge over raw turns.
@@ -142,17 +155,9 @@ class KnowledgeCompactor:
         if len(new_turns) < 2:
             return []
 
-        # Build transcript from uncompacted turns only
-        lines = []
-        total = 0
-        for turn in new_turns:
-            line = f"[{turn.role.upper()}]: {turn.content}"
-            total += len(line)
-            if total > 100000:
-                lines.append("[... transcript truncated ...]")
-                break
-            lines.append(line)
-        transcript = "\n\n".join(lines)
+        transcript, included_turns = self._build_transcript_from_turns(new_turns)
+        if not included_turns:
+            return []
 
         prompt = COMPACTION_PROMPT.format(transcript=transcript)
 
@@ -162,18 +167,15 @@ class KnowledgeCompactor:
             return []
 
         # Parse output
-        items = parse_compaction_output(response.content)
-
-        # Advance the watermark regardless — these turns are "processed"
-        max_turn_index = max(t.turn_index for t in new_turns)
-        turn_ids = [t.id for t in new_turns if t.id]
-
-        if not items:
-            if mark_compacted:
-                self._store.mark_session_compacted(session_id)
-            else:
-                self._store.advance_compaction_watermark(session_id, max_turn_index)
+        items, ok = parse_compaction_output(response.content)
+        if not ok:
             return []
+
+        last_included_turn_index = included_turns[-1].turn_index
+        last_uncompacted_turn_index = new_turns[-1].turn_index
+        turn_ids = [t.id for t in included_turns if t.id is not None]
+
+        self._store.advance_compaction_watermark(session_id, last_included_turn_index)
 
         # Store knowledge entries
         created_ids = []
@@ -201,11 +203,8 @@ class KnowledgeCompactor:
             )
             created_ids.append(kid)
 
-        if mark_compacted:
-            self._store.mark_session_compacted(session_id)
-        else:
-            # Mid-session: advance watermark so these turns won't be re-compacted
-            self._store.advance_compaction_watermark(session_id, max_turn_index)
+        if mark_compacted and last_included_turn_index == last_uncompacted_turn_index:
+            self._store.mark_session_fully_compacted(session_id)
         return created_ids
 
     def compact_all_pending(self, project_id: int, agent_id: int | None = None) -> dict:
@@ -219,7 +218,7 @@ class KnowledgeCompactor:
         for sess in sessions:
             turn_count = self._store.count_session_turns(sess["id"])
             if turn_count < 2:
-                self._store.mark_session_compacted(sess["id"])
+                self._store.mark_session_fully_compacted(sess["id"])
                 result["skipped"] += 1
                 continue
 

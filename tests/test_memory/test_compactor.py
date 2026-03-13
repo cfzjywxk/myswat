@@ -6,7 +6,8 @@ from myswat.memory.compactor import parse_compaction_output
 class TestParseCompactionOutput:
     def test_clean_json_array(self):
         raw = '[{"category": "decision", "title": "Use TiDB", "content": "We chose TiDB.", "tags": ["db"], "relevance_score": 0.9, "confidence": 0.8}]'
-        items = parse_compaction_output(raw)
+        items, ok = parse_compaction_output(raw)
+        assert ok is True
         assert len(items) == 1
         assert items[0]["category"] == "decision"
         assert items[0]["title"] == "Use TiDB"
@@ -18,7 +19,8 @@ class TestParseCompactionOutput:
 [{"category": "pattern", "title": "Retry logic", "content": "Always retry on timeout.", "tags": [], "relevance_score": 0.7, "confidence": 0.9}]
 ```
 """
-        items = parse_compaction_output(raw)
+        items, ok = parse_compaction_output(raw)
+        assert ok is True
         assert len(items) == 1
         assert items[0]["category"] == "pattern"
 
@@ -26,27 +28,30 @@ class TestParseCompactionOutput:
         raw = """```
 [{"category": "bug_fix", "title": "Fix null pointer", "content": "Check for None.", "tags": ["bug"], "relevance_score": 0.8, "confidence": 0.7}]
 ```"""
-        items = parse_compaction_output(raw)
+        items, ok = parse_compaction_output(raw)
+        assert ok is True
         assert len(items) == 1
 
     def test_empty_array(self):
-        assert parse_compaction_output("[]") == []
+        assert parse_compaction_output("[]") == ([], True)
 
     def test_no_json(self):
-        assert parse_compaction_output("No useful knowledge found.") == []
+        assert parse_compaction_output("No useful knowledge found.") == ([], False)
 
     def test_json_with_surrounding_text(self):
         raw = 'Here are the results:\n[{"category": "architecture", "title": "Test", "content": "Content."}]\nEnd.'
-        items = parse_compaction_output(raw)
+        items, ok = parse_compaction_output(raw)
+        assert ok is True
         assert len(items) == 1
 
     def test_invalid_json(self):
-        assert parse_compaction_output("[{broken json}]") == []
+        assert parse_compaction_output("[{broken json}]") == ([], False)
 
     def test_multiple_items(self):
         raw = """[
             {"category": "decision", "title": "A", "content": "First."},
             {"category": "pattern", "title": "B", "content": "Second."}
         ]"""
-        items = parse_compaction_output(raw)
+        items, ok = parse_compaction_output(raw)
+        assert ok is True
         assert len(items) == 2

@@ -140,7 +140,7 @@ class DocumentIngester:
             )
 
         from myswat.memory.compactor import parse_compaction_output
-        items = parse_compaction_output(response.content)
+        items, _ok = parse_compaction_output(response.content)
 
         if not items:
             return self._store_raw_chunk(

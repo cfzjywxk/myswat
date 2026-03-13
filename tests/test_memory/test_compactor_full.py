@@ -52,39 +52,43 @@ def _make_runner(output="[]", success=True):
 class TestParseCompactionOutput:
     def test_valid_json_array(self):
         raw = json.dumps([{"summary": "a"}, {"summary": "b"}])
-        result = parse_compaction_output(raw)
+        result, ok = parse_compaction_output(raw)
+        assert ok is True
         assert len(result) == 2
         assert result[0]["summary"] == "a"
 
     def test_json_code_block(self):
         inner = json.dumps([{"key": "value"}])
         raw = f"Here:\n```json\n{inner}\n```\nDone."
-        result = parse_compaction_output(raw)
+        result, ok = parse_compaction_output(raw)
+        assert ok is True
         assert len(result) == 1
         assert result[0]["key"] == "value"
 
     def test_plain_code_block(self):
         inner = json.dumps([{"k": 1}])
         raw = f"```\n{inner}\n```"
-        result = parse_compaction_output(raw)
+        result, ok = parse_compaction_output(raw)
+        assert ok is True
         assert len(result) == 1
 
     def test_find_array_in_surrounding_text(self):
         raw = 'Preamble\n[{"item": "found"}]\nTrailing'
-        result = parse_compaction_output(raw)
+        result, ok = parse_compaction_output(raw)
+        assert ok is True
         assert len(result) == 1
 
     def test_invalid_json_returns_empty(self):
-        assert parse_compaction_output("not json {{{") == []
+        assert parse_compaction_output("not json {{{") == ([], False)
 
     def test_non_list_returns_empty(self):
-        assert parse_compaction_output(json.dumps({"not": "list"})) == []
+        assert parse_compaction_output(json.dumps({"not": "list"})) == ([], False)
 
     def test_empty_string(self):
-        assert parse_compaction_output("") == []
+        assert parse_compaction_output("") == ([], False)
 
     def test_empty_array(self):
-        assert parse_compaction_output("[]") == []
+        assert parse_compaction_output("[]") == ([], True)
 
 
 # ===========================================================================
@@ -112,12 +116,12 @@ class TestShouldCompact:
         compactor = KnowledgeCompactor(store, threshold_turns=10)
         assert compactor.should_compact(1) is True
 
-    def test_tokens_exceed_threshold(self):
+    def test_tokens_exceed_threshold_is_ignored(self):
         store = _make_store()
         store.get_session.return_value = {"status": "active", "token_count_est": 6000}
         store.count_uncompacted_turns.return_value = 3
         compactor = KnowledgeCompactor(store, threshold_tokens=5000)
-        assert compactor.should_compact(1) is True
+        assert compactor.should_compact(1) is False
 
     def test_neither_exceeded(self):
         store = _make_store()
@@ -138,7 +142,7 @@ class TestShouldCompact:
         store.get_session.return_value = {"status": "active", "token_count_est": 5000}
         store.count_uncompacted_turns.return_value = 1
         compactor = KnowledgeCompactor(store, threshold_tokens=5000)
-        assert compactor.should_compact(1) is True
+        assert compactor.should_compact(1) is False
 
 
 # ===========================================================================
@@ -240,7 +244,9 @@ class TestCompactSession:
         assert result[0] == 42
         store.store_knowledge.assert_called_once()
         assert store.store_knowledge.call_args.kwargs["agent_id"] is None
-        store.mark_session_compacted.assert_called_once_with(1)
+        store.advance_compaction_watermark.assert_called_once_with(1, 1)
+        store.mark_session_fully_compacted.assert_called_once_with(1)
+        store.mark_session_compacted.assert_not_called()
 
     def test_mark_compacted_false_advances_watermark(self):
         store = _make_store()
@@ -256,6 +262,7 @@ class TestCompactSession:
         compactor = KnowledgeCompactor(store, runner=runner)
         compactor.compact_session(1, 1, mark_compacted=False)
 
+        store.mark_session_fully_compacted.assert_not_called()
         store.mark_session_compacted.assert_not_called()
         store.advance_compaction_watermark.assert_called_once_with(1, 1)
 
@@ -269,6 +276,8 @@ class TestCompactSession:
         runner = _make_runner(success=False)
         compactor = KnowledgeCompactor(store, runner=runner)
         assert compactor.compact_session(1, 1) == []
+        store.advance_compaction_watermark.assert_not_called()
+        store.mark_session_fully_compacted.assert_not_called()
 
     def test_empty_items_still_advances_watermark(self):
         store = _make_store()
@@ -282,7 +291,59 @@ class TestCompactSession:
         result = compactor.compact_session(1, 1, mark_compacted=False)
 
         assert result == []
-        store.advance_compaction_watermark.assert_called_once()
+        store.advance_compaction_watermark.assert_called_once_with(1, 1)
+        store.mark_session_fully_compacted.assert_not_called()
+
+    def test_parse_failure_does_not_advance_watermark(self):
+        store = _make_store()
+        store.get_session.return_value = {"status": "active", "compacted_through_turn_index": -1}
+        store.get_session_turns.return_value = [
+            _make_turn(0, role="user", content="Hello"),
+            _make_turn(1, role="assistant", content="Hi"),
+        ]
+        runner = _make_runner(output="not json")
+
+        compactor = KnowledgeCompactor(store, runner=runner)
+        assert compactor.compact_session(1, 1) == []
+
+        store.advance_compaction_watermark.assert_not_called()
+        store.mark_session_fully_compacted.assert_not_called()
+
+    def test_empty_items_mark_compacted_true_marks_fully_compacted(self):
+        store = _make_store()
+        store.get_session.return_value = {"status": "active", "compacted_through_turn_index": -1}
+        store.get_session_turns.return_value = [
+            _make_turn(0, role="user", content="Hello"),
+            _make_turn(1, role="assistant", content="Hi"),
+        ]
+        runner = _make_runner(output="[]")
+
+        compactor = KnowledgeCompactor(store, runner=runner)
+        result = compactor.compact_session(1, 1)
+
+        assert result == []
+        store.advance_compaction_watermark.assert_called_once_with(1, 1)
+        store.mark_session_fully_compacted.assert_called_once_with(1)
+
+    def test_truncation_only_advances_processed_prefix(self):
+        store = _make_store()
+        store.get_session.return_value = {"status": "completed", "compacted_through_turn_index": -1}
+        store.get_session_turns.return_value = [
+            _make_turn(0, role="user", content="Hello"),
+            _make_turn(1, role="assistant", content="Hi"),
+            _make_turn(2, role="user", content="x" * 100000),
+        ]
+        items = [{"category": "progress", "title": "Greeting", "content": "A greeting exchange"}]
+        runner = _make_runner(output=json.dumps(items))
+        store.store_knowledge.return_value = 99
+
+        compactor = KnowledgeCompactor(store, runner=runner)
+        result = compactor.compact_session(1, 1, mark_compacted=True)
+
+        assert result == [99]
+        store.advance_compaction_watermark.assert_called_once_with(1, 1)
+        store.mark_session_fully_compacted.assert_not_called()
+        assert store.store_knowledge.call_args.kwargs["source_turn_ids"] == [1, 2]
 
     def test_filters_turns_by_watermark(self):
         store = _make_store()
@@ -337,7 +398,7 @@ class TestCompactAllPending:
 
         assert result["skipped"] == 1
         assert result["compacted"] == 0
-        store.mark_session_compacted.assert_called_once_with(1)
+        store.mark_session_fully_compacted.assert_called_once_with(1)
 
     def test_compacts_sessions_with_enough_turns(self):
         store = _make_store()
