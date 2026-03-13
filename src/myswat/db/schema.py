@@ -14,6 +14,8 @@ MIGRATION_MODULES = [
     "myswat.db.migrations.v003_compaction_watermark",
     "myswat.db.migrations.v004_architect_system_prompt",
     "myswat.db.migrations.v005_review_cycles_artifact_unique_key",
+    "myswat.db.migrations.v006_flexible_vector_dimension",
+    "myswat.db.migrations.v007_conversation_persistence",
 ]
 
 

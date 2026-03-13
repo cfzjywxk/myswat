@@ -19,6 +19,7 @@ class Session(BaseModel):
     work_item_id: int | None = None
     token_count_est: int = 0
     compacted_through_turn_index: int = -1  # turns <= this index are "recycled"
+    compacted_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

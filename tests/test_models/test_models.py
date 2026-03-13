@@ -44,6 +44,7 @@ class TestSession:
         assert session.work_item_id is None
         assert session.token_count_est == 0
         assert session.compacted_through_turn_index == -1
+        assert session.compacted_at is None
         assert session.created_at is None
         assert session.updated_at is None
 
@@ -60,6 +61,7 @@ class TestSession:
             work_item_id=5,
             token_count_est=1500,
             compacted_through_turn_index=3,
+            compacted_at=now,
             created_at=now,
             updated_at=now,
         )
@@ -72,6 +74,7 @@ class TestSession:
         assert session.work_item_id == 5
         assert session.token_count_est == 1500
         assert session.compacted_through_turn_index == 3
+        assert session.compacted_at == now
         assert session.created_at == now
         assert session.updated_at == now
 
