@@ -9,7 +9,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.12+-blue?logo=python&logoColor=white" alt="Python 3.12+"/>
-  <img src="https://img.shields.io/badge/backend-TiDB_Cloud-4479A1?logo=data:image/svg+xml;base64," alt="TiDB Cloud"/>
+  <img src="https://img.shields.io/badge/backend-TiDB_Cloud-4479A1" alt="TiDB Cloud"/>
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"/>
   <img src="https://img.shields.io/badge/agents-Codex_%7C_Claude_%7C_Kimi-orange" alt="Agent Backends"/>
 </p>
