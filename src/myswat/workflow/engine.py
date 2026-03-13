@@ -80,6 +80,8 @@ class WorkMode(StrEnum):
     design = "design"
     development = "development"
     test = "test"
+    architect_design = "architect_design"
+    testplan_design = "testplan_design"
 
 @dataclass
 class PhaseResult:
@@ -184,6 +186,7 @@ class WorkflowEngine:
         ask_user: Callable[[str], str] | None = None,
         auto_approve: bool = False,
         should_cancel: Callable[[], bool] | None = None,
+        arch_sm: SessionManager | None = None,
     ) -> None:
         self._store = store
         self._dev = dev_sm
@@ -192,6 +195,11 @@ class WorkflowEngine:
         self._work_item_id = work_item_id
         self._max_review = max_review_iterations
         self._mode = WorkMode(mode)
+        self._arch = arch_sm
+        if self._mode in {WorkMode.architect_design, WorkMode.testplan_design} and self._arch is None:
+            raise ValueError("arch_sm is required for architect_design and testplan_design modes")
+        if self._mode == WorkMode.testplan_design and not qa_sms:
+            raise ValueError("testplan_design mode requires at least one qa session")
         self._ask = ask_user or _default_ask
         self._auto_approve = auto_approve
         self._should_cancel = should_cancel
@@ -299,19 +307,28 @@ class WorkflowEngine:
         if self._cancelled():
             result.final_report = "Workflow cancelled before start."
             return result
+        startup_owner = self._dev
+        startup_todos = ["Produce technical design"]
+        if self._mode == WorkMode.architect_design and self._arch is not None:
+            startup_owner = self._arch
+            startup_todos = ["Architect produce design"]
+        elif self._mode == WorkMode.testplan_design and self._qas:
+            startup_owner = self._qas[0]
+            startup_todos = ["QA produce test plan"]
+
         self._persist_task_state(
             current_stage="workflow_started",
             latest_summary=requirement,
-            next_todos=["Produce technical design"],
-            updated_by_agent_id=self._dev.agent_id,
+            next_todos=startup_todos,
+            updated_by_agent_id=startup_owner.agent_id,
         )
         self._append_process_event(
             event_type="task_request",
             title="Workflow requirement",
             summary=requirement,
             from_role="user",
-            to_role=self._dev.agent_role,
-            updated_by_agent_id=self._dev.agent_id,
+            to_role=startup_owner.agent_role,
+            updated_by_agent_id=startup_owner.agent_id,
         )
         result = self._dispatch_mode(requirement, result)
         result.blocked = self._blocked
@@ -327,7 +344,19 @@ class WorkflowEngine:
             return self._run_development_mode(requirement, result)
         if self._mode == WorkMode.test:
             return self._run_test_mode(requirement, result)
+        if self._mode == WorkMode.architect_design:
+            return self._run_architect_design_mode(requirement, result)
+        if self._mode == WorkMode.testplan_design:
+            return self._run_testplan_design_mode(requirement, result)
         raise NotImplementedError(f"Workflow mode '{self._mode.value}' is not implemented yet.")
+
+    def _run_architect_design_mode(self, requirement: str, result: WorkflowResult) -> WorkflowResult:
+        result.final_report = "Architect-design workflow scaffolded but not implemented yet."
+        return result
+
+    def _run_testplan_design_mode(self, requirement: str, result: WorkflowResult) -> WorkflowResult:
+        result.final_report = "Testplan-design workflow scaffolded but not implemented yet."
+        return result
 
     def _run_full(self, requirement: str, result: WorkflowResult) -> WorkflowResult:
 

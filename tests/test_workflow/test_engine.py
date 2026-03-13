@@ -27,6 +27,14 @@ def mock_qa_sms():
 
 
 @pytest.fixture
+def mock_arch_sm():
+    sm = MagicMock()
+    sm.agent_id = 30
+    sm.agent_role = "architect"
+    return sm
+
+
+@pytest.fixture
 def engine(mock_store, mock_dev_sm, mock_qa_sms):
     """Return a WorkflowEngine with default settings."""
     return WorkflowEngine(
@@ -499,6 +507,49 @@ class TestWorkflowEngineInit:
         )
         assert engine._qas == []
 
+    def test_architect_design_mode_stores_arch_sm(self, mock_store, mock_dev_sm, mock_qa_sms, mock_arch_sm):
+        engine = WorkflowEngine(
+            store=mock_store,
+            dev_sm=mock_dev_sm,
+            qa_sms=mock_qa_sms,
+            arch_sm=mock_arch_sm,
+            project_id="proj-arch",
+            mode=WorkMode.architect_design,
+        )
+        assert engine._arch is mock_arch_sm
+        assert engine._mode == WorkMode.architect_design
+
+    def test_architect_design_mode_requires_arch_sm(self, mock_store, mock_dev_sm, mock_qa_sms):
+        with pytest.raises(ValueError, match="arch_sm"):
+            WorkflowEngine(
+                store=mock_store,
+                dev_sm=mock_dev_sm,
+                qa_sms=mock_qa_sms,
+                project_id="proj-arch",
+                mode=WorkMode.architect_design,
+            )
+
+    def test_testplan_design_mode_requires_arch_sm(self, mock_store, mock_dev_sm, mock_qa_sms):
+        with pytest.raises(ValueError, match="arch_sm"):
+            WorkflowEngine(
+                store=mock_store,
+                dev_sm=mock_dev_sm,
+                qa_sms=mock_qa_sms,
+                project_id="proj-testplan",
+                mode=WorkMode.testplan_design,
+            )
+
+    def test_testplan_design_mode_requires_qa(self, mock_store, mock_dev_sm, mock_arch_sm):
+        with pytest.raises(ValueError, match="qa session"):
+            WorkflowEngine(
+                store=mock_store,
+                dev_sm=mock_dev_sm,
+                qa_sms=[],
+                arch_sm=mock_arch_sm,
+                project_id="proj-testplan",
+                mode=WorkMode.testplan_design,
+            )
+
 
 class TestWorkflowModeDispatch:
     """Tests for the phase-1 mode dispatch scaffold."""
@@ -582,6 +633,88 @@ class TestWorkflowModeDispatch:
         assert dispatch_result.requirement == "build feature"
         engine._store.update_work_item_state.assert_called_once()
         engine._store.append_work_item_process_event.assert_called_once()
+
+    def test_run_dispatches_to_architect_design_mode(self, mock_store, mock_dev_sm, mock_qa_sms, mock_arch_sm):
+        mock_arch_sm.agent_id = 31
+        mock_arch_sm.agent_role = "architect"
+        engine = WorkflowEngine(
+            store=mock_store,
+            dev_sm=mock_dev_sm,
+            qa_sms=mock_qa_sms,
+            arch_sm=mock_arch_sm,
+            project_id="proj-arch",
+            work_item_id="wi-arch",
+            mode=WorkMode.architect_design,
+        )
+        expected = MagicMock()
+
+        with patch.object(engine, "_run_architect_design_mode", return_value=expected) as mock_run_mode:
+            result = engine.run("design feature")
+
+        assert result is expected
+        mock_run_mode.assert_called_once()
+        requirement, dispatch_result = mock_run_mode.call_args.args
+        assert requirement == "design feature"
+        assert dispatch_result.requirement == "design feature"
+        engine._store.update_work_item_state.assert_called_once_with(
+            "wi-arch",
+            current_stage="workflow_started",
+            latest_summary="design feature",
+            next_todos=["Architect produce design"],
+            open_issues=None,
+            last_artifact_id=None,
+            updated_by_agent_id=31,
+        )
+        engine._store.append_work_item_process_event.assert_called_once_with(
+            "wi-arch",
+            event_type="task_request",
+            title="Workflow requirement",
+            summary="design feature",
+            from_role="user",
+            to_role="architect",
+            updated_by_agent_id=31,
+        )
+
+    def test_run_dispatches_to_testplan_design_mode(self, mock_store, mock_dev_sm, mock_qa_sms, mock_arch_sm):
+        mock_qa_sms[0].agent_id = 21
+        mock_qa_sms[0].agent_role = "qa_main"
+        engine = WorkflowEngine(
+            store=mock_store,
+            dev_sm=mock_dev_sm,
+            qa_sms=mock_qa_sms,
+            arch_sm=mock_arch_sm,
+            project_id="proj-testplan",
+            work_item_id="wi-testplan",
+            mode=WorkMode.testplan_design,
+        )
+        expected = MagicMock()
+
+        with patch.object(engine, "_run_testplan_design_mode", return_value=expected) as mock_run_mode:
+            result = engine.run("plan tests")
+
+        assert result is expected
+        mock_run_mode.assert_called_once()
+        requirement, dispatch_result = mock_run_mode.call_args.args
+        assert requirement == "plan tests"
+        assert dispatch_result.requirement == "plan tests"
+        engine._store.update_work_item_state.assert_called_once_with(
+            "wi-testplan",
+            current_stage="workflow_started",
+            latest_summary="plan tests",
+            next_todos=["QA produce test plan"],
+            open_issues=None,
+            last_artifact_id=None,
+            updated_by_agent_id=21,
+        )
+        engine._store.append_work_item_process_event.assert_called_once_with(
+            "wi-testplan",
+            event_type="task_request",
+            title="Workflow requirement",
+            summary="plan tests",
+            from_role="user",
+            to_role="qa_main",
+            updated_by_agent_id=21,
+        )
 
     def test_run_propagates_blocked_state_into_workflow_result(self, engine):
         expected = WorkflowResult(requirement="build feature")
