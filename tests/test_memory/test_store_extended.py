@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch, call
 import pytest
 
+import myswat.memory.store as store_module
 from myswat.memory.store import MemoryStore
 from myswat.models.session import SessionTurn
 
@@ -10,6 +11,11 @@ from myswat.models.session import SessionTurn
 @pytest.fixture
 def store(mock_pool):
     return MemoryStore(mock_pool)
+
+
+@pytest.fixture(autouse=True)
+def disable_embedding_resolution(monkeypatch):
+    monkeypatch.setattr(store_module.embedder, "resolve_embed_sql", lambda text, tidb_model="": ("NULL", []))
 
 
 # ── 1. get_session_turns ────────────────────────────────────────────────
@@ -103,55 +109,7 @@ class TestDeleteCompactedTurns:
         assert result == 0
 
 
-# ── 4. delete_archived_session ──────────────────────────────────────────
-
-
-class TestDeleteArchivedSession:
-    def test_deletes_compacted_session(self, store, mock_pool):
-        mock_pool.fetch_one.return_value = {
-            "id": "s1",
-            "project_id": "p1",
-            "agent_id": "a1",
-            "status": "compacted",
-            "compacted_through_turn_index": 10,
-            "total_token_count": 500,
-            "created_at": "2026-01-01T00:00:00",
-            "updated_at": "2026-01-01T00:00:00",
-        }
-        mock_pool.execute.return_value = 7
-        result = store.delete_archived_session("s1")
-        assert isinstance(result, dict)
-        assert "turns" in result
-        assert "session" in result
-
-    def test_raises_or_returns_empty_when_not_compacted(self, store, mock_pool):
-        mock_pool.fetch_one.return_value = {
-            "id": "s1",
-            "project_id": "p1",
-            "agent_id": "a1",
-            "status": "active",
-            "compacted_through_turn_index": 0,
-            "total_token_count": 100,
-            "created_at": "2026-01-01T00:00:00",
-            "updated_at": "2026-01-01T00:00:00",
-        }
-        try:
-            result = store.delete_archived_session("s1")
-            # If it doesn't raise, it should indicate nothing deleted
-            assert result.get("session", 0) == 0 or result == {}
-        except (ValueError, RuntimeError, Exception):
-            pass  # expected – session is not compacted
-
-    def test_no_session_returns_empty_or_raises(self, store, mock_pool):
-        mock_pool.fetch_one.return_value = None
-        try:
-            result = store.delete_archived_session("s1")
-            assert result.get("session", 0) == 0
-        except (ValueError, RuntimeError, KeyError, Exception):
-            pass
-
-
-# ── 5. get_recent_history_for_agent ─────────────────────────────────────
+# ── 4. get_recent_history_for_agent ─────────────────────────────────────
 
 
 class TestGetRecentHistoryForAgent:
@@ -591,35 +549,7 @@ class TestGetCompactableSessions:
         assert result == []
 
 
-# ── 24. purge_compacted_sessions ────────────────────────────────────────
-
-
-class TestPurgeCompactedSessions:
-    def test_returns_purge_counts(self, store, mock_pool):
-        mock_pool.fetch_all.return_value = [
-            {
-                "id": "s1",
-                "project_id": "p1",
-                "agent_id": "a1",
-                "status": "compacted",
-                "compacted_through_turn_index": 5,
-                "total_token_count": 100,
-                "created_at": "2026-01-01T00:00:00",
-                "updated_at": "2026-01-01T00:00:00",
-            }
-        ]
-        mock_pool.execute.return_value = 1
-        result = store.purge_compacted_sessions("p1")
-        assert isinstance(result, dict)
-        assert "sessions_deleted" in result or "turns_deleted" in result
-
-    def test_no_compacted_sessions(self, store, mock_pool):
-        mock_pool.fetch_all.return_value = []
-        result = store.purge_compacted_sessions("p1")
-        assert isinstance(result, dict)
-
-
-# ── 25. search_knowledge_fulltext_only ──────────────────────────────────
+# ── 24. search_knowledge_fulltext_only ──────────────────────────────────
 
 
 class TestSearchKnowledgeFulltextOnly:

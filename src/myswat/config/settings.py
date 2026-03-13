@@ -73,7 +73,7 @@ class CompactionSettings(BaseSettings):
     threshold_turns: int = 50
     compaction_backend: str = "codex"  # which agent backend to use for compaction
 
-    model_config = {"env_prefix": "MYSWAT_COMPACTION_"}
+    model_config = {"env_prefix": "MYSWAT_COMPACTION_", "extra": "ignore"}
 
 
 class MySwatSettings(BaseSettings):

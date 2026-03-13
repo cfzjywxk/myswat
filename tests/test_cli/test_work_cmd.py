@@ -97,7 +97,6 @@ class TestRunWork:
                            mock_settings_cls, mock_learn):
         settings = MagicMock()
         settings.compaction.threshold_turns = 200
-        settings.compaction.threshold_tokens = 800000
         mock_settings_cls.return_value = settings
 
         dev_row = _agent_row("developer")
@@ -187,7 +186,6 @@ class TestRunWork:
     ):
         settings = MagicMock()
         settings.compaction.threshold_turns = 200
-        settings.compaction.threshold_tokens = 800000
         settings.workflow.max_review_iterations = 5
         mock_settings_cls.return_value = settings
 
@@ -249,7 +247,6 @@ class TestRunWork:
     ):
         settings = MagicMock()
         settings.compaction.threshold_turns = 200
-        settings.compaction.threshold_tokens = 800000
         settings.workflow.max_review_iterations = 5
         mock_settings_cls.return_value = settings
 
@@ -299,7 +296,6 @@ class TestRunWork:
                       mock_engine_cls):
         settings = MagicMock()
         settings.compaction.threshold_turns = 200
-        settings.compaction.threshold_tokens = 800000
         settings.workflow.max_review_iterations = 5
         mock_settings_cls.return_value = settings
 
@@ -345,7 +341,6 @@ class TestRunWork:
                         mock_engine_cls):
         settings = MagicMock()
         settings.compaction.threshold_turns = 200
-        settings.compaction.threshold_tokens = 800000
         settings.workflow.max_review_iterations = 5
         mock_settings_cls.return_value = settings
 
@@ -392,7 +387,6 @@ class TestRunWork:
                                          mock_learn, mock_engine_cls):
         settings = MagicMock()
         settings.compaction.threshold_turns = 200
-        settings.compaction.threshold_tokens = 800000
         settings.workflow.max_review_iterations = 5
         mock_settings_cls.return_value = settings
         mock_mig.return_value = ["v001"]
@@ -439,7 +433,6 @@ class TestRunWork:
     ):
         settings = MagicMock()
         settings.compaction.threshold_turns = 200
-        settings.compaction.threshold_tokens = 800000
         settings.workflow.max_review_iterations = 5
         mock_settings_cls.return_value = settings
 
@@ -575,7 +568,6 @@ class TestRunWork:
     ):
         settings = MagicMock()
         settings.compaction.threshold_turns = 200
-        settings.compaction.threshold_tokens = 800000
         settings.workflow.max_review_iterations = 5
         settings.embedding.tidb_model = "built-in"
         mock_settings_cls.return_value = settings

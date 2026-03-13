@@ -333,14 +333,6 @@ class TestStoreReadOperations:
         store = MemoryStore(mock_pool)
         assert store.delete_compacted_turns(1) == 0
 
-    def test_delete_archived_session_wrong_status(self, mock_pool):
-        mock_pool.fetch_one.return_value = {"status": "active"}
-
-        store = MemoryStore(mock_pool)
-        result = store.delete_archived_session(1)
-
-        assert result == {"turns": 0, "session": 0}
-
     def test_create_work_item(self, mock_pool):
         mock_pool.insert_returning_id.return_value = 42
 
@@ -496,14 +488,3 @@ class TestStoreReadOperations:
         sql, args = mock_pool.fetch_one.call_args[0]
         assert "work_item_id = %s" in sql
         assert args == (1, 42)
-
-    def test_purge_compacted_sessions(self, mock_pool):
-        mock_pool.fetch_all.return_value = [{"id": 1}, {"id": 2}]
-        # For each session: get_session returns compacted, delete turns, delete session
-        mock_pool.fetch_one.return_value = {"status": "compacted"}
-        mock_pool.execute.return_value = 5
-
-        store = MemoryStore(mock_pool)
-        result = store.purge_compacted_sessions(1)
-
-        assert result["sessions_deleted"] == 2

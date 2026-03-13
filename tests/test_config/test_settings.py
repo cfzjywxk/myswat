@@ -353,6 +353,22 @@ threshold_turns = 300
         assert settings.workflow.max_review_iterations == 8
         assert settings.compaction.threshold_turns == 300
 
+    def test_legacy_threshold_tokens_in_toml_is_ignored(self, tmp_path):
+        """Old configs with threshold_tokens should still load cleanly."""
+        toml_content = """\
+[compaction]
+threshold_turns = 300
+threshold_tokens = 500000
+compaction_backend = "kimi"
+"""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(toml_content)
+
+        settings = MySwatSettings(config_path=config_file)
+
+        assert settings.compaction.threshold_turns == 300
+        assert settings.compaction.compaction_backend == "kimi"
+
     def test_partial_toml(self, tmp_path):
         """A TOML file with only some sections should merge with defaults."""
         toml_content = """\

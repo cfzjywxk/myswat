@@ -307,7 +307,6 @@ class TestRunWithReview:
         settings = MagicMock()
         settings.compaction.compaction_backend = "codex"
         settings.compaction.threshold_turns = 200
-        settings.compaction.threshold_tokens = 800000
         settings.workflow.max_review_iterations = 5
         mock_settings_cls.return_value = settings
 
@@ -352,7 +351,6 @@ class TestRunWithReview:
         settings = MagicMock()
         settings.compaction.compaction_backend = "codex"
         settings.compaction.threshold_turns = 200
-        settings.compaction.threshold_tokens = 800000
         settings.workflow.max_review_iterations = 5
         mock_settings_cls.return_value = settings
 
@@ -395,7 +393,6 @@ class TestRunWithReview:
         settings = MagicMock()
         settings.compaction.compaction_backend = "codex"
         settings.compaction.threshold_turns = 200
-        settings.compaction.threshold_tokens = 800000
         settings.workflow.max_review_iterations = 5
         mock_settings_cls.return_value = settings
 

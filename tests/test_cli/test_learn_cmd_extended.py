@@ -20,7 +20,6 @@ class TestRunLearn:
         settings = MagicMock()
         settings.compaction.compaction_backend = "codex"
         settings.compaction.threshold_turns = 200
-        settings.compaction.threshold_tokens = 800000
 
         proj = {
             "id": 1, "slug": "proj", "name": "Proj",
