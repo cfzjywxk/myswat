@@ -9,6 +9,10 @@ import typer
 from click.exceptions import Exit as ClickExit
 
 from myswat.cli.init_cmd import (
+    ARCHITECT_SYSTEM_PROMPT,
+    DEVELOPER_SYSTEM_PROMPT,
+    QA_MAIN_SYSTEM_PROMPT,
+    QA_VICE_SYSTEM_PROMPT,
     _ensure_flag_value,
     _is_cli_available,
     _seed_default_agents,
@@ -79,9 +83,33 @@ class TestSeedDefaultAgents:
         assert store.create_agent.call_count == 4
 
     @patch("myswat.cli.init_cmd._is_cli_available", return_value=True)
+    def test_seeded_agents_include_system_prompts(self, mock_available):
+        store = MagicMock()
+        store.get_agent.return_value = None
+        settings = MagicMock()
+        settings.agents.architect_model = "gpt-5"
+        settings.agents.developer_model = "gpt-5"
+        settings.agents.qa_main_model = "claude-opus-4-6"
+        settings.agents.qa_vice_model = "kimi"
+        settings.agents.codex_path = "codex"
+        settings.agents.claude_path = "claude"
+        settings.agents.kimi_path = "kimi"
+        settings.agents.codex_default_flags = ["--json"]
+        settings.agents.claude_default_flags = ["--print"]
+        settings.agents.kimi_default_flags = ["--print"]
+
+        _seed_default_agents(store, settings, 1)
+
+        prompts = [call.kwargs.get("system_prompt") for call in store.create_agent.call_args_list]
+        assert ARCHITECT_SYSTEM_PROMPT in prompts
+        assert DEVELOPER_SYSTEM_PROMPT in prompts
+        assert QA_MAIN_SYSTEM_PROMPT in prompts
+        assert QA_VICE_SYSTEM_PROMPT in prompts
+
+    @patch("myswat.cli.init_cmd._is_cli_available", return_value=True)
     def test_skips_existing_agents(self, mock_available):
         store = MagicMock()
-        store.get_agent.return_value = {"id": 1}  # all exist
+        store.get_agent.return_value = {"id": 1}
         settings = MagicMock()
         settings.agents.architect_model = "gpt-5"
         settings.agents.developer_model = "gpt-5"
@@ -147,10 +175,14 @@ class TestSeedDefaultAgents:
         create_calls = store.create_agent.call_args_list
         assert create_calls[0].kwargs["cli_backend"] == "claude"
         assert create_calls[0].kwargs["cli_path"] == "claude"
+        assert "MODE: design" in create_calls[0].kwargs["system_prompt"]
         assert create_calls[1].kwargs["cli_backend"] == "claude"
+        assert create_calls[1].kwargs["system_prompt"] == DEVELOPER_SYSTEM_PROMPT
         assert create_calls[2].kwargs["cli_backend"] == "kimi"
         assert "--effort" not in create_calls[2].kwargs["cli_extra_args"]
+        assert "MODE: testplan" in create_calls[2].kwargs["system_prompt"]
         assert create_calls[3].kwargs["cli_backend"] == "codex"
+        assert "MODE: testplan" in create_calls[3].kwargs["system_prompt"]
 
     @patch("myswat.cli.init_cmd._is_cli_available", return_value=False)
     def test_default_qamain_claude_unavailable_aborts_before_creating_agents(self, mock_available):

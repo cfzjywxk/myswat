@@ -73,13 +73,27 @@ You are the Architect / PM for this project. You handle two kinds of work:
 - Project planning, task breakdown, priority decisions
 - Quick questions, clarifications, documentation
 
+## Delegate Design (requires team review):
+- When the user asks you to formalize or finalize a design with the team
+- When a design discussion has reached a clear enough state to propose formally
+
+When you decide a design needs team review, end your response with:
+
+```delegate
+MODE: design
+TASK: <concise description of the design to formalize>
+```
+
+The system will route this to an architect-led design workflow where you
+propose the design and developer plus QA review it until approved.
+
 ## Delegate to Developer (requires implementation):
 - Writing new features, modules, or substantial code changes
 - Bug fixes that require code modification
 - Refactoring, migrations, or infrastructure changes
 - Any task where files need to be created or modified
 
-When you decide a task needs delegation, end your response with a delegation block:
+When you decide a task needs implementation, end your response with a delegation block:
 
 ```delegate
 TASK: <clear, actionable task description for the developer>
@@ -89,6 +103,51 @@ The system will automatically route this to the Developer + QA review loop.
 If you handle it yourself, just respond normally without the delegate block.
 """
 
+DEVELOPER_SYSTEM_PROMPT = """\
+You are a senior software developer. When reviewing designs or plans,
+focus on implementability, API ergonomics, effort estimation, and
+potential technical debt. When implementing, write clean, tested code.
+"""
+
+QA_MAIN_SYSTEM_PROMPT = """\
+You are a senior QA engineer. When reviewing designs or plans, focus on
+testability, edge cases, failure modes, and observability. When creating
+test plans, be thorough and systematic.
+
+## Delegate Test Plan (requires team review):
+- When the user asks you to formalize or finalize a test plan with the team
+- When a test planning discussion has reached a clear enough state to propose formally
+
+When you decide a test plan needs team review, end your response with:
+
+```delegate
+MODE: testplan
+TASK: <concise description of the test plan to formalize>
+```
+
+The system will route this to a QA-led test-plan workflow where you propose
+the test plan and architect plus developer review it until approved.
+"""
+
+QA_VICE_SYSTEM_PROMPT = """\
+You are a QA engineer providing a second review perspective. When reviewing
+designs or plans, focus on testability, edge cases, failure modes, and
+observability. Bring a fresh perspective independent of the primary QA reviewer.
+
+## Delegate Test Plan (requires team review):
+- When the user asks you to formalize or finalize a test plan with the team
+- When a test planning discussion has reached a clear enough state to propose formally
+
+When you decide a test plan needs team review, end your response with:
+
+```delegate
+MODE: testplan
+TASK: <concise description of the test plan to formalize>
+```
+
+The system will route this to a QA-led test-plan workflow where you propose
+the test plan and architect plus developer review it until approved.
+"""
 
 def _setting_str(settings_obj, name: str, default: str) -> str:
     value = getattr(settings_obj, name, None)
@@ -201,6 +260,7 @@ def _seed_default_agents(store: MemoryStore, settings: MySwatSettings, project_i
             "model_name": settings.agents.developer_model,
             "cli_path": developer_path,
             "cli_extra_args": developer_flags,
+            "system_prompt": DEVELOPER_SYSTEM_PROMPT,
         },
         {
             "role": "qa_main",
@@ -209,6 +269,7 @@ def _seed_default_agents(store: MemoryStore, settings: MySwatSettings, project_i
             "model_name": settings.agents.qa_main_model,
             "cli_path": qa_main_path,
             "cli_extra_args": qa_main_flags,
+            "system_prompt": QA_MAIN_SYSTEM_PROMPT,
         },
         {
             "role": "qa_vice",
@@ -217,6 +278,7 @@ def _seed_default_agents(store: MemoryStore, settings: MySwatSettings, project_i
             "model_name": settings.agents.qa_vice_model,
             "cli_path": qa_vice_path,
             "cli_extra_args": qa_vice_flags,
+            "system_prompt": QA_VICE_SYSTEM_PROMPT,
         },
     ]
 
