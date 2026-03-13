@@ -21,7 +21,7 @@
 MySwat is a **conversation orchestrator** — it automates the copy-paste routing between AI agents (developer and QA review loops) that humans currently do manually. MySwat routes outputs, captures context, and loops until LGTM. It does **not** run builds or tests itself — that's the agents' job.
 
 <p align="center">
-  <img src="assets/workflow.png" alt="myswat workflow — design, review, plan, dev, QA test, report" width="800"/>
+  <img src="assets/workflow.svg" alt="myswat workflow — design, review, plan, dev, QA test, report" width="800"/>
 </p>
 
 ## Key Features

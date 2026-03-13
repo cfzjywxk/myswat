@@ -1,0 +1,149 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 400" width="900" height="400" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif">
+  <defs>
+    <filter id="shadow" x="-4%" y="-4%" width="108%" height="112%">
+      <feDropShadow dx="1.5" dy="1.5" stdDeviation="2.5" flood-color="#b0b8c8" flood-opacity="0.45"/>
+    </filter>
+    <marker id="arrowGray" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#a0aab8"/>
+    </marker>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2d64d2"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#109648"/>
+    </marker>
+    <marker id="arrowRed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#d72d37"/>
+    </marker>
+    <marker id="arrowGold" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#c38200"/>
+    </marker>
+    <marker id="arrowRedUp" markerWidth="7" markerHeight="10" refX="3.5" refY="0" orient="auto">
+      <polygon points="0 10, 3.5 0, 7 10" fill="#d72d37"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="400" rx="8" fill="#fcfdff"/>
+
+  <!-- ===== TITLE ===== -->
+  <text x="30" y="28" font-size="16" font-weight="700" fill="#162848">myswat workflow</text>
+  <line x1="30" y1="34" x2="175" y2="34" stroke="#2d64d2" stroke-width="2.5" stroke-linecap="round"/>
+
+  <!-- ===== TOP ROW: YOU -> myswat -> Agents ===== -->
+
+  <!-- YOU box -->
+  <g filter="url(#shadow)">
+    <rect x="30" y="60" width="120" height="55" rx="8" fill="#fff" stroke="#e0e4ec" stroke-width="1"/>
+    <rect x="30" y="60" width="5" height="55" rx="3" fill="#c38200"/>
+  </g>
+  <text x="90" y="84" text-anchor="middle" font-size="15" font-weight="700" fill="#c38200">YOU</text>
+  <text x="90" y="102" text-anchor="middle" font-size="11" fill="#828c9e">architect</text>
+
+  <!-- myswat orchestrator box (LIGHT themed) -->
+  <g filter="url(#shadow)">
+    <rect x="220" y="48" width="160" height="85" rx="10" fill="#edf2fc" stroke="#2d64d2" stroke-width="2"/>
+    <rect x="220" y="48" width="6" height="85" rx="3" fill="#2d64d2"/>
+  </g>
+  <text x="303" y="82" text-anchor="middle" font-size="16" font-weight="700" fill="#162848">myswat</text>
+  <text x="303" y="102" text-anchor="middle" font-size="11" fill="#6878a0">orchestrator</text>
+
+  <!-- ARCH Agent box -->
+  <g filter="url(#shadow)">
+    <rect x="478" y="40" width="140" height="45" rx="8" fill="#fff" stroke="#e0e4ec" stroke-width="1"/>
+    <rect x="478" y="40" width="5" height="45" rx="3" fill="#2d64d2"/>
+  </g>
+  <text x="550" y="68" text-anchor="middle" font-size="14" font-weight="700" fill="#2d64d2">ARCH Agent</text>
+
+  <!-- DEV Agent box -->
+  <g filter="url(#shadow)">
+    <rect x="478" y="100" width="140" height="45" rx="8" fill="#fff" stroke="#e0e4ec" stroke-width="1"/>
+    <rect x="478" y="100" width="5" height="45" rx="3" fill="#109648"/>
+  </g>
+  <text x="550" y="128" text-anchor="middle" font-size="14" font-weight="700" fill="#109648">DEV Agent</text>
+
+  <!-- QA Agent box -->
+  <g filter="url(#shadow)">
+    <rect x="478" y="160" width="140" height="45" rx="8" fill="#fff" stroke="#e0e4ec" stroke-width="1"/>
+    <rect x="478" y="160" width="5" height="45" rx="3" fill="#d72d37"/>
+  </g>
+  <text x="550" y="188" text-anchor="middle" font-size="14" font-weight="700" fill="#d72d37">QA Agent</text>
+
+  <!-- Arrows: YOU -> myswat -->
+  <line x1="150" y1="87" x2="218" y2="87" stroke="#c38200" stroke-width="2" marker-end="url(#arrowGold)"/>
+  <text x="168" y="80" font-size="11" fill="#c38200" font-weight="600">task</text>
+
+  <!-- Arrows: myswat -> Agents -->
+  <line x1="380" y1="72" x2="476" y2="62" stroke="#2d64d2" stroke-width="1.8" marker-end="url(#arrowBlue)"/>
+  <line x1="380" y1="90" x2="476" y2="122" stroke="#109648" stroke-width="1.8" marker-end="url(#arrowGreen)"/>
+  <line x1="380" y1="108" x2="476" y2="182" stroke="#d72d37" stroke-width="1.8" marker-end="url(#arrowRed)"/>
+
+  <!-- ===== REVIEW LOOP ===== -->
+  <text x="30" y="244" font-size="15" font-weight="700" fill="#162848">Review Loop</text>
+  <line x1="30" y1="250" x2="140" y2="250" stroke="#2d64d2" stroke-width="2.5" stroke-linecap="round"/>
+
+  <!-- Design -->
+  <g filter="url(#shadow)">
+    <rect x="30" y="262" width="110" height="45" rx="8" fill="#fff" stroke="#e0e4ec" stroke-width="1"/>
+    <rect x="30" y="262" width="5" height="45" rx="3" fill="#2d64d2"/>
+  </g>
+  <text x="87" y="290" text-anchor="middle" font-size="14" font-weight="700" fill="#2d64d2">Design</text>
+
+  <!-- Review -->
+  <g filter="url(#shadow)">
+    <rect x="170" y="262" width="110" height="45" rx="8" fill="#fff" stroke="#e0e4ec" stroke-width="1"/>
+    <rect x="170" y="262" width="5" height="45" rx="3" fill="#d72d37"/>
+  </g>
+  <text x="227" y="290" text-anchor="middle" font-size="14" font-weight="700" fill="#d72d37">Review</text>
+
+  <!-- Plan -->
+  <g filter="url(#shadow)">
+    <rect x="310" y="262" width="110" height="45" rx="8" fill="#fff" stroke="#e0e4ec" stroke-width="1"/>
+    <rect x="310" y="262" width="5" height="45" rx="3" fill="#2d64d2"/>
+  </g>
+  <text x="367" y="290" text-anchor="middle" font-size="14" font-weight="700" fill="#2d64d2">Plan</text>
+
+  <!-- Dev -->
+  <g filter="url(#shadow)">
+    <rect x="450" y="262" width="110" height="45" rx="8" fill="#fff" stroke="#e0e4ec" stroke-width="1"/>
+    <rect x="450" y="262" width="5" height="45" rx="3" fill="#109648"/>
+  </g>
+  <text x="507" y="290" text-anchor="middle" font-size="14" font-weight="700" fill="#109648">Dev</text>
+
+  <!-- QA Test -->
+  <g filter="url(#shadow)">
+    <rect x="590" y="262" width="110" height="45" rx="8" fill="#fff" stroke="#e0e4ec" stroke-width="1"/>
+    <rect x="590" y="262" width="5" height="45" rx="3" fill="#d72d37"/>
+  </g>
+  <text x="647" y="290" text-anchor="middle" font-size="14" font-weight="700" fill="#d72d37">QA Test</text>
+
+  <!-- Report -->
+  <g filter="url(#shadow)">
+    <rect x="730" y="262" width="110" height="45" rx="8" fill="#fff" stroke="#e0e4ec" stroke-width="1"/>
+    <rect x="730" y="262" width="5" height="45" rx="3" fill="#c38200"/>
+  </g>
+  <text x="787" y="290" text-anchor="middle" font-size="14" font-weight="700" fill="#c38200">Report</text>
+
+  <!-- Stage arrows -->
+  <line x1="142" y1="284" x2="168" y2="284" stroke="#a0aab8" stroke-width="1.8" marker-end="url(#arrowGray)"/>
+  <line x1="282" y1="284" x2="308" y2="284" stroke="#a0aab8" stroke-width="1.8" marker-end="url(#arrowGray)"/>
+  <line x1="422" y1="284" x2="448" y2="284" stroke="#a0aab8" stroke-width="1.8" marker-end="url(#arrowGray)"/>
+  <line x1="562" y1="284" x2="588" y2="284" stroke="#a0aab8" stroke-width="1.8" marker-end="url(#arrowGray)"/>
+  <line x1="702" y1="284" x2="728" y2="284" stroke="#a0aab8" stroke-width="1.8" marker-end="url(#arrowGray)"/>
+
+  <!-- LGTM label -->
+  <text x="708" y="275" font-size="10" font-weight="700" fill="#109648">LGTM</text>
+
+  <!-- Loop-back arrow: QA Test -> Dev -->
+  <polyline points="645,309 645,330 505,330 505,309"
+            fill="none" stroke="#d72d37" stroke-width="1.8" marker-end="url(#arrowRedUp)"/>
+  <text x="520" y="344" font-size="10" fill="#d72d37" font-style="italic">issues found? loop back</text>
+
+  <!-- ===== TIDB MEMORY BAR ===== -->
+  <g filter="url(#shadow)">
+    <rect x="30" y="362" width="840" height="30" rx="6" fill="#fff" stroke="#e0e4ec" stroke-width="1"/>
+    <rect x="30" y="362" width="5" height="30" rx="3" fill="#2d64d2"/>
+  </g>
+  <text x="48" y="382" font-size="13" font-weight="700" fill="#2d64d2">TiDB Cloud</text>
+  <text x="155" y="382" font-size="11" fill="#828c9e">|  raw turns  |  compacted knowledge  |  vector search  |  cross-role context</text>
+</svg>
