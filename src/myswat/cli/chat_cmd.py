@@ -376,9 +376,33 @@ def run_chat(
                         ],
                     )
                     sm = _switch_agent(current_role, settings)
-                elif delegation_mode in {_DELEGATION_MODE_DESIGN, _DELEGATION_MODE_TESTPLAN}:
+                elif current_role == "architect" and delegation_mode == _DELEGATION_MODE_DESIGN:
                     console.print(
-                        f"[yellow]Delegation mode '{delegation_mode}' is recognized but not available yet.[/yellow]"
+                        f"\n[bold cyan]Architect started a design review workflow:[/bold cyan] {delegation_task[:160]}"
+                    )
+                    _run_design_review_interactive(
+                        store,
+                        proj,
+                        sm,
+                        compactor,
+                        effective_workdir,
+                        settings,
+                        delegation_task,
+                        prompt_session=prompt_session,
+                    )
+                elif current_role in {"qa_main", "qa_vice"} and delegation_mode == _DELEGATION_MODE_TESTPLAN:
+                    console.print(
+                        f"\n[bold cyan]QA started a test-plan review workflow:[/bold cyan] {delegation_task[:160]}"
+                    )
+                    _run_testplan_review_interactive(
+                        store,
+                        proj,
+                        sm,
+                        compactor,
+                        effective_workdir,
+                        settings,
+                        delegation_task,
+                        prompt_session=prompt_session,
                     )
                 elif delegation_mode == _DELEGATION_MODE_CODE:
                     console.print(
@@ -588,6 +612,227 @@ def _run_inline_review(
     reviewer_sm.close()
 
 
+def _make_prompt_callback(prompt_session: PromptSession | None = None) -> Callable[[str], str]:
+    def ask_user(prompt_text: str) -> str:
+        if prompt_session:
+            try:
+                return prompt_session.prompt(prompt_text, multiline=False).strip()
+            except (EOFError, KeyboardInterrupt):
+                return "n"
+        try:
+            return input(f"\n{prompt_text}").strip()
+        except (EOFError, KeyboardInterrupt):
+            return "n"
+
+    return ask_user
+
+
+def _run_design_review(
+    store: MemoryStore,
+    proj: dict,
+    proposer_sm: SessionManager,
+    compactor: KnowledgeCompactor,
+    workdir: str | None,
+    settings: MySwatSettings,
+    task: str,
+    prompt_session: PromptSession | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    on_work_item_created: Callable[[int], None] | None = None,
+    register_cancel_target: Callable[[AgentRunner], None] | None = None,
+) -> None:
+    from myswat.workflow.engine import WorkflowEngine, WorkMode
+
+    if proposer_sm is None:
+        console.print("[red]Missing architect session.[/red]")
+        return
+
+    dev_agent = store.get_agent(proj["id"], "developer")
+    if not dev_agent:
+        console.print("[red]Missing developer agent.[/red]")
+        return
+
+    qa_sms = []
+    for qa_role in ("qa_main", "qa_vice"):
+        qa_agent = store.get_agent(proj["id"], qa_role)
+        if qa_agent:
+            qa_runner = make_runner_from_row(qa_agent, settings=settings)
+            qa_runner.workdir = workdir
+            if register_cancel_target:
+                register_cancel_target(qa_runner)
+            qa_sms.append(SessionManager(
+                store=store, runner=qa_runner, agent_row=qa_agent,
+                project_id=proj["id"], compactor=compactor,
+            ))
+
+    if not qa_sms:
+        console.print("[red]No QA agents found.[/red]")
+        return
+
+    dev_runner = make_runner_from_row(dev_agent, settings=settings)
+    dev_runner.workdir = workdir
+    if register_cancel_target:
+        register_cancel_target(dev_runner)
+    proposer_runner = getattr(proposer_sm, "_runner", None)
+    if proposer_runner is not None and register_cancel_target:
+        register_cancel_target(proposer_runner)
+
+    dev_sm = SessionManager(
+        store=store, runner=dev_runner, agent_row=dev_agent,
+        project_id=proj["id"], compactor=compactor,
+    )
+
+    work_item_id = store.create_work_item(
+        project_id=proj["id"],
+        title=task[:200],
+        description=task,
+        item_type="design",
+        assigned_agent_id=proposer_sm.agent_id,
+        metadata_json={"work_mode": WorkMode.architect_design.value},
+    )
+    if on_work_item_created:
+        on_work_item_created(work_item_id)
+    store.update_work_item_status(work_item_id, "in_progress")
+
+    arch_workflow_sm = proposer_sm.fork_for_work_item(
+        work_item_id,
+        purpose=f"Arch design: {task[:80]}",
+    )
+    dev_sm.create_or_resume(purpose=f"Workflow dev review: {task[:80]}", work_item_id=work_item_id)
+    for qa_sm in qa_sms:
+        qa_sm.create_or_resume(purpose=f"Workflow QA review: {task[:80]}", work_item_id=work_item_id)
+
+    engine = WorkflowEngine(
+        store=store,
+        dev_sm=dev_sm,
+        qa_sms=qa_sms,
+        arch_sm=arch_workflow_sm,
+        project_id=proj["id"],
+        work_item_id=work_item_id,
+        max_review_iterations=settings.workflow.max_review_iterations,
+        mode=WorkMode.architect_design,
+        ask_user=_make_prompt_callback(prompt_session),
+        auto_approve=False,
+        should_cancel=should_cancel,
+    )
+
+    try:
+        result = engine.run(task)
+        if should_cancel and should_cancel():
+            store.update_work_item_status(work_item_id, "blocked")
+        elif getattr(result, "blocked", False):
+            store.update_work_item_status(work_item_id, "blocked")
+        elif result.success:
+            store.update_work_item_status(work_item_id, "completed")
+        else:
+            store.update_work_item_status(work_item_id, "review")
+    except Exception:
+        store.update_work_item_status(work_item_id, "blocked")
+        raise
+    finally:
+        arch_workflow_sm.close()
+        dev_sm.close()
+        for qa_sm in qa_sms:
+            qa_sm.close()
+
+
+def _run_testplan_review(
+    store: MemoryStore,
+    proj: dict,
+    proposer_sm: SessionManager,
+    compactor: KnowledgeCompactor,
+    workdir: str | None,
+    settings: MySwatSettings,
+    task: str,
+    prompt_session: PromptSession | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    on_work_item_created: Callable[[int], None] | None = None,
+    register_cancel_target: Callable[[AgentRunner], None] | None = None,
+) -> None:
+    from myswat.workflow.engine import WorkflowEngine, WorkMode
+
+    if proposer_sm is None:
+        console.print("[red]Missing QA session.[/red]")
+        return
+
+    arch_agent = store.get_agent(proj["id"], "architect")
+    dev_agent = store.get_agent(proj["id"], "developer")
+    if not arch_agent or not dev_agent:
+        console.print("[red]Missing architect or developer agent.[/red]")
+        return
+
+    arch_runner = make_runner_from_row(arch_agent, settings=settings)
+    arch_runner.workdir = workdir
+    if register_cancel_target:
+        register_cancel_target(arch_runner)
+    dev_runner = make_runner_from_row(dev_agent, settings=settings)
+    dev_runner.workdir = workdir
+    if register_cancel_target:
+        register_cancel_target(dev_runner)
+    proposer_runner = getattr(proposer_sm, "_runner", None)
+    if proposer_runner is not None and register_cancel_target:
+        register_cancel_target(proposer_runner)
+
+    arch_sm = SessionManager(
+        store=store, runner=arch_runner, agent_row=arch_agent,
+        project_id=proj["id"], compactor=compactor,
+    )
+    dev_sm = SessionManager(
+        store=store, runner=dev_runner, agent_row=dev_agent,
+        project_id=proj["id"], compactor=compactor,
+    )
+
+    work_item_id = store.create_work_item(
+        project_id=proj["id"],
+        title=task[:200],
+        description=task,
+        item_type="review",
+        assigned_agent_id=proposer_sm.agent_id,
+        metadata_json={"work_mode": WorkMode.testplan_design.value},
+    )
+    if on_work_item_created:
+        on_work_item_created(work_item_id)
+    store.update_work_item_status(work_item_id, "in_progress")
+
+    qa_workflow_sm = proposer_sm.fork_for_work_item(
+        work_item_id,
+        purpose=f"QA test plan: {task[:80]}",
+    )
+    arch_sm.create_or_resume(purpose=f"Workflow architect review: {task[:80]}", work_item_id=work_item_id)
+    dev_sm.create_or_resume(purpose=f"Workflow dev review: {task[:80]}", work_item_id=work_item_id)
+
+    engine = WorkflowEngine(
+        store=store,
+        dev_sm=dev_sm,
+        qa_sms=[qa_workflow_sm],
+        arch_sm=arch_sm,
+        project_id=proj["id"],
+        work_item_id=work_item_id,
+        max_review_iterations=settings.workflow.max_review_iterations,
+        mode=WorkMode.testplan_design,
+        ask_user=_make_prompt_callback(prompt_session),
+        auto_approve=False,
+        should_cancel=should_cancel,
+    )
+
+    try:
+        result = engine.run(task)
+        if should_cancel and should_cancel():
+            store.update_work_item_status(work_item_id, "blocked")
+        elif getattr(result, "blocked", False):
+            store.update_work_item_status(work_item_id, "blocked")
+        elif result.success:
+            store.update_work_item_status(work_item_id, "completed")
+        else:
+            store.update_work_item_status(work_item_id, "review")
+    except Exception:
+        store.update_work_item_status(work_item_id, "blocked")
+        raise
+    finally:
+        qa_workflow_sm.close()
+        arch_sm.close()
+        dev_sm.close()
+
+
 def _run_workflow(
     store: MemoryStore, proj: dict, compactor: KnowledgeCompactor,
     workdir: str | None, settings: MySwatSettings, requirement: str,
@@ -678,7 +923,7 @@ def _run_workflow(
         project_id=proj["id"],
         work_item_id=work_item_id,
         max_review_iterations=settings.workflow.max_review_iterations,
-        ask_user=ask_user,
+        ask_user=_make_prompt_callback(prompt_session),
         auto_approve=True,
         should_cancel=should_cancel,
     )
@@ -731,6 +976,88 @@ def _run_inline_review_interactive(
         store=store,
         proj=proj,
         label="Running dev+QA review loop",
+        worker_fn=_worker,
+        work_item_ref=work_item_ref,
+        cancel_targets=cancel_targets,
+        cancel_event=cancel_event,
+    )
+
+
+def _run_design_review_interactive(
+    store: MemoryStore,
+    proj: dict,
+    proposer_sm: SessionManager,
+    compactor: KnowledgeCompactor,
+    workdir: str | None,
+    settings: MySwatSettings,
+    task: str,
+    prompt_session: PromptSession | None = None,
+) -> None:
+    work_item_ref: dict[str, int | None] = {"id": None}
+    cancel_targets: list[AgentRunner] = []
+    cancel_event = threading.Event()
+
+    def _worker():
+        return _run_design_review(
+            store=store,
+            proj=proj,
+            proposer_sm=proposer_sm,
+            compactor=compactor,
+            workdir=workdir,
+            settings=settings,
+            task=task,
+            prompt_session=prompt_session,
+            should_cancel=cancel_event.is_set,
+            on_work_item_created=lambda wid: work_item_ref.__setitem__("id", wid),
+            register_cancel_target=cancel_targets.append,
+        )
+
+    _run_with_task_monitor(
+        console=console,
+        store=store,
+        proj=proj,
+        label="Running architect design workflow",
+        worker_fn=_worker,
+        work_item_ref=work_item_ref,
+        cancel_targets=cancel_targets,
+        cancel_event=cancel_event,
+    )
+
+
+def _run_testplan_review_interactive(
+    store: MemoryStore,
+    proj: dict,
+    proposer_sm: SessionManager,
+    compactor: KnowledgeCompactor,
+    workdir: str | None,
+    settings: MySwatSettings,
+    task: str,
+    prompt_session: PromptSession | None = None,
+) -> None:
+    work_item_ref: dict[str, int | None] = {"id": None}
+    cancel_targets: list[AgentRunner] = []
+    cancel_event = threading.Event()
+
+    def _worker():
+        return _run_testplan_review(
+            store=store,
+            proj=proj,
+            proposer_sm=proposer_sm,
+            compactor=compactor,
+            workdir=workdir,
+            settings=settings,
+            task=task,
+            prompt_session=prompt_session,
+            should_cancel=cancel_event.is_set,
+            on_work_item_created=lambda wid: work_item_ref.__setitem__("id", wid),
+            register_cancel_target=cancel_targets.append,
+        )
+
+    _run_with_task_monitor(
+        console=console,
+        store=store,
+        proj=proj,
+        label="Running QA test-plan workflow",
         worker_fn=_worker,
         work_item_ref=work_item_ref,
         cancel_targets=cancel_targets,
