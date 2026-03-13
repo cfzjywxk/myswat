@@ -49,12 +49,27 @@ class TestExtractDelegation:
     def test_extracts_task_line(self):
         text = "Here is my plan:\n```delegate\nTASK: implement the auth module\n```\nDone."
         result = _extract_delegation(text)
-        assert result == "implement the auth module"
+        assert result == ("implement the auth module", "code")
 
     def test_task_case_insensitive(self):
         text = "```delegate\ntask: do something\n```"
         result = _extract_delegation(text)
-        assert result == "do something"
+        assert result == ("do something", "code")
+
+    def test_explicit_mode_is_parsed(self):
+        text = "```delegate\nMODE: design\nTASK: formalize the cache design\n```"
+        result = _extract_delegation(text)
+        assert result == ("formalize the cache design", "design")
+
+    def test_mode_case_insensitive(self):
+        text = "```delegate\nMoDe: TESTPLAN\nTASK: finalize release checks\n```"
+        result = _extract_delegation(text)
+        assert result == ("finalize release checks", "testplan")
+
+    def test_mode_blank_defaults_to_code(self):
+        text = "```delegate\nMODE:   \nTASK: finalize release checks\n```"
+        result = _extract_delegation(text)
+        assert result == ("finalize release checks", "code")
 
     def test_no_delegate_block(self):
         text = "Just a normal response with no delegation."
@@ -64,7 +79,27 @@ class TestExtractDelegation:
     def test_delegate_block_without_task_line(self):
         text = "```delegate\nsome instructions to follow\n```"
         result = _extract_delegation(text)
-        assert result == "some instructions to follow"
+        assert result == ("some instructions to follow", "code")
+
+    def test_delegate_block_without_task_ignores_mode_metadata(self):
+        text = "```delegate\nMODE: design\nsome instructions to follow\n```"
+        result = _extract_delegation(text)
+        assert result == ("some instructions to follow", "design")
+
+    def test_delegate_block_with_only_mode_returns_none(self):
+        text = "```delegate\nMODE: design\n```"
+        result = _extract_delegation(text)
+        assert result is None
+
+    def test_delegate_block_with_blank_task_ignores_task_metadata(self):
+        text = "```delegate\nMODE: design\nTASK:   \nsome instructions to follow\n```"
+        result = _extract_delegation(text)
+        assert result == ("some instructions to follow", "design")
+
+    def test_delegate_block_with_only_blank_task_returns_none(self):
+        text = "```delegate\nTASK:   \n```"
+        result = _extract_delegation(text)
+        assert result is None
 
     def test_empty_delegate_block(self):
         text = "```delegate\n```"
@@ -79,12 +114,14 @@ class TestExtractDelegation:
     def test_multiple_lines_in_block_returns_task(self):
         text = "```delegate\nCONTEXT: auth system\nTASK: add login endpoint\nPRIORITY: high\n```"
         result = _extract_delegation(text)
-        assert result == "add login endpoint"
+        assert result == ("add login endpoint", "code")
 
     def test_delegate_block_fallback_whole_content(self):
         text = "```delegate\nno task prefix here\njust raw instructions\n```"
         result = _extract_delegation(text)
-        assert "no task prefix here" in result
+        assert result is not None
+        assert "no task prefix here" in result[0]
+        assert result[1] == "code"
 
 
 # ── _build_live_display ──

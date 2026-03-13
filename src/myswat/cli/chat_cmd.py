@@ -35,6 +35,10 @@ from myswat.memory.store import MemoryStore
 
 console = Console()
 
+_DELEGATION_MODE_CODE = "code"
+_DELEGATION_MODE_DESIGN = "design"
+_DELEGATION_MODE_TESTPLAN = "testplan"
+
 HELP_TEXT = """
 [bold]Commands:[/bold]
   /help                 Show this help
@@ -67,23 +71,44 @@ def _make_compaction_runner(
     return None
 
 
-def _extract_delegation(text: str) -> str | None:
-    """Extract a delegation task from architect's response.
+def _extract_delegation(text: str) -> tuple[str, str] | None:
+    """Extract a delegation task and mode from an agent response.
 
-    Looks for a ```delegate block with a TASK: line.
-    Returns the task description or None.
+    Looks for a ```delegate block with TASK:/MODE: lines.
+    Returns (task, mode) or None. Mode defaults to ``code``.
     """
     import re
+
     match = re.search(r"```delegate\s*\n(.*?)```", text, re.DOTALL)
     if not match:
         return None
+
     block = match.group(1)
+    task = None
+    mode = _DELEGATION_MODE_CODE
     for line in block.strip().splitlines():
         line = line.strip()
         if line.upper().startswith("TASK:"):
-            return line[5:].strip()
-    # Fallback: use the whole block content
-    return block.strip() or None
+            task = line[5:].strip()
+        elif line.upper().startswith("MODE:"):
+            parsed_mode = line[5:].strip().lower()
+            mode = parsed_mode or _DELEGATION_MODE_CODE
+
+    if not task:
+        fallback_lines: list[str] = []
+        for raw_line in block.strip().splitlines():
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            if stripped.upper().startswith("MODE:"):
+                continue
+            if stripped.upper().startswith("TASK:"):
+                continue
+            fallback_lines.append(stripped)
+        task = "\n".join(fallback_lines) or None
+
+
+    return (task, mode) if task else None
 
 
 def run_chat(
@@ -320,35 +345,49 @@ def run_chat(
             console.print(Markdown(response.content))
             console.print(f"\n[dim]({_fmt_duration(elapsed)})[/dim]")
 
-            # Check for architect delegation signal
-            delegation_task = _extract_delegation(response.content)
-            if delegation_task and current_role == "architect":
-                console.print(
-                    f"\n[bold cyan]Architect delegated to developer:[/bold cyan] {delegation_task[:160]}"
-                )
-                console.print("[dim]Starting dev+QA review loop automatically.[/dim]")
-                if sm:
-                    with console.status("[dim]Saving session to TiDB...[/dim]", spinner="dots"):
-                        sm.close()
-                _run_inline_review_interactive(
-                    store,
-                    proj,
-                    compactor,
-                    effective_workdir,
-                    settings,
-                    delegation_task,
-                    initial_process_events=[
-                        {
-                            "event_type": "delegation",
-                            "title": "Architect delegation",
-                            "summary": delegation_task,
-                            "from_role": "architect",
-                            "to_role": "developer",
-                            "updated_by_agent_id": getattr(sm, "agent_id", None),
-                        }
-                    ],
-                )
-                sm = _switch_agent(current_role, settings)
+            # Check for agent delegation signal
+            delegation = _extract_delegation(response.content)
+            if delegation:
+                delegation_task, delegation_mode = delegation
+                if current_role == "architect" and delegation_mode == _DELEGATION_MODE_CODE:
+                    console.print(
+                        f"\n[bold cyan]Architect delegated to developer:[/bold cyan] {delegation_task[:160]}"
+                    )
+                    console.print("[dim]Starting dev+QA review loop automatically.[/dim]")
+                    if sm:
+                        with console.status("[dim]Saving session to TiDB...[/dim]", spinner="dots"):
+                            sm.close()
+                    _run_inline_review_interactive(
+                        store,
+                        proj,
+                        compactor,
+                        effective_workdir,
+                        settings,
+                        delegation_task,
+                        initial_process_events=[
+                            {
+                                "event_type": "delegation",
+                                "title": "Architect delegation",
+                                "summary": delegation_task,
+                                "from_role": "architect",
+                                "to_role": "developer",
+                                "updated_by_agent_id": getattr(sm, "agent_id", None),
+                            }
+                        ],
+                    )
+                    sm = _switch_agent(current_role, settings)
+                elif delegation_mode in {_DELEGATION_MODE_DESIGN, _DELEGATION_MODE_TESTPLAN}:
+                    console.print(
+                        f"[yellow]Delegation mode '{delegation_mode}' is recognized but not available yet.[/yellow]"
+                    )
+                elif delegation_mode == _DELEGATION_MODE_CODE:
+                    console.print(
+                        f"[yellow]Delegation mode 'code' is not available for role '{current_role}' yet.[/yellow]"
+                    )
+                else:
+                    console.print(
+                        f"[yellow]Delegation mode '{delegation_mode}' is not supported.[/yellow]"
+                    )
         else:
             console.print(Panel(
                 response.content,
