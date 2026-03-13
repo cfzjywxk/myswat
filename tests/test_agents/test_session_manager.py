@@ -87,6 +87,153 @@ class TestCreateOrResume:
         runner.restore_session.assert_called_once_with("restored-session-id")
 
 
+class TestForkForWorkItem:
+    def test_fork_creates_new_work_item_session_with_parent(self):
+        sm, store, runner = _make_sm(compactor=MagicMock())
+        sm._session = Session(id=5, agent_id=1, session_uuid="parent-uuid")
+        store.create_session.return_value = Session(
+            id=11,
+            agent_id=1,
+            session_uuid="child-uuid",
+            work_item_id=42,
+            parent_session_id=5,
+        )
+
+        forked = sm.fork_for_work_item(42, purpose="workflow child")
+
+        assert forked is not sm
+        assert forked.session is not None
+        assert forked.session.id == 11
+        assert forked.session.work_item_id == 42
+        assert forked.session.parent_session_id == 5
+        assert forked.agent_id == sm.agent_id
+        assert forked.agent_role == sm.agent_role
+        assert forked._runner is runner
+        assert forked._compactor is sm._compactor
+        assert sm.session is not None
+        assert sm.session.id == 5
+        store.create_session.assert_called_once_with(
+            agent_id=1,
+            purpose="workflow child",
+            work_item_id=42,
+            parent_session_id=5,
+        )
+
+    def test_fork_without_existing_session_uses_no_parent(self):
+        sm, store, runner = _make_sm()
+        store.create_session.return_value = Session(
+            id=12,
+            agent_id=1,
+            session_uuid="child-uuid",
+            work_item_id=99,
+            parent_session_id=None,
+        )
+
+        forked = sm.fork_for_work_item(99)
+
+        assert forked.session is not None
+        assert forked.session.id == 12
+        assert forked.session.parent_session_id is None
+        assert forked._runner is runner
+        store.create_session.assert_called_once_with(
+            agent_id=1,
+            purpose=None,
+            work_item_id=99,
+            parent_session_id=None,
+        )
+
+    def test_fork_always_creates_fresh_session_without_resume_lookup(self):
+        sm, store, runner = _make_sm()
+        sm._session = Session(id=21, agent_id=1, session_uuid="parent-uuid")
+        store.create_session.return_value = Session(
+            id=22,
+            agent_id=1,
+            session_uuid="child-uuid",
+            work_item_id=77,
+            parent_session_id=21,
+        )
+
+        forked = sm.fork_for_work_item(77, purpose="child")
+
+        assert forked.session is not None
+        assert forked.session.id == 22
+        store.get_active_session.assert_not_called()
+        store.get_session_turns.assert_not_called()
+        runner.restore_session.assert_not_called()
+
+
+    def test_fork_rejects_non_positive_work_item_id(self):
+        sm, store, runner = _make_sm()
+
+        with pytest.raises(ValueError, match="positive integer"):
+            sm.fork_for_work_item(0)
+
+        with pytest.raises(ValueError, match="positive integer"):
+            sm.fork_for_work_item(-5)
+
+        store.create_session.assert_not_called()
+        store.get_active_session.assert_not_called()
+        store.get_session_turns.assert_not_called()
+        runner.restore_session.assert_not_called()
+
+
+    def test_fork_rejects_non_integer_work_item_id(self):
+        sm, store, runner = _make_sm()
+
+        with pytest.raises(TypeError, match="must be an integer"):
+            sm.fork_for_work_item("7")
+
+        with pytest.raises(TypeError, match="must be an integer"):
+            sm.fork_for_work_item(True)
+
+        store.create_session.assert_not_called()
+        store.get_active_session.assert_not_called()
+        store.get_session_turns.assert_not_called()
+        runner.restore_session.assert_not_called()
+
+
+    def test_fork_failure_does_not_mutate_original_manager(self):
+        sm, store, runner = _make_sm()
+        sm._session = Session(id=31, agent_id=1, session_uuid="parent-uuid")
+        store.create_session.side_effect = RuntimeError("db down")
+
+        with pytest.raises(RuntimeError, match="db down"):
+            sm.fork_for_work_item(55, purpose="child")
+
+        assert sm.session is not None
+        assert sm.session.id == 31
+        store.get_active_session.assert_not_called()
+        store.get_session_turns.assert_not_called()
+        runner.restore_session.assert_not_called()
+
+
+    def test_closing_fork_does_not_close_original_session(self):
+        compactor = MagicMock()
+        compactor.compact_session.return_value = []
+        sm, store, _ = _make_sm(compactor=compactor)
+        sm._session = Session(id=5, agent_id=1, session_uuid="parent-uuid")
+        store.create_session.return_value = Session(
+            id=13,
+            agent_id=1,
+            session_uuid="child-uuid",
+            work_item_id=7,
+            parent_session_id=5,
+        )
+
+        forked = sm.fork_for_work_item(7, purpose="child")
+        forked.close()
+
+        store.close_session.assert_called_once_with(13)
+        assert sm.session is not None
+        assert sm.session.id == 5
+        compactor.compact_session.assert_called_once_with(
+            session_id=13,
+            project_id=1,
+            agent_id=1,
+            mark_compacted=True,
+        )
+
+
 class TestSend:
     def test_first_turn_builds_context(self):
         sm, store, runner = _make_sm()

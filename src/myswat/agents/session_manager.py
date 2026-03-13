@@ -76,6 +76,38 @@ class SessionManager:
         self._session = session
         return session
 
+    def fork_for_work_item(
+        self, work_item_id: int, purpose: str | None = None,
+    ) -> "SessionManager":
+        """Create a fresh work-item-scoped TiDB session while reusing the runner.
+
+        The original SessionManager and its chat session stay untouched. The
+        forked manager always creates a new TiDB session linked to
+        ``work_item_id`` instead of resuming an existing one, but it shares the
+        same underlying AI runner so in-process conversation context is
+        preserved.
+        """
+        if isinstance(work_item_id, bool) or not isinstance(work_item_id, int):
+            raise TypeError("work_item_id must be an integer")
+        if work_item_id <= 0:
+            raise ValueError("work_item_id must be a positive integer")
+
+        forked = SessionManager(
+            store=self._store,
+            runner=self._runner,
+            agent_row=self._agent_row,
+            project_id=self._project_id,
+            compactor=self._compactor,
+        )
+        parent_session_id = self._session.id if self._session is not None else None
+        forked._session = self._store.create_session(
+            agent_id=self._agent_row["id"],
+            purpose=purpose,
+            work_item_id=work_item_id,
+            parent_session_id=parent_session_id,
+        )
+        return forked
+
     def _restore_cli_session(self, session_id: int) -> None:
         """Restore the last persisted CLI session ID for a resumed TiDB session."""
         try:
