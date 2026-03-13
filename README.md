@@ -1,13 +1,7 @@
 <p align="center">
-  <img src="assets/myswat.png" alt="myswat — ARCH, DEV, QA" width="480"/>
-</p>
-
-<p align="center">
+  <img src="assets/myswat.png" alt="myswat — ARCH, DEV, QA" width="480"/><br/>
   <strong>Multi-AI agent conversation orchestrator for software development.</strong><br/>
-  Route prompts, capture diffs, loop until LGTM — humans architect, AI agents build and review.
-</p>
-
-<p align="center">
+  Route prompts, capture diffs, loop until LGTM — humans architect, AI agents build and review.<br/><br/>
   <img src="https://img.shields.io/badge/python-3.12+-blue?logo=python&logoColor=white" alt="Python 3.12+"/>
   <img src="https://img.shields.io/badge/backend-TiDB_Cloud-4479A1?logo=tidb&logoColor=white" alt="TiDB Cloud"/>
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"/>
@@ -286,8 +280,8 @@ Session active
 
 MySwat is designed for large, complex codebases where coordinated multi-agent development shines:
 
-- **Rust systems** — TiSql (51K lines, 18 invariants, segmented Makefile)
-- **Distributed databases** — TiDB (Go), TiKV (Rust)
+- **Rust systems** — [TiSql](https://github.com/cfzjywxk/tisql) (51K lines, 18 invariants, segmented Makefile)
+- **Distributed databases** — [TiDB](https://github.com/pingcap/tidb) (Go), [TiKV](https://github.com/tikv/tikv) (Rust)
 - **Any project with CI gates** — agents learn your test tiers and respect them
 
 ## License
