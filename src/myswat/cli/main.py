@@ -541,7 +541,9 @@ def _infer_stage_labels(rounds: list[dict]) -> list[str]:
         p_role = rd["proposer_role"]
         r_role = rd["reviewer_role"]
 
-        if p_role == "developer" and r_role.startswith("qa"):
+        if p_role == "architect" and (r_role == "developer" or r_role.startswith("qa")):
+            labels.append("Architect Design Review")
+        elif p_role == "developer" and r_role.startswith("qa"):
             dev_to_qa_count += 1
             if dev_to_qa_count == 1:
                 labels.append("Design Review")
@@ -549,7 +551,7 @@ def _infer_stage_labels(rounds: list[dict]) -> list[str]:
                 labels.append("Plan Review")
             else:
                 labels.append(f"Code Review (phase {dev_to_qa_count - 2})")
-        elif p_role.startswith("qa") and r_role == "developer":
+        elif p_role.startswith("qa") and r_role in {"developer", "architect"}:
             qa_to_dev_count += 1
             labels.append("Test Plan Review")
         else:

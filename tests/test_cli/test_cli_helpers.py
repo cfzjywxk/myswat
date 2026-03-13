@@ -222,11 +222,20 @@ class TestInferStageLabels:
         labels = _infer_stage_labels(rounds)
         assert labels == ["Test Plan Review"]
 
-    def test_unknown_direction(self):
+    def test_test_plan_review_with_architect_reviewer(self):
+        rounds = [{"proposer_role": "qa_main", "reviewer_role": "architect"}]
+        labels = _infer_stage_labels(rounds)
+        assert labels == ["Test Plan Review"]
+
+    def test_architect_to_qa_is_architect_design_review(self):
         rounds = [{"proposer_role": "architect", "reviewer_role": "qa_main"}]
         labels = _infer_stage_labels(rounds)
-        assert "architect" in labels[0]
-        assert "qa_main" in labels[0]
+        assert labels == ["Architect Design Review"]
+
+    def test_architect_to_developer_is_architect_design_review(self):
+        rounds = [{"proposer_role": "architect", "reviewer_role": "developer"}]
+        labels = _infer_stage_labels(rounds)
+        assert labels == ["Architect Design Review"]
 
     def test_empty_rounds(self):
         assert _infer_stage_labels([]) == []

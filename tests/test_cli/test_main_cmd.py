@@ -188,6 +188,52 @@ class TestPrintTeamworkDetails:
         assert "developer -> qa_main" in rendered
         assert "qa_main -> developer" in rendered
 
+    def test_architect_design_round_label_rendered(self):
+        pool = MagicMock()
+        pool.fetch_all.side_effect = [
+            [
+                {
+                    "iteration": 1, "verdict": "lgtm",
+                    "created_at": "2026-03-07",
+                    "proposer_role": "architect", "proposer_name": "Architect",
+                    "reviewer_role": "developer", "reviewer_name": "Dev",
+                },
+            ],
+            [],
+            [],
+        ]
+        item = {"id": 1, "title": "Design task", "status": "completed"}
+        output = io.StringIO()
+        console = Console(file=output, force_terminal=False, width=120)
+
+        _print_teamwork_details(pool, item, console)
+
+        rendered = output.getvalue()
+        assert "Architect Design Review" in rendered
+
+    def test_test_plan_round_label_with_architect_reviewer_rendered(self):
+        pool = MagicMock()
+        pool.fetch_all.side_effect = [
+            [
+                {
+                    "iteration": 1, "verdict": "lgtm",
+                    "created_at": "2026-03-07",
+                    "proposer_role": "qa_main", "proposer_name": "QA",
+                    "reviewer_role": "architect", "reviewer_name": "Architect",
+                },
+            ],
+            [],
+            [],
+        ]
+        item = {"id": 2, "title": "Test plan task", "status": "completed"}
+        output = io.StringIO()
+        console = Console(file=output, force_terminal=False, width=120)
+
+        _print_teamwork_details(pool, item, console)
+
+        rendered = output.getvalue()
+        assert "Test Plan Review" in rendered
+
     def test_tokens_under_1000(self):
         pool = MagicMock()
         pool.fetch_all.side_effect = [
