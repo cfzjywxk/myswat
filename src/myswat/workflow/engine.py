@@ -37,6 +37,7 @@ from myswat.cli.progress import _collapse_text
 from myswat.models.work_item import ReviewVerdict
 from myswat.workflow.prompts import (
     ARCH_ADDRESS_DESIGN_COMMENTS,
+    ARCH_TECH_DESIGN,
     DESIGN_REVIEW,
     DEV_ADDRESS_CODE_COMMENTS,
     DEV_ADDRESS_DESIGN_COMMENTS,
@@ -295,6 +296,11 @@ class WorkflowEngine:
             updated_by_agent_id=updated_by_agent_id,
         )
 
+    def _sync_result_failure_state(self, result: WorkflowResult) -> WorkflowResult:
+        result.blocked = self._blocked
+        result.failure_summary = self._failure_summary
+        return result
+
     # ════════════════════════════════════════════════════════════════
     # Main workflow
     # ════════════════════════════════════════════════════════════════
@@ -331,9 +337,7 @@ class WorkflowEngine:
             updated_by_agent_id=startup_owner.agent_id,
         )
         result = self._dispatch_mode(requirement, result)
-        result.blocked = self._blocked
-        result.failure_summary = self._failure_summary
-        return result
+        return self._sync_result_failure_state(result)
 
     def _dispatch_mode(self, requirement: str, result: WorkflowResult) -> WorkflowResult:
         if self._mode == WorkMode.full:
@@ -351,8 +355,108 @@ class WorkflowEngine:
         raise NotImplementedError(f"Workflow mode '{self._mode.value}' is not implemented yet.")
 
     def _run_architect_design_mode(self, requirement: str, result: WorkflowResult) -> WorkflowResult:
-        result.final_report = "Architect-design workflow scaffolded but not implemented yet."
-        return result
+        assert self._arch is not None
+
+        console.print(Panel("[bold]Stage 1: Technical Design[/bold]", border_style="blue"))
+        console.print("[yellow]Architect producing technical design...[/yellow]")
+        prompt = ARCH_TECH_DESIGN.format(requirement=requirement)
+        response = self._arch.send(prompt, task_description=f"Architect design: {requirement[:100]}")
+        if not response.success:
+            console.print(f"[red]Architect agent failed (exit={response.exit_code})[/red]")
+            self._record_blocked_failure(
+                stage="design_draft_blocked",
+                summary=f"[{self._arch.agent_role}] design draft failed (exit={response.exit_code})",
+                updated_by_agent_id=self._arch.agent_id,
+                from_role=self._arch.agent_role,
+                to_role="myswat",
+                event_type="proposal_failure",
+                title="Technical design draft failed",
+            )
+            result.final_report = self._generate_report(result, [])
+            return self._sync_result_failure_state(result)
+
+        design = response.content
+        result.design = design
+        self._persist_task_state(
+            current_stage="design_draft",
+            latest_summary=design[:4000],
+            next_todos=["Run team design review"],
+            updated_by_agent_id=self._arch.agent_id,
+        )
+        reviewers = [self._dev, *self._qas]
+        first_reviewer_role = reviewers[0].agent_role if reviewers else "reviewer"
+        self._append_process_event(
+            event_type="design_draft",
+            title="Technical design draft",
+            summary=design,
+            from_role=self._arch.agent_role,
+            to_role=first_reviewer_role,
+            updated_by_agent_id=self._arch.agent_id,
+        )
+        if self._cancelled():
+            result.final_report = "Architect-design workflow cancelled during technical design."
+            return self._sync_result_failure_state(result)
+
+        console.print(Panel("[bold]Stage 2: Design Review[/bold]", border_style="blue"))
+        design, iters, design_review_passed = self._run_review_loop(
+            artifact=design,
+            artifact_type="arch_design",
+            context=f"Requirement:\n{requirement}",
+            proposer=self._arch,
+            reviewers=reviewers,
+            abort_on_agent_failure=True,
+        )
+        result.design = design
+        result.design_review_iterations = iters
+        result.design_review_passed = design_review_passed
+        if self._cancelled():
+            result.final_report = "Architect-design workflow cancelled during design review."
+            return self._sync_result_failure_state(result)
+
+        if not design_review_passed:
+            if not self._blocked:
+                self._persist_task_state(
+                    current_stage="design_review_failed",
+                    latest_summary=design[:4000],
+                    next_todos=["Review unresolved design issues"],
+                    open_issues=self._first_lines(design, limit=8),
+                    updated_by_agent_id=self._arch.agent_id,
+                )
+            result.final_report = self._generate_report(result, [])
+            return self._sync_result_failure_state(result)
+
+        console.print(Panel(Markdown(design), title="Reviewed Design", border_style="green"))
+        design = self._user_checkpoint(
+            design,
+            "arch_design",
+            "Design reviewed by the team. Accept? [Y/n/or type feedback] ",
+            proposer=self._arch,
+        )
+        if design is None:
+            console.print("[yellow]Workflow stopped by user.[/yellow]")
+            self._persist_task_state(
+                current_stage="design_rejected_by_user",
+                latest_summary=result.design[:4000],
+                next_todos=["Review rejected design and user feedback"],
+                updated_by_agent_id=self._arch.agent_id,
+            )
+            result.final_report = "Architect-design workflow stopped by user after design review."
+            return self._sync_result_failure_state(result)
+
+        result.design = design
+        result.success = True
+        console.print(Panel("[bold]Stage 3: Final Report[/bold]", border_style="blue"))
+        report = self._generate_report(result, [])
+        result.final_report = report
+        console.print(Panel(Markdown(report), title="Architect Design Workflow Report", border_style="green"))
+        self._persist_task_state(
+            current_stage="workflow_completed",
+            latest_summary=report[:4000],
+            next_todos=[],
+            open_issues=[],
+            updated_by_agent_id=self._arch.agent_id,
+        )
+        return self._sync_result_failure_state(result)
 
     def _run_testplan_design_mode(self, requirement: str, result: WorkflowResult) -> WorkflowResult:
         result.final_report = "Testplan-design workflow scaffolded but not implemented yet."
@@ -1657,6 +1761,19 @@ class WorkflowEngine:
     # Report generation
     # ════════════════════════════════════════════════════════════════
 
+    def _generate_architect_design_report(self, result: WorkflowResult) -> str:
+        status = "Approved" if result.success else "Not approved"
+        lines = [
+            "# Workflow Report\n",
+            f"## Requirement\n{result.requirement}\n",
+            f"## Design Review\n{status} after {result.design_review_iterations} review iteration(s).\n",
+        ]
+        if result.failure_summary:
+            lines.append(f"## Failure\n{result.failure_summary}\n")
+        if result.design:
+            lines.append(f"## Final Design\n{result.design[:2000]}\n")
+        return "\n".join(lines)
+
     def _generate_design_report(self, result: WorkflowResult) -> str:
         total_reviews = result.design_review_iterations + result.plan_review_iterations
         design_status = "Passed" if result.design_review_passed else "Not passed"
@@ -1757,6 +1874,8 @@ class WorkflowEngine:
         return "\n".join(lines)
 
     def _generate_report(self, result: WorkflowResult, completed_summaries: list[str]) -> str:
+        if self._mode == WorkMode.architect_design:
+            return self._generate_architect_design_report(result)
         if self._mode == WorkMode.design:
             return self._generate_design_report(result)
         if self._mode == WorkMode.development:
