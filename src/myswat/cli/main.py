@@ -144,6 +144,88 @@ def learn(
     run_learn(project, workdir=workdir)
 
 
+def _format_history_timestamp(value) -> str:
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat(sep=" ", timespec="seconds")
+        except TypeError:
+            return value.isoformat()
+    return str(value)
+
+
+@app.command()
+def gc(
+    project: str = typer.Option(..., "--project", "-p", help="Project slug"),
+    grace_days: int = typer.Option(7, "--grace-days", help="Grace period before deleting compacted turns."),
+    keep_recent: int = typer.Option(50, "--keep-recent", help="Always preserve this many most-recent project turns."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be deleted without deleting it."),
+):
+    """Garbage-collect old raw turns from fully compacted sessions."""
+    from rich.console import Console
+
+    from myswat.config.settings import MySwatSettings
+    from myswat.db.connection import TiDBPool
+    from myswat.memory.store import MemoryStore
+
+    console = Console()
+    settings = MySwatSettings()
+    pool = TiDBPool(settings.tidb)
+    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
+
+    proj = store.get_project_by_slug(project)
+    if not proj:
+        console.print(f"[red]Project '{project}' not found.[/red]")
+        raise typer.Exit(1)
+
+    result = store.gc_compacted_turns(
+        proj["id"],
+        grace_days=grace_days,
+        keep_recent=keep_recent,
+        dry_run=dry_run,
+    )
+    verb = "Would delete" if dry_run else "Deleted"
+    console.print(
+        f"{verb} {result['turns_deleted']} turns from {result['sessions_affected']} sessions"
+    )
+
+
+@app.command()
+def history(
+    project: str = typer.Option(..., "--project", "-p", help="Project slug"),
+    turns: int = typer.Option(50, "--turns", help="Number of recent turns to show."),
+    role: str = typer.Option(None, "--role", help="Filter to one agent role."),
+):
+    """Show recent raw project turns in chronological order."""
+    from rich.console import Console
+
+    from myswat.config.settings import MySwatSettings
+    from myswat.db.connection import TiDBPool
+    from myswat.memory.store import MemoryStore
+
+    console = Console()
+    settings = MySwatSettings()
+    pool = TiDBPool(settings.tidb)
+    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
+
+    proj = store.get_project_by_slug(project)
+    if not proj:
+        console.print(f"[red]Project '{project}' not found.[/red]")
+        raise typer.Exit(1)
+
+    rows = store.get_recent_turns_global(proj["id"], limit=turns, role=role)
+    if not rows:
+        console.print("[dim]No recent turns found.[/dim]")
+        return
+
+    for row in rows:
+        timestamp = _format_history_timestamp(row.get("created_at"))
+        content = str(row.get("content") or "").replace("\n", " ")
+        console.print(
+            f"[{row.get('agent_role', 'unknown')}] [{timestamp}] {row.get('role', 'unknown')}: {content}",
+            markup=False,
+        )
+
+
 @app.command()
 def init(
     name: str = typer.Argument(..., help="Project name"),

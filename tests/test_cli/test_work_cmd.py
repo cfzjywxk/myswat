@@ -128,7 +128,6 @@ class TestRunWork:
                       mock_engine_cls):
         settings = MagicMock()
         settings.compaction.threshold_turns = 200
-        settings.compaction.threshold_tokens = 800000
         settings.workflow.max_review_iterations = 5
         mock_settings_cls.return_value = settings
 
@@ -163,6 +162,9 @@ class TestRunWork:
         assert mock_store.create_work_item.call_args.kwargs["metadata_json"] == {"work_mode": "full"}
         assert mock_engine_cls.call_args.kwargs["mode"] == WorkMode.full
         assert mock_engine_cls.call_args.kwargs["auto_approve"] is True
+        kwargs = mock_comp.call_args.kwargs
+        assert kwargs["threshold_turns"] == 200
+        assert "threshold_tokens" not in kwargs
 
     @patch("myswat.cli.work_cmd.WorkflowEngine")
     @patch("myswat.cli.learn_cmd.ensure_learned")

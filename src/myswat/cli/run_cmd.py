@@ -77,7 +77,6 @@ def run_single(
         store=store,
         runner=compaction_runner,
         threshold_turns=settings.compaction.threshold_turns,
-        threshold_tokens=settings.compaction.threshold_tokens,
     )
     sm = SessionManager(
         store=store,
@@ -181,7 +180,6 @@ def run_with_review(
         store=store,
         runner=compaction_runner,
         threshold_turns=settings.compaction.threshold_turns,
-        threshold_tokens=settings.compaction.threshold_tokens,
     )
 
     dev_sm = SessionManager(

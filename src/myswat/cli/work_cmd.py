@@ -286,7 +286,6 @@ def _run_workflow(
         store=store,
         runner=compaction_runner,
         threshold_turns=settings.compaction.threshold_turns,
-        threshold_tokens=settings.compaction.threshold_tokens,
     )
 
     dev_sm = SessionManager(

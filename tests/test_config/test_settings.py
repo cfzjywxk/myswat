@@ -207,27 +207,17 @@ class TestCompactionSettings:
 
     def test_defaults(self):
         settings = CompactionSettings()
-        assert settings.threshold_turns == 200
-        assert settings.threshold_tokens == 800000
+        assert settings.threshold_turns == 50
         assert settings.compaction_backend == "codex"
 
-    def test_threshold_turns_default_is_200(self):
+    def test_threshold_turns_default_is_50(self):
         settings = CompactionSettings()
-        assert settings.threshold_turns == 200
-
-    def test_threshold_tokens_default_is_800k(self):
-        settings = CompactionSettings()
-        assert settings.threshold_tokens == 800_000
+        assert settings.threshold_turns == 50
 
     def test_env_override_threshold_turns(self, monkeypatch):
         monkeypatch.setenv("MYSWAT_COMPACTION_THRESHOLD_TURNS", "500")
         settings = CompactionSettings()
         assert settings.threshold_turns == 500
-
-    def test_env_override_threshold_tokens(self, monkeypatch):
-        monkeypatch.setenv("MYSWAT_COMPACTION_THRESHOLD_TOKENS", "1000000")
-        settings = CompactionSettings()
-        assert settings.threshold_tokens == 1_000_000
 
     def test_env_override_compaction_backend(self, monkeypatch):
         monkeypatch.setenv("MYSWAT_COMPACTION_COMPACTION_BACKEND", "kimi")
@@ -287,7 +277,7 @@ class TestMySwatSettings:
         assert settings.tidb.port == 4000
         assert settings.agents.developer_model == "gpt-5.4"
         assert settings.workflow.max_review_iterations == 5
-        assert settings.compaction.threshold_turns == 200
+        assert settings.compaction.threshold_turns == 50
 
     def test_missing_config_file_no_error(self, tmp_path):
         """A missing TOML config file must not raise an error."""
@@ -315,7 +305,6 @@ max_review_iterations = 8
 
 [compaction]
 threshold_turns = 300
-threshold_tokens = 500000
 compaction_backend = "kimi"
 """
         config_file = tmp_path / "config.toml"
@@ -332,7 +321,6 @@ compaction_backend = "kimi"
         assert settings.agents.architect_model == "toml-model-v2"
         assert settings.workflow.max_review_iterations == 8
         assert settings.compaction.threshold_turns == 300
-        assert settings.compaction.threshold_tokens == 500_000
         assert settings.compaction.compaction_backend == "kimi"
 
     def test_toml_values_present_when_loaded(self, tmp_path):
@@ -382,7 +370,7 @@ host = "partial-host"
         assert settings.tidb.port == 4000
         assert settings.agents.developer_model == "gpt-5.4"
         assert settings.workflow.max_review_iterations == 5
-        assert settings.compaction.threshold_turns == 200
+        assert settings.compaction.threshold_turns == 50
 
     def test_config_path_attribute(self, tmp_path):
         """config_path should be stored as a Path object."""
@@ -402,4 +390,4 @@ host = "partial-host"
         assert settings.tidb.port == 4000
         assert settings.agents.codex_path == "codex"
         assert settings.workflow.max_review_iterations == 5
-        assert settings.compaction.threshold_tokens == 800_000
+        assert settings.compaction.threshold_turns == 50

@@ -69,14 +69,8 @@ class EmbeddingSettings(BaseSettings):
 
 
 class CompactionSettings(BaseSettings):
-    # Compaction triggers when EITHER threshold is exceeded.
-    # Modern AI CLIs (Claude Code, Codex) support ~1M token contexts.
-    # We compact at ~80% to leave headroom for system context + retriever
-    # output (~8k tokens), while keeping conversational continuity as long
-    # as possible — early compaction loses context and produces lower-quality
-    # knowledge distillation.
-    threshold_turns: int = 200      # ~100 user+assistant exchanges
-    threshold_tokens: int = 800000  # ~800k tokens — compact at ~80% of 1M context
+    # Compaction triggers when the uncompacted turn count reaches the threshold.
+    threshold_turns: int = 50
     compaction_backend: str = "codex"  # which agent backend to use for compaction
 
     model_config = {"env_prefix": "MYSWAT_COMPACTION_"}

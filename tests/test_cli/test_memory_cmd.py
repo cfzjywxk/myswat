@@ -284,7 +284,6 @@ class TestCompact:
         settings = MagicMock()
         settings.compaction.compaction_backend = "codex"
         settings.compaction.threshold_turns = 200
-        settings.compaction.threshold_tokens = 800000
         mock_settings_cls.return_value = settings
 
         mock_store = MagicMock()
@@ -306,7 +305,6 @@ class TestCompact:
         settings = MagicMock()
         settings.compaction.compaction_backend = "codex"
         settings.compaction.threshold_turns = 200
-        settings.compaction.threshold_tokens = 800000
         mock_settings_cls.return_value = settings
 
         mock_store = MagicMock()
@@ -327,6 +325,9 @@ class TestCompact:
 
         compact(project="proj")
         compactor.compact_all_pending.assert_called_once()
+        kwargs = mock_comp_cls.call_args.kwargs
+        assert kwargs["threshold_turns"] == 200
+        assert "threshold_tokens" not in kwargs
 
     @patch("myswat.memory.compactor.KnowledgeCompactor")
     @patch("myswat.cli.memory_cmd.MySwatSettings")
@@ -339,7 +340,6 @@ class TestCompact:
         settings = MagicMock()
         settings.compaction.compaction_backend = "kimi"
         settings.compaction.threshold_turns = 200
-        settings.compaction.threshold_tokens = 800000
         mock_settings_cls.return_value = settings
 
         mock_store = MagicMock()
@@ -371,7 +371,6 @@ class TestCompact:
         settings = MagicMock()
         settings.compaction.compaction_backend = "claude"  # no match
         settings.compaction.threshold_turns = 200
-        settings.compaction.threshold_tokens = 800000
         mock_settings_cls.return_value = settings
 
         mock_store = MagicMock()
@@ -391,85 +390,3 @@ class TestCompact:
         mock_comp_cls.return_value = compactor
 
         compact(project="proj")
-
-
-# ---------------------------------------------------------------------------
-# purge
-# ---------------------------------------------------------------------------
-class TestPurge:
-    @patch("myswat.cli.memory_cmd.MySwatSettings")
-    @patch("myswat.cli.memory_cmd.TiDBPool")
-    @patch("myswat.cli.memory_cmd.MemoryStore")
-    def test_project_not_found(self, mock_store_cls, mock_pool_cls,
-                                mock_settings_cls):
-        from myswat.cli.memory_cmd import purge
-
-        mock_store = MagicMock()
-        mock_store.get_project_by_slug.return_value = None
-        mock_store_cls.return_value = mock_store
-
-        with pytest.raises(ClickExit):
-            purge(project="missing")
-
-    @patch("myswat.cli.memory_cmd.MySwatSettings")
-    @patch("myswat.cli.memory_cmd.TiDBPool")
-    @patch("myswat.cli.memory_cmd.MemoryStore")
-    def test_no_compacted_sessions(self, mock_store_cls, mock_pool_cls,
-                                    mock_settings_cls):
-        from myswat.cli.memory_cmd import purge
-
-        mock_store = MagicMock()
-        mock_store.get_project_by_slug.return_value = {"id": 1}
-        mock_store_cls.return_value = mock_store
-
-        pool = MagicMock()
-        pool.fetch_all.return_value = []
-        mock_pool_cls.return_value = pool
-
-        purge(project="proj")
-        mock_store.purge_compacted_sessions.assert_not_called()
-
-    @patch("myswat.cli.memory_cmd.MySwatSettings")
-    @patch("myswat.cli.memory_cmd.TiDBPool")
-    @patch("myswat.cli.memory_cmd.MemoryStore")
-    def test_confirmed_purge(self, mock_store_cls, mock_pool_cls,
-                              mock_settings_cls):
-        from myswat.cli.memory_cmd import purge
-
-        mock_store = MagicMock()
-        mock_store.get_project_by_slug.return_value = {"id": 1}
-        mock_store.purge_compacted_sessions.return_value = {
-            "sessions_deleted": 2, "turns_deleted": 50,
-        }
-        mock_store_cls.return_value = mock_store
-
-        pool = MagicMock()
-        pool.fetch_all.return_value = [{"id": 1}, {"id": 2}]
-        pool.fetch_one.return_value = {"cnt": 25}
-        mock_pool_cls.return_value = pool
-
-        # yes=True skips confirmation
-        purge(project="proj", yes=True)
-        mock_store.purge_compacted_sessions.assert_called_once()
-
-    @patch("myswat.cli.memory_cmd.console")
-    @patch("myswat.cli.memory_cmd.MySwatSettings")
-    @patch("myswat.cli.memory_cmd.TiDBPool")
-    @patch("myswat.cli.memory_cmd.MemoryStore")
-    def test_cancelled_purge(self, mock_store_cls, mock_pool_cls,
-                              mock_settings_cls, mock_console):
-        from myswat.cli.memory_cmd import purge
-
-        mock_store = MagicMock()
-        mock_store.get_project_by_slug.return_value = {"id": 1}
-        mock_store_cls.return_value = mock_store
-
-        pool = MagicMock()
-        pool.fetch_all.return_value = [{"id": 1}]
-        pool.fetch_one.return_value = {"cnt": 10}
-        mock_pool_cls.return_value = pool
-
-        mock_console.input.return_value = "n"
-
-        purge(project="proj", yes=False)
-        mock_store.purge_compacted_sessions.assert_not_called()

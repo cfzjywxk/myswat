@@ -182,7 +182,6 @@ def compact(
         store=store,
         runner=runner,
         threshold_turns=settings.compaction.threshold_turns,
-        threshold_tokens=settings.compaction.threshold_tokens,
     )
 
     console.print(f"[bold]Compacting sessions for project '{proj['name']}'...[/bold]")
@@ -195,59 +194,3 @@ def compact(
         f"Skipped: {result['skipped']}"
     )
 
-
-@memory_app.command("purge")
-def purge(
-    project: str = typer.Option(..., "--project", "-p", help="Project slug"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
-):
-    """Delete all compacted sessions and their turns to free TiDB storage.
-
-    Knowledge entries are preserved — only raw session turns are deleted.
-    Sessions that haven't been compacted yet are left untouched.
-    """
-    settings = MySwatSettings()
-    pool = TiDBPool(settings.tidb)
-    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
-
-    proj = store.get_project_by_slug(project)
-    if not proj:
-        console.print(f"[red]Project '{project}' not found.[/red]")
-        raise typer.Exit(1)
-
-    # Count what would be purged
-    compacted = pool.fetch_all(
-        "SELECT s.id FROM sessions s "
-        "JOIN agents a ON s.agent_id = a.id "
-        "WHERE a.project_id = %s AND s.status = 'compacted'",
-        (proj["id"],),
-    )
-    if not compacted:
-        console.print("[dim]No compacted sessions to purge.[/dim]")
-        return
-
-    total_turns = 0
-    for sess in compacted:
-        row = pool.fetch_one(
-            "SELECT COUNT(*) AS cnt FROM session_turns WHERE session_id = %s",
-            (sess["id"],),
-        )
-        total_turns += row["cnt"] if row else 0
-
-    console.print(
-        f"Will delete [bold]{len(compacted)}[/bold] compacted sessions "
-        f"and [bold]{total_turns}[/bold] turns."
-    )
-    console.print("[dim]Knowledge entries are preserved.[/dim]")
-
-    if not yes:
-        confirm = console.input("[bold]Proceed? [y/N] [/bold]").strip().lower()
-        if confirm != "y":
-            console.print("[dim]Cancelled.[/dim]")
-            return
-
-    result = store.purge_compacted_sessions(proj["id"])
-    console.print(
-        f"[green]Purged {result['sessions_deleted']} sessions, "
-        f"{result['turns_deleted']} turns deleted.[/green]"
-    )

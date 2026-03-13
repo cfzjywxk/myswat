@@ -391,7 +391,6 @@ class TestRunChat:
         settings = MagicMock()
         settings.compaction.compaction_backend = "codex"
         settings.compaction.threshold_turns = 200
-        settings.compaction.threshold_tokens = 800000
         settings.workflow.max_review_iterations = 5
         return settings
 
@@ -447,6 +446,9 @@ class TestRunChat:
 
         run_chat("proj")
         sm.close.assert_called()
+        kwargs = mock_comp.call_args.kwargs
+        assert kwargs["threshold_turns"] == 200
+        assert "threshold_tokens" not in kwargs
 
     @patch("myswat.cli.chat_cmd.PromptSession")
     @patch("myswat.cli.chat_cmd.preload_model")

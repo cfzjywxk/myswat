@@ -69,7 +69,6 @@ class TestRunSingle:
         settings = MagicMock()
         settings.compaction.compaction_backend = "codex"
         settings.compaction.threshold_turns = 200
-        settings.compaction.threshold_tokens = 800000
 
         pool = MagicMock()
         store = MagicMock()
@@ -146,6 +145,9 @@ class TestRunSingle:
         run_single("proj", "do stuff")
         sm.send.assert_called_once()
         sm.close.assert_called_once()
+        kwargs = mock_comp.call_args.kwargs
+        assert kwargs["threshold_turns"] == 200
+        assert "threshold_tokens" not in kwargs
 
     @patch("myswat.cli.run_cmd.MySwatSettings")
     @patch("myswat.cli.run_cmd.TiDBPool")
