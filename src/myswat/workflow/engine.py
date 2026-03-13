@@ -57,6 +57,7 @@ from myswat.workflow.prompts import (
     QA_CODE_REVIEW,
     QA_CONTINUE_GA_TEST,
     QA_DESIGN_REVIEW,
+    QA_DESIGN_TEST_PLAN,
     QA_EXECUTE_GA_TEST,
     QA_GA_TEST_PLAN,
     QA_GA_TEST_REPORT,
@@ -459,8 +460,115 @@ class WorkflowEngine:
         return self._sync_result_failure_state(result)
 
     def _run_testplan_design_mode(self, requirement: str, result: WorkflowResult) -> WorkflowResult:
-        result.final_report = "Testplan-design workflow scaffolded but not implemented yet."
-        return result
+        assert self._arch is not None
+        qa_lead = self._qas[0]
+
+        console.print(Panel("[bold]Stage 1: Test Plan Design[/bold]", border_style="blue"))
+        console.print("[yellow]QA producing formal test plan...[/yellow]")
+        prompt = QA_DESIGN_TEST_PLAN.format(requirement=requirement)
+        response = qa_lead.send(prompt, task_description=f"QA test plan: {requirement[:100]}")
+        if not response.success:
+            console.print(f"[red]QA agent failed (exit={response.exit_code})[/red]")
+            self._record_blocked_failure(
+                stage="testplan_draft_blocked",
+                summary=f"[{qa_lead.agent_role}] test plan draft failed (exit={response.exit_code})",
+                updated_by_agent_id=qa_lead.agent_id,
+                from_role=qa_lead.agent_role,
+                to_role="myswat",
+                event_type="proposal_failure",
+                title="Test plan draft failed",
+            )
+            result.final_report = self._generate_report(result, [])
+            return self._sync_result_failure_state(result)
+
+        test_plan = response.content
+        self._persist_task_state(
+            current_stage="testplan_draft",
+            latest_summary=test_plan[:4000],
+            next_todos=["Run team test plan review"],
+            updated_by_agent_id=qa_lead.agent_id,
+        )
+        reviewers = [self._arch, self._dev]
+        first_reviewer_role = reviewers[0].agent_role if reviewers else "reviewer"
+        self._append_process_event(
+            event_type="testplan_draft",
+            title="Test plan draft",
+            summary=test_plan,
+            from_role=qa_lead.agent_role,
+            to_role=first_reviewer_role,
+            updated_by_agent_id=qa_lead.agent_id,
+        )
+        if self._cancelled():
+            result.final_report = "Testplan-design workflow cancelled during test plan drafting."
+            result.ga_test = GATestResult(test_plan=test_plan)
+            return self._sync_result_failure_state(result)
+
+        console.print(Panel("[bold]Stage 2: Test Plan Review[/bold]", border_style="blue"))
+        test_plan, iters, test_plan_review_passed = self._run_review_loop(
+            artifact=test_plan,
+            artifact_type="test_plan",
+            context=f"Requirement:\n{requirement}",
+            proposer=qa_lead,
+            reviewers=reviewers,
+            abort_on_agent_failure=True,
+        )
+        result.ga_test = GATestResult(
+            test_plan=test_plan,
+            test_plan_review_iterations=iters,
+            test_plan_review_passed=test_plan_review_passed,
+        )
+        if self._cancelled():
+            result.final_report = "Testplan-design workflow cancelled during test plan review."
+            return self._sync_result_failure_state(result)
+
+        if not test_plan_review_passed:
+            if not self._blocked:
+                self._persist_task_state(
+                    current_stage="testplan_review_failed",
+                    latest_summary=test_plan[:4000],
+                    next_todos=["Review unresolved test plan issues"],
+                    open_issues=self._first_lines(test_plan, limit=8),
+                    updated_by_agent_id=qa_lead.agent_id,
+                )
+            result.final_report = self._generate_report(result, [])
+            return self._sync_result_failure_state(result)
+
+        console.print(Panel(Markdown(test_plan), title="Reviewed Test Plan", border_style="green"))
+        test_plan = self._user_checkpoint(
+            test_plan,
+            "test_plan",
+            "Test plan reviewed by the team. Accept? [Y/n/or type feedback] ",
+            proposer=qa_lead,
+        )
+        if test_plan is None:
+            console.print("[yellow]Workflow stopped by user.[/yellow]")
+            self._persist_task_state(
+                current_stage="testplan_rejected_by_user",
+                latest_summary=result.ga_test.test_plan[:4000] if result.ga_test else "",
+                next_todos=["Review rejected test plan and user feedback"],
+                updated_by_agent_id=qa_lead.agent_id,
+            )
+            result.final_report = "Testplan-design workflow stopped by user after test plan review."
+            return self._sync_result_failure_state(result)
+
+        if result.ga_test is None:
+            result.ga_test = GATestResult()
+        result.ga_test.test_plan = test_plan
+        result.ga_test.test_plan_review_iterations = iters
+        result.ga_test.test_plan_review_passed = True
+        result.success = True
+        console.print(Panel("[bold]Stage 3: Final Report[/bold]", border_style="blue"))
+        report = self._generate_report(result, [])
+        result.final_report = report
+        console.print(Panel(Markdown(report), title="Test Plan Workflow Report", border_style="green"))
+        self._persist_task_state(
+            current_stage="workflow_completed",
+            latest_summary=report[:4000],
+            next_todos=[],
+            open_issues=[],
+            updated_by_agent_id=qa_lead.agent_id,
+        )
+        return self._sync_result_failure_state(result)
 
     def _run_full(self, requirement: str, result: WorkflowResult) -> WorkflowResult:
 
@@ -1774,6 +1882,20 @@ class WorkflowEngine:
             lines.append(f"## Final Design\n{result.design[:2000]}\n")
         return "\n".join(lines)
 
+    def _generate_testplan_design_report(self, result: WorkflowResult) -> str:
+        ga = result.ga_test or GATestResult()
+        status = "Approved" if result.success else "Not approved"
+        lines = [
+            "# Workflow Report\n",
+            f"## Requirement\n{result.requirement}\n",
+            f"## Test Plan Review\n{status} after {ga.test_plan_review_iterations} review iteration(s).\n",
+        ]
+        if result.failure_summary:
+            lines.append(f"## Failure\n{result.failure_summary}\n")
+        if ga.test_plan:
+            lines.append(f"## Final Test Plan\n{ga.test_plan[:2000]}\n")
+        return "\n".join(lines)
+
     def _generate_design_report(self, result: WorkflowResult) -> str:
         total_reviews = result.design_review_iterations + result.plan_review_iterations
         design_status = "Passed" if result.design_review_passed else "Not passed"
@@ -1876,6 +1998,8 @@ class WorkflowEngine:
     def _generate_report(self, result: WorkflowResult, completed_summaries: list[str]) -> str:
         if self._mode == WorkMode.architect_design:
             return self._generate_architect_design_report(result)
+        if self._mode == WorkMode.testplan_design:
+            return self._generate_testplan_design_report(result)
         if self._mode == WorkMode.design:
             return self._generate_design_report(result)
         if self._mode == WorkMode.development:

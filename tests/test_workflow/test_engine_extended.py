@@ -456,6 +456,169 @@ class TestRunArchitectDesignMode:
         assert result.final_report == "Architect-design workflow cancelled during design review."
 
 
+class TestRunTestplanDesignMode:
+    @patch.object(WorkflowEngine, "_generate_report", return_value="# Testplan Report")
+    @patch.object(WorkflowEngine, "_user_checkpoint", return_value="approved plan")
+    @patch.object(WorkflowEngine, "_run_review_loop", return_value=("reviewed plan", 2, True))
+    def test_happy_path(self, m_review, m_checkpoint, m_report):
+        arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=[], session_id=300)
+        dev = make_fake_session_manager(agent_id=10, agent_role="developer", responses=[], session_id=100)
+        qa = make_fake_session_manager(agent_id=20, agent_role="qa_main", responses=["the plan"], session_id=101)
+        store = MagicMock()
+        engine = WorkflowEngine(
+            store=store,
+            dev_sm=dev,
+            qa_sms=[qa],
+            arch_sm=arch,
+            project_id=1,
+            work_item_id=1,
+            mode=WorkMode.testplan_design,
+        )
+
+        result = engine.run("test the cache")
+
+        assert result.success is True
+        assert result.ga_test is not None
+        assert result.ga_test.test_plan == "approved plan"
+        assert result.ga_test.test_plan_review_iterations == 2
+        assert result.ga_test.test_plan_review_passed is True
+        assert result.final_report == "# Testplan Report"
+        m_review.assert_called_once()
+        assert m_review.call_args.kwargs["proposer"] is qa
+        assert m_review.call_args.kwargs["reviewers"] == [arch, dev]
+        assert m_review.call_args.kwargs["artifact_type"] == "test_plan"
+        assert m_review.call_args.kwargs["abort_on_agent_failure"] is True
+        m_checkpoint.assert_called_once()
+        assert m_checkpoint.call_args.kwargs["proposer"] is qa
+        draft_events = [
+            call.kwargs for call in store.append_work_item_process_event.call_args_list
+            if call.kwargs.get("event_type") == "testplan_draft"
+        ]
+        assert draft_events
+        assert draft_events[-1]["from_role"] == "qa_main"
+        assert draft_events[-1]["to_role"] == "architect"
+
+    def test_draft_event_targets_architect_first(self):
+        arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=[], session_id=300)
+        dev = make_fake_session_manager(agent_id=10, agent_role="developer", responses=[], session_id=100)
+        qa = make_fake_session_manager(agent_id=20, agent_role="qa_main", responses=["the plan"], session_id=101)
+        store = MagicMock()
+        engine = WorkflowEngine(
+            store=store,
+            dev_sm=dev,
+            qa_sms=[qa],
+            arch_sm=arch,
+            project_id=1,
+            work_item_id=1,
+            mode=WorkMode.testplan_design,
+        )
+
+        with patch.object(engine, "_run_review_loop", return_value=("reviewed plan", 1, True)):
+            with patch.object(engine, "_user_checkpoint", return_value="approved plan"):
+                with patch.object(engine, "_generate_report", return_value="# Testplan Report"):
+                    result = engine.run("test the cache")
+
+        assert result.success is True
+        draft_events = [
+            call.kwargs for call in store.append_work_item_process_event.call_args_list
+            if call.kwargs.get("event_type") == "testplan_draft"
+        ]
+        assert draft_events
+        assert draft_events[-1]["to_role"] == "architect"
+
+    def test_draft_failure_marks_blocked(self):
+        arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=[], session_id=300)
+        dev = make_fake_session_manager(agent_id=10, agent_role="developer", responses=[], session_id=100)
+        qa = make_fake_session_manager(agent_id=20, agent_role="qa_main", responses=[_fail()], session_id=101)
+        store = MagicMock()
+        engine = WorkflowEngine(
+            store=store,
+            dev_sm=dev,
+            qa_sms=[qa],
+            arch_sm=arch,
+            project_id=1,
+            work_item_id=1,
+            mode=WorkMode.testplan_design,
+        )
+
+        result = engine.run("test the cache")
+
+        assert result.success is False
+        assert result.blocked is True
+        assert "test plan draft failed" in result.failure_summary
+        assert result.final_report
+
+    def test_direct_testplan_mode_draft_failure_syncs_result_state(self):
+        arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=[], session_id=300)
+        dev = make_fake_session_manager(agent_id=10, agent_role="developer", responses=[], session_id=100)
+        qa = make_fake_session_manager(agent_id=20, agent_role="qa_main", responses=[_fail()], session_id=101)
+        store = MagicMock()
+        engine = WorkflowEngine(
+            store=store,
+            dev_sm=dev,
+            qa_sms=[qa],
+            arch_sm=arch,
+            project_id=1,
+            work_item_id=1,
+            mode=WorkMode.testplan_design,
+        )
+        result = WorkflowResult(requirement="test the cache")
+
+        result = engine._run_testplan_design_mode("test the cache", result)
+
+        assert result.success is False
+        assert result.blocked is True
+        assert "test plan draft failed" in result.failure_summary
+        assert result.final_report
+
+    @patch.object(WorkflowEngine, "_generate_report", return_value="# Testplan Report")
+    @patch.object(WorkflowEngine, "_user_checkpoint", return_value=None)
+    @patch.object(WorkflowEngine, "_run_review_loop", return_value=("reviewed plan", 1, True))
+    def test_user_stop_after_review(self, m_review, m_checkpoint, m_report):
+        arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=[], session_id=300)
+        dev = make_fake_session_manager(agent_id=10, agent_role="developer", responses=[], session_id=100)
+        qa = make_fake_session_manager(agent_id=20, agent_role="qa_main", responses=["the plan"], session_id=101)
+        store = MagicMock()
+        engine = WorkflowEngine(
+            store=store,
+            dev_sm=dev,
+            qa_sms=[qa],
+            arch_sm=arch,
+            project_id=1,
+            work_item_id=1,
+            mode=WorkMode.testplan_design,
+        )
+
+        result = engine.run("test the cache")
+
+        assert result.success is False
+        assert result.final_report == "Testplan-design workflow stopped by user after test plan review."
+
+    def test_cancellation_after_review_sets_final_report(self):
+        arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=[], session_id=300)
+        dev = make_fake_session_manager(agent_id=10, agent_role="developer", responses=[], session_id=100)
+        qa = make_fake_session_manager(agent_id=20, agent_role="qa_main", responses=[], session_id=101)
+        store = MagicMock()
+        engine = WorkflowEngine(
+            store=store,
+            dev_sm=dev,
+            qa_sms=[qa],
+            arch_sm=arch,
+            project_id=1,
+            work_item_id=1,
+            mode=WorkMode.testplan_design,
+        )
+        result = WorkflowResult(requirement="req")
+
+        with patch.object(qa, "send", return_value=_ok("the plan")):
+            with patch.object(engine, "_run_review_loop", return_value=("reviewed plan", 1, True)):
+                with patch.object(engine, "_cancelled", side_effect=[False, True]):
+                    result = engine._run_testplan_design_mode("req", result)
+
+        assert result.success is False
+        assert result.final_report == "Testplan-design workflow cancelled during test plan review."
+
+
 class TestRunDevelopmentMode:
     """Tests for development-mode orchestration added in phase 4."""
 
@@ -1768,6 +1931,34 @@ class TestGenerateReport:
         assert "## Design Review" in report
         assert "## Failure" in report
         assert "final design text" in report
+
+    def test_testplan_design_mode_report_includes_failure_and_final_plan(self):
+        arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=[], session_id=300)
+        engine = WorkflowEngine(
+            store=MagicMock(),
+            dev_sm=make_fake_session_manager(agent_id=10, agent_role="developer", responses=[]),
+            qa_sms=[make_fake_session_manager(agent_id=20, agent_role="qa_main", responses=[])],
+            arch_sm=arch,
+            project_id=1,
+            work_item_id=1,
+            mode=WorkMode.testplan_design,
+        )
+        result = WorkflowResult(
+            requirement="req",
+            ga_test=GATestResult(
+                test_plan="final plan text",
+                test_plan_review_iterations=2,
+                test_plan_review_passed=False,
+            ),
+            success=False,
+            failure_summary="[qa_main] review failed (exit=1)",
+        )
+
+        report = engine._generate_report(result, [])
+
+        assert "## Test Plan Review" in report
+        assert "## Failure" in report
+        assert "final plan text" in report
 
     def test_development_mode_report_omits_design_and_ga_sections(self):
         """Development-mode report only includes development content."""
