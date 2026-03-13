@@ -192,6 +192,65 @@ DEV_ADDRESS_DESIGN_COMMENTS = """Address the following review comments on your t
 4. Provide the complete updated design.
 """
 
+ARCH_TECH_DESIGN = """You are the project architect. Based on the prior discussion, produce a formal
+technical design proposal.
+
+## Requirement
+{requirement}
+
+## Your Deliverable
+Produce a complete technical design including:
+1. Problem statement and goals
+2. Architecture overview and approach
+3. Key design decisions and trade-offs
+4. Component interfaces and data flow
+5. Dependencies and risks
+6. Open questions (if any)
+
+Be thorough — this design will be reviewed by the development and QA teams.
+"""
+
+ARCH_ADDRESS_DESIGN_COMMENTS = """Address the following review comments on your technical design.
+
+## Your Previous Design
+{design}
+
+## Review Comments
+{feedback}
+
+## Instructions
+1. Address each comment specifically.
+2. Update the design where needed.
+3. Explain your reasoning for any disagreements.
+4. Provide the complete updated design.
+"""
+
+DESIGN_REVIEW = """Review the following technical design proposal.
+
+{context}
+
+## Design Proposal (iteration {iteration})
+{design}
+
+## Review Criteria
+1. **Completeness** — Does it fully address the requirement?
+2. **Correctness** — Any logical or architectural issues?
+3. **Testability** — Can this design be tested effectively?
+4. **Edge cases** — Are boundary conditions considered?
+5. **Risks** — Any concerns about maintainability, performance, security?
+
+## Required Output Format
+Output ONLY a JSON object:
+
+```json
+{{
+  "verdict": "lgtm" or "changes_requested",
+  "issues": ["issue 1", "issue 2"],
+  "summary": "Brief overall assessment"
+}}
+```
+"""
+
 QA_DESIGN_REVIEW = """You are a QA engineer reviewing a technical design proposal.
 
 {context}
@@ -444,6 +503,50 @@ Output ONLY a JSON object:
   "summary": "Brief overall assessment"
 }}
 ```
+"""
+
+TEST_PLAN_REVIEW = """Review the following test plan.
+
+{context}
+
+## Test Plan (iteration {iteration})
+{test_plan}
+
+## Review Criteria
+1. **Coverage** — Does the plan cover all relevant features and scenarios?
+2. **Correctness** — Are expected results accurate based on the design?
+3. **Feasibility** — Can all tests actually be executed?
+4. **Missing cases** — Any important scenarios not covered?
+5. **Priority** — Are priorities reasonable?
+
+## Required Output Format
+Output ONLY a JSON object:
+
+```json
+{{
+  "verdict": "lgtm" or "changes_requested",
+  "issues": ["issue 1", "issue 2"],
+  "summary": "Brief overall assessment"
+}}
+```
+"""
+
+QA_DESIGN_TEST_PLAN = """You are a QA engineer. Based on the prior discussion, produce a formal test plan
+and test design.
+
+## Requirement
+{requirement}
+
+## Your Deliverable
+Produce a comprehensive test plan including:
+1. Test scope and objectives
+2. Test strategy
+3. Test cases with expected results
+4. Edge cases and negative scenarios
+5. Test data requirements
+6. Acceptance criteria
+
+Be thorough — this plan will be reviewed by the architect and development teams.
 """
 
 QA_ADDRESS_TEST_PLAN_COMMENTS = """Address the following review comments on your test plan.

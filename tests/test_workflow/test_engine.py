@@ -392,6 +392,9 @@ class TestReviewArtifactType:
     def test_design_maps_to_design_doc(self, engine):
         assert engine._review_artifact_type("design") == "design_doc"
 
+    def test_arch_design_maps_to_design_doc(self, engine):
+        assert engine._review_artifact_type("arch_design") == "design_doc"
+
     def test_test_plan_maps_to_test_plan(self, engine):
         assert engine._review_artifact_type("test_plan") == "test_plan"
 
@@ -644,6 +647,71 @@ class TestBuildPrompts:
         )
         assert "3" in result
 
+    def test_build_review_prompt_arch_design_uses_neutral_prompt(self, engine):
+        reviewer = MagicMock()
+        reviewer.agent_role = "developer"
+        result = engine._build_review_prompt(
+            artifact_type="arch_design",
+            context="Context",
+            artifact="Architecture proposal",
+            iteration=1,
+            reviewer=reviewer,
+        )
+        assert "Review the following technical design proposal." in result
+        assert "Architecture proposal" in result
+        assert "You are a QA engineer" not in result
+
+    def test_build_review_prompt_test_plan_with_architect_reviewer_uses_neutral_prompt(self, engine):
+        reviewer = MagicMock()
+        reviewer.agent_role = "architect"
+        result = engine._build_review_prompt(
+            artifact_type="test_plan",
+            context="Context",
+            artifact="Plan content",
+            iteration=2,
+            reviewer=reviewer,
+        )
+        assert "Review the following test plan." in result
+        assert "Plan content" in result
+        assert "You are a senior developer reviewing a QA test plan." not in result
+
+
+    def test_build_review_prompt_test_plan_with_non_architect_reviewer_keeps_legacy_prompt(self, engine):
+        reviewer = MagicMock()
+        reviewer.agent_role = "developer"
+        result = engine._build_review_prompt(
+            artifact_type="test_plan",
+            context="Context",
+            artifact="Plan content",
+            iteration=2,
+            reviewer=reviewer,
+        )
+        assert "You are a senior developer reviewing a QA test plan." in result
+        assert "Review the following test plan." not in result
+
+    def test_build_review_prompt_test_plan_without_reviewer_keeps_legacy_prompt(self, engine):
+        result = engine._build_review_prompt(
+            artifact_type="test_plan",
+            context="Context",
+            artifact="Plan content",
+            iteration=2,
+            reviewer=None,
+        )
+        assert "You are a senior developer reviewing a QA test plan." in result
+        assert "Review the following test plan." not in result
+
+    def test_build_review_prompt_test_plan_with_non_string_reviewer_role_keeps_legacy_prompt(self, engine):
+        reviewer = MagicMock()
+        result = engine._build_review_prompt(
+            artifact_type="test_plan",
+            context="Context",
+            artifact="Plan content",
+            iteration=2,
+            reviewer=reviewer,
+        )
+        assert "You are a senior developer reviewing a QA test plan." in result
+        assert "Review the following test plan." not in result
+
     def test_build_address_prompt_returns_string(self, engine):
         result = engine._build_address_prompt(
             artifact_type="code",
@@ -670,3 +738,16 @@ class TestBuildPrompts:
             feedback="Implement the methods",
         )
         assert artifact in result
+
+
+    def test_build_address_prompt_arch_design_uses_arch_prompt(self, engine):
+        artifact = "Architect design doc"
+        feedback = "Clarify the trade-offs"
+        result = engine._build_address_prompt(
+            artifact_type="arch_design",
+            artifact=artifact,
+            feedback=feedback,
+        )
+        assert artifact in result
+        assert feedback in result
+        assert "technical design" in result

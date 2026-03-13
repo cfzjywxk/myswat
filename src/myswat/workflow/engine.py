@@ -36,6 +36,8 @@ from rich.panel import Panel
 from myswat.cli.progress import _collapse_text
 from myswat.models.work_item import ReviewVerdict
 from myswat.workflow.prompts import (
+    ARCH_ADDRESS_DESIGN_COMMENTS,
+    DESIGN_REVIEW,
     DEV_ADDRESS_CODE_COMMENTS,
     DEV_ADDRESS_DESIGN_COMMENTS,
     DEV_ADDRESS_PLAN_COMMENTS,
@@ -47,6 +49,7 @@ from myswat.workflow.prompts import (
     DEV_IMPLEMENTATION_PLAN,
     DEV_REVIEW_TEST_PLAN,
     DEV_SUMMARIZE_BUG_FIX,
+    TEST_PLAN_REVIEW,
     DEV_SUMMARIZE_PHASE,
     DEV_TECH_DESIGN,
     QA_ADDRESS_TEST_PLAN_COMMENTS,
@@ -1318,7 +1321,13 @@ class WorkflowEngine:
                     updated_by_agent_id=prop.agent_id,
                 )
 
-                prompt = self._build_review_prompt(artifact_type, context, current, iteration)
+                prompt = self._build_review_prompt(
+                    artifact_type,
+                    context,
+                    current,
+                    iteration,
+                    reviewer=reviewer,
+                )
                 response = reviewer.send(prompt, task_description=f"Review {artifact_type} (iter {iteration})")
 
                 if not response.success:
@@ -1481,7 +1490,7 @@ class WorkflowEngine:
         return current, self._max_review, False
 
     def _review_artifact_type(self, artifact_type: str) -> str:
-        if artifact_type == "design":
+        if artifact_type in {"design", "arch_design"}:
             return "design_doc"
         if artifact_type == "test_plan":
             return "test_plan"
@@ -1490,28 +1499,40 @@ class WorkflowEngine:
         return "proposal"
 
     def _build_review_prompt(
-        self, artifact_type: str, context: str, artifact: str, iteration: int,
+        self,
+        artifact_type: str,
+        context: str,
+        artifact: str,
+        iteration: int,
+        reviewer: "SessionManager | None" = None,
     ) -> str:
+        reviewer_role = getattr(reviewer, "agent_role", None)
+        if not isinstance(reviewer_role, str):
+            reviewer_role = None
+        if artifact_type == "arch_design":
+            return DESIGN_REVIEW.format(context=context, design=artifact[:12000], iteration=iteration)
         if artifact_type == "design":
             return QA_DESIGN_REVIEW.format(context=context, design=artifact[:12000], iteration=iteration)
-        elif artifact_type == "plan":
+        if artifact_type == "plan":
             return QA_PLAN_REVIEW.format(context=context, plan=artifact[:12000], iteration=iteration)
-        elif artifact_type == "test_plan":
+        if artifact_type == "test_plan" and reviewer_role == "architect":
+            return TEST_PLAN_REVIEW.format(context=context, test_plan=artifact[:12000], iteration=iteration)
+        if artifact_type == "test_plan":
             return DEV_REVIEW_TEST_PLAN.format(context=context, test_plan=artifact[:12000], iteration=iteration)
-        else:
-            return QA_CODE_REVIEW.format(context=context, summary=artifact[:12000], iteration=iteration)
+        return QA_CODE_REVIEW.format(context=context, summary=artifact[:12000], iteration=iteration)
 
     def _build_address_prompt(
         self, artifact_type: str, artifact: str, feedback: str,
     ) -> str:
+        if artifact_type == "arch_design":
+            return ARCH_ADDRESS_DESIGN_COMMENTS.format(design=artifact[:8000], feedback=feedback)
         if artifact_type == "design":
             return DEV_ADDRESS_DESIGN_COMMENTS.format(design=artifact[:8000], feedback=feedback)
-        elif artifact_type == "plan":
+        if artifact_type == "plan":
             return DEV_ADDRESS_PLAN_COMMENTS.format(plan=artifact[:8000], feedback=feedback)
-        elif artifact_type == "test_plan":
+        if artifact_type == "test_plan":
             return QA_ADDRESS_TEST_PLAN_COMMENTS.format(test_plan=artifact[:8000], feedback=feedback)
-        else:
-            return DEV_ADDRESS_CODE_COMMENTS.format(summary=artifact[:8000], feedback=feedback)
+        return DEV_ADDRESS_CODE_COMMENTS.format(summary=artifact[:8000], feedback=feedback)
 
     # ════════════════════════════════════════════════════════════════
     # User checkpoints

@@ -1274,6 +1274,22 @@ class TestRunReviewLoopEdgeCases:
         # dev was used as reviewer
         dev.send.assert_called_once()
 
+    def test_review_loop_passes_reviewer_to_prompt_builder(self):
+        engine, dev, qas = _make_engine(qa_count=1, max_review=1)
+        qas[0].send.return_value = _ok(_lgtm_json())
+        with patch.object(engine, "_build_review_prompt", return_value="prompt") as mock_prompt:
+            result, iters, passed = engine._run_review_loop(
+                artifact="artifact",
+                artifact_type="arch_design",
+                context="ctx",
+                proposer=dev,
+                reviewers=[qas[0]],
+            )
+        assert passed is True
+        assert result == "artifact"
+        mock_prompt.assert_called_once()
+        assert mock_prompt.call_args.kwargs["reviewer"] is qas[0]
+
 
 # ===================================================================
 # 10. _build_address_prompt  (lines 861, 863)
