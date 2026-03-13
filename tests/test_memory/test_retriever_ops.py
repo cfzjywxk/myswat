@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from myswat.memory.retriever import MemoryRetriever, KNOWLEDGE_SUFFICIENCY_THRESHOLD
+from myswat.memory.retriever import MemoryRetriever
 from myswat.models.session import SessionTurn
 
 
@@ -34,6 +34,7 @@ def mock_store():
     store.get_work_item_state.return_value = {}
     store.list_work_items.return_value = []
     store.get_recent_artifacts_for_project.return_value = []
+    store.get_recent_turns_by_project.return_value = []
     store.get_recent_history_for_agent.return_value = []
     return store
 
@@ -124,6 +125,7 @@ class TestBuildContextForAgent:
         )
         assert "MySwat Project Access" in result
         assert "./myswat status -p proj" in result
+        assert "./myswat history -p proj --turns 50" in result
         assert "/status" in result
 
     def test_includes_current_session_turns(self, retriever, mock_store):
@@ -194,31 +196,41 @@ class TestBuildContextForAgent:
         result = retriever.build_context_for_agent(project_id=1, agent_id=1)
         assert "flow: architect -> developer" in result
 
-    def test_includes_raw_history_when_insufficient(self, retriever, mock_store):
-        # Fewer than threshold knowledge results
+    def test_includes_recent_project_turns(self, retriever, mock_store):
         mock_store.search_knowledge.return_value = [
             {"title": f"K{i}", "content": f"c{i}", "category": "k"}
-            for i in range(KNOWLEDGE_SUFFICIENCY_THRESHOLD - 1)
+            for i in range(2)
         ]
-        mock_store.get_recent_history_for_agent.return_value = [
+        mock_store.get_recent_turns_by_project.return_value = [
             {
-                "purpose": "Previous work",
+                "agent_role": "developer",
                 "turns": [{"role": "assistant", "content": "I fixed the tests"}],
             },
         ]
         result = retriever.build_context_for_agent(
             project_id=1, agent_id=1, task_description="continue",
         )
-        mock_store.get_recent_history_for_agent.assert_called_once()
+        assert "Recent Project Conversation" in result
+        assert "I fixed the tests" in result
+        mock_store.get_recent_turns_by_project.assert_called_once()
+        mock_store.get_recent_history_for_agent.assert_not_called()
 
-    def test_skips_raw_history_when_sufficient(self, retriever, mock_store):
+    def test_still_includes_recent_turns_when_knowledge_sufficient(self, retriever, mock_store):
         mock_store.search_knowledge.return_value = [
             {"title": f"K{i}", "content": f"c{i}", "category": "k"}
-            for i in range(KNOWLEDGE_SUFFICIENCY_THRESHOLD)
+            for i in range(3)
+        ]
+        mock_store.get_recent_turns_by_project.return_value = [
+            {
+                "agent_role": "architect",
+                "turns": [{"role": "user", "content": "keep this context"}],
+            },
         ]
         result = retriever.build_context_for_agent(
             project_id=1, agent_id=1, task_description="do something",
         )
+        assert "keep this context" in result
+        mock_store.get_recent_turns_by_project.assert_called_once()
         mock_store.get_recent_history_for_agent.assert_not_called()
 
     def test_empty_context(self, retriever, mock_store):
@@ -232,7 +244,7 @@ class TestBuildContextForAgent:
 
 class TestBuildCurrentSessionContext:
 
-    def test_filters_by_watermark(self, retriever, mock_store):
+    def test_ignores_watermark_and_includes_all_present_turns(self, retriever, mock_store):
         mock_store.get_session.return_value = {"compacted_through_turn_index": 1}
         mock_store.get_session_turns.return_value = [
             _make_turn(0, role="user", content="old message"),
@@ -242,7 +254,7 @@ class TestBuildCurrentSessionContext:
         ]
         result = retriever._build_current_session_context(1, budget_tokens=5000)
         assert "new message" in result
-        assert "old message" not in result
+        assert "old message" in result
 
     def test_truncates_long_content(self, retriever, mock_store):
         mock_store.get_session.return_value = {"compacted_through_turn_index": -1}
@@ -276,29 +288,30 @@ class TestBuildCurrentSessionContext:
 
 
 # ===================================================================
-# 4. _build_history_context
+# 4. _build_cross_role_history
 # ===================================================================
 
-class TestBuildHistoryContext:
+class TestBuildCrossRoleHistory:
 
-    def test_formats_sessions(self, retriever):
+    def test_formats_role_groups(self, retriever):
         history = [
             {
-                "purpose": "Worked on auth",
+                "agent_role": "developer",
                 "turns": [
                     {"role": "user", "content": "Add login endpoint"},
                     {"role": "assistant", "content": "Done, added /login"},
                 ],
             },
         ]
-        result = retriever._build_history_context(history, budget_tokens=5000)
+        result = retriever._build_cross_role_history(history, budget_tokens=5000)
+        assert "### [developer] Recent Turns" in result
         assert "Add login endpoint" in result
         assert "Done, added /login" in result
 
-    def test_respects_budget(self, retriever):
+    def test_respects_budget_by_omitting_earlier_turns(self, retriever):
         history = [
             {
-                "purpose": f"Session {i}",
+                "agent_role": f"role_{i}",
                 "turns": [
                     {"role": "user", "content": f"Q{i} " + "x" * 500},
                     {"role": "assistant", "content": f"A{i} " + "y" * 500},
@@ -306,12 +319,12 @@ class TestBuildHistoryContext:
             }
             for i in range(20)
         ]
-        result = retriever._build_history_context(history, budget_tokens=100)
+        result = retriever._build_cross_role_history(history, budget_tokens=100)
         # Should not include all 20 sessions' full content (would be ~20k chars)
         assert len(result) < 5000
 
     def test_empty_history(self, retriever):
-        result = retriever._build_history_context([], budget_tokens=5000)
+        result = retriever._build_cross_role_history([], budget_tokens=5000)
         assert result == ""
 
 

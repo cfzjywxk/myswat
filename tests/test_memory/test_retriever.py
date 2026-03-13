@@ -8,40 +8,46 @@ from myswat.memory.retriever import MemoryRetriever
 def _make_store_mock(knowledge_results=None, history=None, artifacts=None, work_items=None):
     store = MagicMock()
     store.search_knowledge.return_value = knowledge_results or []
-    store.get_recent_history_for_agent.return_value = history or []
+    store.get_recent_turns_by_project.return_value = history or []
+    store.get_recent_history_for_agent.return_value = []
     store.get_recent_artifacts_for_project.return_value = artifacts or []
     store.list_work_items.return_value = work_items or []
     store.list_knowledge.return_value = []  # no project_ops by default
+    store.get_session_turns.return_value = []
     return store
 
 
 class TestKnowledgeFirstRetriever:
-    def test_no_raw_turns_when_knowledge_sufficient(self):
-        """When knowledge has >= 3 results, raw turns should NOT be loaded."""
+    def test_recent_turns_loaded_when_knowledge_sufficient(self):
+        """Recent cross-role turns should load even when knowledge is sufficient."""
         knowledge = [
             {"category": "decision", "title": f"Item {i}", "content": f"Content {i}"}
             for i in range(5)
         ]
-        store = _make_store_mock(knowledge_results=knowledge)
+        recent_turns = [{
+            "agent_role": "developer",
+            "turns": [{"role": "assistant", "content": "recent dev update"}],
+        }]
+        store = _make_store_mock(knowledge_results=knowledge, history=recent_turns)
         retriever = MemoryRetriever(store)
 
         context = retriever.build_context_for_agent(
             project_id=1, agent_id=1, task_description="test task",
         )
 
-        # Knowledge was loaded
         assert "Relevant Knowledge" in context
-        # Raw turns were NOT loaded (get_recent_history_for_agent should not be called)
+        assert "Recent Project Conversation" in context
+        assert "recent dev update" in context
+        store.get_recent_turns_by_project.assert_called_once()
         store.get_recent_history_for_agent.assert_not_called()
 
-    def test_raw_turns_fallback_when_knowledge_sparse(self):
-        """When knowledge has < 3 results, raw turns should be loaded as fallback."""
+    def test_recent_turns_loaded_when_knowledge_sparse(self):
+        """Recent cross-role turns should load even when knowledge is sparse."""
         knowledge = [
             {"category": "decision", "title": "Item 1", "content": "Content 1"}
         ]
         history = [{
-            "session_id": 1,
-            "purpose": "test session",
+            "agent_role": "architect",
             "turns": [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}],
         }]
         store = _make_store_mock(knowledge_results=knowledge, history=history)
@@ -51,8 +57,10 @@ class TestKnowledgeFirstRetriever:
             project_id=1, agent_id=1, task_description="test task",
         )
 
-        assert "Previous Session Context" in context
-        store.get_recent_history_for_agent.assert_called_once()
+        assert "Recent Project Conversation" in context
+        assert "### [architect] Recent Turns" in context
+        store.get_recent_turns_by_project.assert_called_once()
+        store.get_recent_history_for_agent.assert_not_called()
 
     def test_empty_context_when_nothing_available(self):
         store = _make_store_mock()
@@ -63,6 +71,7 @@ class TestKnowledgeFirstRetriever:
         )
 
         assert "MySwat Project Access" in context
+        assert "History Access" in context
 
     def test_artifacts_included_in_context(self):
         artifacts = [{

@@ -7,24 +7,10 @@ from pathlib import Path
 from myswat.cli.progress import _describe_process_event, _preview_text
 from myswat.memory.store import MemoryStore
 
-# Minimum number of knowledge results to consider the knowledge base "trained".
-# Below this, we supplement with raw session history as fallback.
-KNOWLEDGE_SUFFICIENCY_THRESHOLD = 3
-
 
 class MemoryRetriever:
-    """Builds context for an agent by searching its TiDB knowledge base first.
-
-    Priority order:
-    1. Knowledge base (vector search) — PRIMARY, always loaded
-    2. Current session turns — within-session continuity
-    3. Active work items + recent artifacts — lightweight metadata
-    4. Raw session history — FALLBACK, only when knowledge base is thin
-
-    A "trained" agent (one with enough compacted/fed knowledge) gets context
-    entirely from vector-searched knowledge + current conversation. Raw session
-    history is only loaded when the knowledge base has fewer than
-    KNOWLEDGE_SUFFICIENCY_THRESHOLD results — i.e., early in a project's life.
+    """Builds context for an agent from deterministic state, recent raw turns,
+    searched knowledge, and current-session continuity.
     """
 
     def __init__(self, store: MemoryStore) -> None:
@@ -54,8 +40,80 @@ class MemoryRetriever:
             "- `/status` — show active work items and recent process flow\n"
             "- `/task <id>` — show detailed work item state and process log\n"
             "- `/agents` — list roles/models\n"
-            "- `/history [n]` — show recent turns\n"
+            "- `/history [n]` — show recent turns\n\n"
+            "## History Access\n\n"
+            "Recent turns are persisted for this project. You are seeing the 10 most "
+            "recent per role. If you need more context:\n"
+            f"- `{launcher} status -p {slug}` — project overview\n"
+            f"- `{launcher} history -p {slug} --turns 50` — raw recent turns\n"
         )
+
+    def _build_cross_role_history(
+        self, recent_turns: list[dict[str, object]], budget_tokens: int,
+    ) -> str:
+        """Build grouped recent project history across roles."""
+        if not recent_turns:
+            return ""
+
+        role_count = max(len(recent_turns), 1)
+        role_budget = max(budget_tokens // role_count, 1)
+
+        lines = ["## Recent Project Conversation\n"]
+        total_tokens_used = len(lines[0]) // 4
+
+        for role_block in recent_turns:
+            agent_role = str(role_block.get("agent_role") or "unknown")
+            turns = role_block.get("turns")
+            if not isinstance(turns, list) or not turns:
+                continue
+
+            header = f"### [{agent_role}] Recent Turns\n"
+            header_tokens = len(header) // 4
+            if total_tokens_used + header_tokens > budget_tokens:
+                break
+
+            selected: list[str] = []
+            role_tokens_used = header_tokens
+            for turn in reversed(turns):
+                if not isinstance(turn, dict):
+                    continue
+                role_label = "User" if turn.get("role") == "user" else "Agent"
+                content = str(turn.get("content") or "")
+                if len(content) > 500:
+                    content = content[:500] + "... [truncated]"
+                line = f"**{role_label}**: {content}\n"
+                line_tokens = len(line) // 4
+                if role_tokens_used + line_tokens > role_budget and selected:
+                    break
+                if total_tokens_used + role_tokens_used + line_tokens > budget_tokens and selected:
+                    break
+                role_tokens_used += line_tokens
+                selected.append(line)
+
+            if not selected:
+                continue
+
+            selected.reverse()
+            lines.append(header)
+            total_tokens_used += header_tokens
+            omitted = len(turns) - len(selected)
+            if omitted > 0:
+                omitted_line = f"*[{omitted} earlier turns omitted]*\n"
+                omitted_tokens = len(omitted_line) // 4
+                if total_tokens_used + omitted_tokens <= budget_tokens:
+                    lines.append(omitted_line)
+                    total_tokens_used += omitted_tokens
+
+            for line in selected:
+                line_tokens = len(line) // 4
+                if total_tokens_used + line_tokens > budget_tokens:
+                    break
+                lines.append(line)
+                total_tokens_used += line_tokens
+
+        if len(lines) <= 1:
+            return ""
+        return "\n".join(lines)
 
     def _load_project_ops(
         self, project_id: int, repo_path: str | None,
@@ -147,12 +205,12 @@ class MemoryRetriever:
     ) -> str:
         """Build a context string from TiDB-persisted memory.
 
-        Knowledge-first budget:
-        - 50% knowledge entries via vector search (PRIMARY)
-        - 25% current session turns (within-session continuity)
-        -  5% work items + artifacts (lightweight metadata)
-        - 20% raw session history (FALLBACK — only when knowledge < 3 results)
-                if knowledge is sufficient, this 20% is redistributed to knowledge
+        Budget targets:
+        - deterministic project/task context
+        - 25% recent cross-role raw turns
+        - 50% knowledge search results
+        - 25% current session turns
+        -  5% work items + artifacts
         """
         sections: list[str] = []
         project = self._store.get_project(project_id)
@@ -180,7 +238,19 @@ class MemoryRetriever:
                 if task_state:
                     sections.append(task_state)
 
-        # ── 1. Knowledge base search (PRIMARY — vector + keyword) ──
+        # ── 1. Recent project turns (ALWAYS loaded, project-scoped) ──
+        history_budget = int(max_tokens * 0.25)
+        recent_turns = self._store.get_recent_turns_by_project(
+            project_id=project_id,
+            per_role_limit=10,
+            exclude_session_id=current_session_id,
+        )
+        if recent_turns:
+            history_section = self._build_cross_role_history(recent_turns, history_budget)
+            if history_section:
+                sections.append(history_section)
+
+        # ── 2. Knowledge base search (PRIMARY — vector + keyword) ──
         # This is the core: fed documents + compacted session knowledge,
         # searched by semantic similarity (VEC_COSINE_DISTANCE) when the
         # embedder is available, falling back to keyword LIKE matching
@@ -205,12 +275,6 @@ class MemoryRetriever:
                 use_fulltext=False,
             )
 
-        # knowledge_count is the number of SEARCH HITS returned by TiDB,
-        # not how many fit in the budget. This drives the sufficiency
-        # check: if the knowledge base returned >= 3 results for this
-        # query, we consider the agent "trained" and skip raw history.
-        knowledge_count = len(results)
-
         if results:
             knowledge_lines = ["## Relevant Knowledge\n"]
             knowledge_tokens_used = 0
@@ -224,7 +288,7 @@ class MemoryRetriever:
             if len(knowledge_lines) > 1:
                 sections.append("\n".join(knowledge_lines))
 
-        # ── 2. Current session turns (within-session continuity) ──
+        # ── 3. Current session turns (within-session continuity) ──
         if current_session_id is not None:
             current_budget = int(max_tokens * 0.25)
             current_section = self._build_current_session_context(
@@ -233,7 +297,7 @@ class MemoryRetriever:
             if current_section:
                 sections.append(current_section)
 
-        # ── 3. Active work items + recent artifacts (5% combined) ──
+        # ── 4. Active work items + recent artifacts (5% combined) ──
         metadata_budget = int(max_tokens * 0.05)
         metadata_tokens_used = 0
 
@@ -298,24 +362,6 @@ class MemoryRetriever:
             if len(artifact_lines) > 1:
                 sections.append("\n".join(artifact_lines))
 
-        # ── 4. Raw session history (FALLBACK — only when knowledge is thin) ──
-        # Once the knowledge base is sufficiently trained (>= 3 relevant results),
-        # raw session history is redundant — the compacted knowledge already
-        # captures what matters. Only load raw turns when the agent is "new"
-        # and hasn't built up enough knowledge yet.
-        if knowledge_count < KNOWLEDGE_SUFFICIENCY_THRESHOLD:
-            history_budget = int(max_tokens * 0.2)
-            history = self._store.get_recent_history_for_agent(
-                agent_id=agent_id,
-                exclude_session_id=current_session_id,
-                max_turns=20,
-                max_sessions=3,
-            )
-            if history:
-                history_section = self._build_history_context(history, history_budget)
-                if history_section:
-                    sections.append(history_section)
-
         if not sections:
             return ""
 
@@ -324,19 +370,8 @@ class MemoryRetriever:
     def _build_current_session_context(
         self, session_id: int, budget_tokens: int,
     ) -> str:
-        """Load recent UNcompacted turns from the current active session.
-
-        Turns at or below the compaction watermark are excluded — they've been
-        distilled into knowledge entries and would be redundant here.
-        """
-        session = self._store.get_session(session_id)
-        watermark = -1
-        if session:
-            watermark = session.get("compacted_through_turn_index", -1) or -1
-
+        """Load physically present turns from the current active session."""
         turns = self._store.get_session_turns(session_id)
-        # Only include turns after the watermark (uncompacted)
-        turns = [t for t in turns if t.turn_index > watermark]
         if not turns:
             return ""
 
