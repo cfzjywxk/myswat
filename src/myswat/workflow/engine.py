@@ -121,6 +121,8 @@ class WorkflowResult:
     ga_test: GATestResult | None = None
     final_report: str = ""
     success: bool = False
+    blocked: bool = False
+    failure_summary: str = ""
 
 
 # ── Helpers ──
@@ -190,6 +192,9 @@ class WorkflowEngine:
         self._ask = ask_user or _default_ask
         self._auto_approve = auto_approve
         self._should_cancel = should_cancel
+        self._blocked = False
+        self._failure_summary = ""
+        self._blocked_stage = ""
 
     def _persist_task_state(
         self,
@@ -249,11 +254,44 @@ class WorkflowEngine:
         except Exception:
             pass
 
+    def _record_blocked_failure(
+        self,
+        *,
+        stage: str,
+        summary: str,
+        updated_by_agent_id: int | None = None,
+        from_role: str | None = None,
+        to_role: str | None = None,
+        event_type: str = "agent_failure",
+        title: str | None = None,
+    ) -> None:
+        self._blocked = True
+        self._failure_summary = summary[:500]
+        self._blocked_stage = stage[:128]
+        self._persist_task_state(
+            current_stage=stage,
+            latest_summary=summary,
+            next_todos=["Resolve workflow failure and retry"],
+            open_issues=[summary],
+            updated_by_agent_id=updated_by_agent_id,
+        )
+        self._append_process_event(
+            event_type=event_type,
+            title=title or stage.replace("_", " "),
+            summary=summary,
+            from_role=from_role,
+            to_role=to_role,
+            updated_by_agent_id=updated_by_agent_id,
+        )
+
     # ════════════════════════════════════════════════════════════════
     # Main workflow
     # ════════════════════════════════════════════════════════════════
 
     def run(self, requirement: str) -> WorkflowResult:
+        self._blocked = False
+        self._failure_summary = ""
+        self._blocked_stage = ""
         result = WorkflowResult(requirement=requirement)
         if self._cancelled():
             result.final_report = "Workflow cancelled before start."
@@ -272,7 +310,10 @@ class WorkflowEngine:
             to_role=self._dev.agent_role,
             updated_by_agent_id=self._dev.agent_id,
         )
-        return self._dispatch_mode(requirement, result)
+        result = self._dispatch_mode(requirement, result)
+        result.blocked = self._blocked
+        result.failure_summary = self._failure_summary
+        return result
 
     def _dispatch_mode(self, requirement: str, result: WorkflowResult) -> WorkflowResult:
         if self._mode == WorkMode.full:
@@ -595,7 +636,7 @@ class WorkflowEngine:
     # Stage implementations
     # ════════════════════════════════════════════════════════════════
 
-    def _run_design(self, requirement: str) -> str:
+    def _run_design(self, requirement: str, abort_on_failure: bool = False) -> str:
         if self._cancelled():
             return ""
         console.print("[yellow]Dev producing technical design...[/yellow]")
@@ -603,6 +644,16 @@ class WorkflowEngine:
         response = self._dev.send(prompt, task_description=f"Tech design: {requirement[:100]}")
         if not response.success:
             console.print(f"[red]Dev agent failed (exit={response.exit_code})[/red]")
+            if abort_on_failure:
+                self._record_blocked_failure(
+                    stage="design_draft_blocked",
+                    summary=f"[{self._dev.agent_role}] design draft failed (exit={response.exit_code})",
+                    updated_by_agent_id=self._dev.agent_id,
+                    from_role=self._dev.agent_role,
+                    to_role="myswat",
+                    event_type="proposal_failure",
+                    title="Technical design draft failed",
+                )
             return ""
         console.print("[green]Dev submitted design.[/green]")
         self._persist_task_state(
@@ -621,7 +672,7 @@ class WorkflowEngine:
         )
         return response.content
 
-    def _run_planning(self, design: str, requirement: str) -> str:
+    def _run_planning(self, design: str, requirement: str, abort_on_failure: bool = False) -> str:
         if self._cancelled():
             return ""
         console.print("[yellow]Dev creating implementation plan...[/yellow]")
@@ -632,6 +683,16 @@ class WorkflowEngine:
         response = self._dev.send(prompt, task_description="Implementation planning")
         if not response.success:
             console.print(f"[red]Dev agent failed (exit={response.exit_code})[/red]")
+            if abort_on_failure:
+                self._record_blocked_failure(
+                    stage="plan_draft_blocked",
+                    summary=f"[{self._dev.agent_role}] implementation plan failed (exit={response.exit_code})",
+                    updated_by_agent_id=self._dev.agent_id,
+                    from_role=self._dev.agent_role,
+                    to_role="myswat",
+                    event_type="proposal_failure",
+                    title="Implementation plan draft failed",
+                )
             return ""
         console.print("[green]Dev submitted implementation plan.[/green]")
         self._persist_task_state(
@@ -1208,6 +1269,7 @@ class WorkflowEngine:
         context: str = "",
         proposer: "SessionManager | None" = None,
         reviewers: "list[SessionManager] | None" = None,
+        abort_on_agent_failure: bool = False,
     ) -> tuple[str, int, bool]:
         """Run multi-reviewer loop. Returns (final_artifact, iterations, passed).
 
@@ -1261,8 +1323,20 @@ class WorkflowEngine:
 
                 if not response.success:
                     console.print(f"[red]{reviewer.agent_role} failed (exit={response.exit_code})[/red]")
+                    failure_summary = f"[{reviewer.agent_role}] review failed (exit={response.exit_code})"
+                    if abort_on_agent_failure:
+                        self._record_blocked_failure(
+                            stage=f"{artifact_type}_review_blocked",
+                            summary=failure_summary,
+                            updated_by_agent_id=reviewer.agent_id,
+                            from_role=reviewer.agent_role,
+                            to_role=prop.agent_role,
+                            event_type="review_failure",
+                            title=f"{artifact_type} review failed",
+                        )
+                        return current, iteration, False
                     all_lgtm = False
-                    all_issues.append(f"[{reviewer.agent_role}] review failed (exit={response.exit_code})")
+                    all_issues.append(failure_summary)
                     continue
 
                 verdict = _parse_verdict(response.content)
@@ -1362,6 +1436,17 @@ class WorkflowEngine:
 
             if not response.success:
                 console.print(f"[red]{prop.agent_role} failed to address comments.[/red]")
+                if abort_on_agent_failure:
+                    self._record_blocked_failure(
+                        stage=f"{artifact_type}_revision_blocked",
+                        summary=f"[{prop.agent_role}] failed to address {artifact_type} comments (exit={response.exit_code})",
+                        updated_by_agent_id=prop.agent_id,
+                        from_role=prop.agent_role,
+                        to_role="myswat",
+                        event_type="revision_failure",
+                        title=f"{artifact_type} revision failed",
+                    )
+                    return current, iteration, False
                 break
 
             current = response.content

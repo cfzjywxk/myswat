@@ -420,6 +420,18 @@ class TestRunDesign:
         result = engine._run_design("req")
         assert result == ""
 
+    def test_failure_with_abort_records_blocked_state(self):
+        engine, dev, _ = _make_engine(dev_responses=[_fail()])
+        result = engine._run_design("req", abort_on_failure=True)
+        assert result == ""
+        assert engine._blocked is True
+        assert "design draft failed" in engine._failure_summary
+        engine._store.update_work_item_state.assert_called()
+        assert any(
+            call.kwargs.get("event_type") == "proposal_failure"
+            for call in engine._store.append_work_item_process_event.call_args_list
+        )
+
 
 # ===================================================================
 # 4. _run_planning  (lines 306-316)
@@ -436,6 +448,18 @@ class TestRunPlanning:
         engine, dev, _ = _make_engine(dev_responses=[_fail()])
         result = engine._run_planning("design", "req")
         assert result == ""
+
+    def test_failure_with_abort_records_blocked_state(self):
+        engine, dev, _ = _make_engine(dev_responses=[_fail()])
+        result = engine._run_planning("design", "req", abort_on_failure=True)
+        assert result == ""
+        assert engine._blocked is True
+        assert "implementation plan failed" in engine._failure_summary
+        engine._store.update_work_item_state.assert_called()
+        assert any(
+            call.kwargs.get("event_type") == "proposal_failure"
+            for call in engine._store.append_work_item_process_event.call_args_list
+        )
 
 
 # ===================================================================
@@ -1062,6 +1086,29 @@ class TestRunReviewLoopEdgeCases:
         assert iters == 1
         assert passed is False
 
+    def test_reviewer_failure_with_abort_marks_blocked(self):
+        engine, dev, qas = _make_engine(qa_count=2, max_review=3)
+        qas[0].send.return_value = _fail()
+        qas[1].send.return_value = _ok(_lgtm_json())
+        result, iters, passed = engine._run_review_loop(
+            artifact="artifact",
+            artifact_type="code",
+            context="ctx",
+            abort_on_agent_failure=True,
+        )
+        assert result == "artifact"
+        assert iters == 1
+        assert passed is False
+        assert engine._blocked is True
+        assert engine._failure_summary == "[qa-0] review failed (exit=1)"
+        dev.send.assert_not_called()
+        qas[1].send.assert_not_called()
+        engine._store.update_work_item_state.assert_called()
+        assert any(
+            call.kwargs.get("event_type") == "review_failure"
+            for call in engine._store.append_work_item_process_event.call_args_list
+        )
+
     def test_reviewer_verdict_with_summary_no_issues(self):
         """Non-lgtm verdict with summary but no issues uses summary as issue."""
         engine, dev, qas = _make_engine(max_review=2)
@@ -1098,6 +1145,28 @@ class TestRunReviewLoopEdgeCases:
         )
         assert iters == 3  # returns max_review when loop ends early via break
         assert passed is False
+
+    def test_proposer_fails_to_address_with_abort_marks_blocked(self):
+        engine, dev, qas = _make_engine(max_review=3)
+        changes = _changes_json(["issue 1"])
+        qas[0].send.return_value = _ok(changes)
+        dev.send.return_value = _fail()
+        result, iters, passed = engine._run_review_loop(
+            artifact="original",
+            artifact_type="code",
+            context="ctx",
+            abort_on_agent_failure=True,
+        )
+        assert result == "original"
+        assert iters == 1
+        assert passed is False
+        assert engine._blocked is True
+        assert "failed to address code comments" in engine._failure_summary
+        engine._store.update_work_item_state.assert_called()
+        assert any(
+            call.kwargs.get("event_type") == "revision_failure"
+            for call in engine._store.append_work_item_process_event.call_args_list
+        )
 
     def test_max_iterations_unreviewed_artifact_persisted(self):
         """At max iterations, the final unreviewed artifact is persisted."""

@@ -4,7 +4,7 @@ import json
 import pytest
 from unittest.mock import MagicMock, patch
 
-from myswat.workflow.engine import WorkMode, WorkflowEngine, _extract_json_block
+from myswat.workflow.engine import WorkMode, WorkflowEngine, WorkflowResult, _extract_json_block
 
 
 # ---------------------------------------------------------------------------
@@ -579,6 +579,33 @@ class TestWorkflowModeDispatch:
         assert dispatch_result.requirement == "build feature"
         engine._store.update_work_item_state.assert_called_once()
         engine._store.append_work_item_process_event.assert_called_once()
+
+    def test_run_propagates_blocked_state_into_workflow_result(self, engine):
+        expected = WorkflowResult(requirement="build feature")
+
+        def _mark_blocked(requirement, dispatch_result):
+            engine._blocked = True
+            engine._failure_summary = "[qa_main] review failed (exit=1)"
+            return expected
+
+        with patch.object(engine, "_run_full", side_effect=_mark_blocked):
+            result = engine.run("build feature")
+
+        assert result is expected
+        assert result.blocked is True
+        assert result.failure_summary == "[qa_main] review failed (exit=1)"
+
+    def test_run_resets_previous_blocked_state_before_dispatch(self, engine):
+        engine._blocked = True
+        engine._failure_summary = "stale failure"
+        expected = WorkflowResult(requirement="build feature")
+
+        with patch.object(engine, "_run_full", return_value=expected):
+            result = engine.run("build feature")
+
+        assert result is expected
+        assert result.blocked is False
+        assert result.failure_summary == ""
 
 
 # ===================================================================
