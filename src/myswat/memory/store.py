@@ -134,6 +134,13 @@ class MemoryStore:
             "UPDATE sessions SET status = 'compacted' WHERE id = %s", (session_id,),
         )
 
+    def mark_session_fully_compacted(self, session_id: int) -> None:
+        """Mark a session as fully compacted with a GC timestamp."""
+        self._pool.execute(
+            "UPDATE sessions SET status = 'compacted', compacted_at = NOW() WHERE id = %s",
+            (session_id,),
+        )
+
     def reset_session_token_count(self, session_id: int) -> None:
         """Reset token counter after mid-session compaction to avoid re-triggering."""
         self._pool.execute(
@@ -352,6 +359,150 @@ class MemoryStore:
             })
 
         return all_turns
+
+    def get_recent_turns_by_project(
+        self,
+        project_id: int,
+        per_role_limit: int = 10,
+        exclude_session_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch recent raw turns across all project roles, grouped by role."""
+        sql = (
+            "SELECT role, content, created_at, agent_role, turn_id, session_id FROM ("
+            "SELECT st.role, st.content, st.created_at, st.id AS turn_id, st.session_id, "
+            "a.role AS agent_role, "
+            "ROW_NUMBER() OVER ("
+            "PARTITION BY a.role ORDER BY st.created_at DESC, st.id DESC"
+            ") AS rn "
+            "FROM session_turns st "
+            "JOIN sessions s ON st.session_id = s.id "
+            "JOIN agents a ON s.agent_id = a.id "
+            "WHERE a.project_id = %s"
+        )
+        args: list[Any] = [project_id]
+        if exclude_session_id is not None:
+            sql += " AND s.id != %s"
+            args.append(exclude_session_id)
+        sql += (
+            ") ranked "
+            "WHERE rn <= %s "
+            "ORDER BY agent_role, created_at ASC, turn_id ASC"
+        )
+        args.append(per_role_limit)
+
+        rows = self._pool.fetch_all(sql, tuple(args))
+        if not rows:
+            return []
+
+        grouped: list[dict[str, Any]] = []
+        current_role: str | None = None
+        current_group: dict[str, Any] | None = None
+
+        for row in rows:
+            agent_role = row["agent_role"]
+            if agent_role != current_role:
+                current_group = {"agent_role": agent_role, "turns": []}
+                grouped.append(current_group)
+                current_role = agent_role
+
+            assert current_group is not None
+            current_group["turns"].append({
+                "turn_id": row.get("turn_id"),
+                "session_id": row.get("session_id"),
+                "role": row["role"],
+                "content": row["content"],
+                "created_at": row.get("created_at"),
+            })
+
+        return grouped
+
+    def get_recent_turns_global(
+        self,
+        project_id: int,
+        limit: int = 50,
+        role: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch recent raw turns across a project in chronological order."""
+        sql = (
+            "SELECT st.id AS turn_id, st.session_id, st.turn_index, st.role, st.content, "
+            "st.created_at, a.role AS agent_role "
+            "FROM session_turns st "
+            "JOIN sessions s ON st.session_id = s.id "
+            "JOIN agents a ON s.agent_id = a.id "
+            "WHERE a.project_id = %s"
+        )
+        args: list[Any] = [project_id]
+        if role is not None:
+            sql += " AND a.role = %s"
+            args.append(role)
+        sql += " ORDER BY st.created_at DESC, st.id DESC LIMIT %s"
+        args.append(limit)
+
+        rows = self._pool.fetch_all(sql, tuple(args))
+        return list(reversed(rows))
+
+    def gc_compacted_turns(
+        self,
+        project_id: int,
+        grace_days: int = 7,
+        keep_recent: int = 50,
+        dry_run: bool = False,
+    ) -> dict[str, int]:
+        """Delete old raw turns from fully compacted sessions while preserving recent history."""
+        cutoff = self._pool.fetch_one(
+            "SELECT created_at, id FROM ("
+            "SELECT st.created_at, st.id "
+            "FROM session_turns st "
+            "JOIN sessions s ON st.session_id = s.id "
+            "JOIN agents a ON s.agent_id = a.id "
+            "WHERE a.project_id = %s "
+            "ORDER BY st.created_at DESC, st.id DESC "
+            "LIMIT 1 OFFSET %s"
+            ") AS cutoff_row",
+            (project_id, keep_recent - 1),
+        )
+        if not cutoff:
+            return {"turns_deleted": 0, "sessions_affected": 0}
+
+        where_sql = (
+            "FROM session_turns st "
+            "JOIN sessions s ON st.session_id = s.id "
+            "JOIN agents a ON s.agent_id = a.id "
+            "WHERE a.project_id = %s "
+            "AND s.status = 'compacted' "
+            "AND s.compacted_at < NOW() - INTERVAL %s DAY "
+            "AND (st.created_at < %s OR (st.created_at = %s AND st.id < %s))"
+        )
+        where_args = (
+            project_id,
+            grace_days,
+            cutoff["created_at"],
+            cutoff["created_at"],
+            cutoff["id"],
+        )
+
+        counts = self._pool.fetch_one(
+            "SELECT COUNT(*) AS turns_deleted, COUNT(DISTINCT s.id) AS sessions_affected "
+            + where_sql,
+            where_args,
+        )
+        turns_deleted = counts["turns_deleted"] if counts else 0
+        sessions_affected = counts["sessions_affected"] if counts else 0
+
+        if dry_run or turns_deleted == 0:
+            return {
+                "turns_deleted": turns_deleted,
+                "sessions_affected": sessions_affected,
+            }
+
+        self._pool.execute(
+            "DELETE st " + where_sql,
+            where_args,
+        )
+        return {
+            "turns_deleted": turns_deleted,
+            "sessions_affected": sessions_affected,
+        }
 
     def get_recent_artifacts_for_project(
         self, project_id: int, limit: int = 3,
