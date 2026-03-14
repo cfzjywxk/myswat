@@ -26,6 +26,7 @@ class TestBaseFlags:
         assert "--print" in flags
         assert "--output-format" in flags
         assert "stream-json" in flags
+        assert "--verbose" in flags
         assert "--dangerously-skip-permissions" in flags
 
     def test_does_not_duplicate_overrides(self, runner):
@@ -35,6 +36,11 @@ class TestBaseFlags:
         assert flags.count("--output-format") == 1
         assert flags[flags.index("--output-format") + 1] == "json"
         assert "--dangerously-skip-permissions" not in flags
+
+    def test_verbose_not_duplicated_when_in_extra_flags(self, runner):
+        runner.extra_flags = ["--verbose"]
+        flags = runner._base_flags()
+        assert flags.count("--verbose") == 1
 
 
 class TestBuildCommand:

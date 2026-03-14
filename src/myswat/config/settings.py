@@ -45,7 +45,7 @@ class AgentSettings(BaseSettings):
     # on outer sandbox/proxy controls rather than Claude permission prompts.
     # Override this with an explicit Claude permission flag if needed.
     claude_default_flags: list[str] = Field(
-        default=["--print", "--output-format", "stream-json", "--dangerously-skip-permissions"],
+        default=["--print", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"],
     )
 
     model_config = {"env_prefix": "MYSWAT_AGENTS_"}

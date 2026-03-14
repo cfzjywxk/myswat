@@ -1573,6 +1573,8 @@ class WorkflowEngine:
 
                 if not response.success:
                     console.print(f"[red]{reviewer.agent_role} failed (exit={response.exit_code})[/red]")
+                    if response.raw_stderr.strip():
+                        console.print(f"[dim]  stderr: {response.raw_stderr.strip()}[/dim]")
                     failure_summary = f"[{reviewer.agent_role}] review failed (exit={response.exit_code})"
                     if abort_on_agent_failure:
                         self._record_blocked_failure(

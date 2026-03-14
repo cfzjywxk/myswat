@@ -120,6 +120,7 @@ class TestAgentSettings:
             "--print",
             "--output-format",
             "stream-json",
+            "--verbose",
             "--dangerously-skip-permissions",
         ]
         assert settings.claude_default_flags == expected

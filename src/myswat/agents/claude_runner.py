@@ -59,6 +59,9 @@ class ClaudeRunner(AgentRunner):
             flags.append("--print")
         if "--output-format" not in extra:
             flags.extend(["--output-format", "stream-json"])
+        # Claude CLI ≥2.1.75 requires --verbose when using stream-json output.
+        if "--verbose" not in extra:
+            flags.append("--verbose")
         # MySwat runs Claude in non-interactive automation mode. The default
         # is to bypass Claude's permission prompts and rely on the outer
         # sandbox/proxy policy instead. Callers can override this explicitly

@@ -188,7 +188,7 @@ def _backend_path_and_flags(agent_settings, backend: str) -> tuple[str, list[str
             _setting_list(
                 agent_settings,
                 "claude_default_flags",
-                ["--print", "--output-format", "stream-json", "--dangerously-skip-permissions"],
+                ["--print", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"],
             ),
         )
     raise typer.BadParameter(f"Unknown CLI backend: {backend}")
