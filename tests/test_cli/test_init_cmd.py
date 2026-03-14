@@ -13,9 +13,11 @@ from myswat.cli.init_cmd import (
     DEVELOPER_SYSTEM_PROMPT,
     QA_MAIN_SYSTEM_PROMPT,
     QA_VICE_SYSTEM_PROMPT,
+    TEAM_WORKFLOWS_KNOWLEDGE,
     _ensure_flag_value,
     _is_cli_available,
     _seed_default_agents,
+    _seed_team_workflows,
     _slugify,
     run_init,
 )
@@ -175,14 +177,14 @@ class TestSeedDefaultAgents:
         create_calls = store.create_agent.call_args_list
         assert create_calls[0].kwargs["cli_backend"] == "claude"
         assert create_calls[0].kwargs["cli_path"] == "claude"
-        assert "MODE: design" in create_calls[0].kwargs["system_prompt"]
+        assert "delegate" in create_calls[0].kwargs["system_prompt"]
         assert create_calls[1].kwargs["cli_backend"] == "claude"
         assert create_calls[1].kwargs["system_prompt"] == DEVELOPER_SYSTEM_PROMPT
         assert create_calls[2].kwargs["cli_backend"] == "kimi"
         assert "--effort" not in create_calls[2].kwargs["cli_extra_args"]
-        assert "MODE: testplan" in create_calls[2].kwargs["system_prompt"]
+        assert "testplan" in create_calls[2].kwargs["system_prompt"]
         assert create_calls[3].kwargs["cli_backend"] == "codex"
-        assert "MODE: testplan" in create_calls[3].kwargs["system_prompt"]
+        assert "testplan" in create_calls[3].kwargs["system_prompt"]
 
     @patch("myswat.cli.init_cmd._is_cli_available", return_value=False)
     def test_default_qamain_claude_unavailable_aborts_before_creating_agents(self, mock_available):
@@ -230,9 +232,74 @@ class TestSeedDefaultAgents:
 
 
 # ---------------------------------------------------------------------------
+# _seed_team_workflows
+# ---------------------------------------------------------------------------
+class TestSeedTeamWorkflows:
+    def test_stores_knowledge_when_none_exists(self):
+        store = MagicMock()
+        store.list_knowledge.return_value = []
+
+        _seed_team_workflows(store, 1)
+
+        store.store_knowledge.assert_called_once()
+        kwargs = store.store_knowledge.call_args.kwargs
+        assert kwargs["category"] == "project_ops"
+        assert kwargs["title"] == "Team Workflows"
+        assert kwargs["content"] == TEAM_WORKFLOWS_KNOWLEDGE
+        assert "workflow" in kwargs["tags"]
+
+    def test_skips_when_content_unchanged(self):
+        store = MagicMock()
+        store.list_knowledge.return_value = [
+            {"id": 99, "title": "Team Workflows", "content": TEAM_WORKFLOWS_KNOWLEDGE},
+        ]
+
+        _seed_team_workflows(store, 1)
+
+        store.store_knowledge.assert_not_called()
+
+    def test_replaces_when_content_changed(self):
+        store = MagicMock()
+        store.list_knowledge.return_value = [
+            {"id": 99, "title": "Team Workflows", "content": "old content"},
+        ]
+
+        _seed_team_workflows(store, 1)
+
+        store.delete_knowledge.assert_called_once_with(99)  # DELETE old
+        store.store_knowledge.assert_called_once()  # INSERT new
+
+
+# ---------------------------------------------------------------------------
+# TEAM_WORKFLOWS_KNOWLEDGE content
+# ---------------------------------------------------------------------------
+class TestTeamWorkflowsKnowledge:
+    """Verify the knowledge content covers all supported delegation modes."""
+
+    def test_documents_all_modes(self):
+        for mode in ("full", "design", "code", "testplan"):
+            assert f"MODE: {mode}" in TEAM_WORKFLOWS_KNOWLEDGE
+
+    def test_documents_delegation_format(self):
+        assert "```delegate" in TEAM_WORKFLOWS_KNOWLEDGE
+
+    def test_documents_role_permissions(self):
+        assert "architect" in TEAM_WORKFLOWS_KNOWLEDGE
+        assert "qa_main" in TEAM_WORKFLOWS_KNOWLEDGE or "QA roles" in TEAM_WORKFLOWS_KNOWLEDGE
+
+    def test_includes_decision_guide(self):
+        assert "Decision Guide" in TEAM_WORKFLOWS_KNOWLEDGE
+
+    def test_includes_usage_examples(self):
+        # Each mode section should have "Use when:" with example phrases
+        assert TEAM_WORKFLOWS_KNOWLEDGE.count("Use when:") >= 4
+
+
+# ---------------------------------------------------------------------------
 # run_init
 # ---------------------------------------------------------------------------
 class TestRunInit:
+    @patch("myswat.cli.init_cmd._seed_team_workflows")
     @patch("myswat.cli.init_cmd._seed_default_agents")
     @patch("myswat.cli.init_cmd.MySwatSettings")
     @patch("myswat.cli.init_cmd.TiDBPool")
@@ -240,7 +307,7 @@ class TestRunInit:
     @patch("myswat.cli.init_cmd.MemoryStore")
     def test_health_check_failure(self, mock_store_cls, mock_mig,
                                    mock_pool_cls, mock_settings_cls,
-                                   mock_seed):
+                                   mock_seed, mock_seed_wf):
         pool = MagicMock()
         pool.health_check.return_value = False
         mock_pool_cls.return_value = pool
@@ -248,13 +315,15 @@ class TestRunInit:
         with pytest.raises(ClickExit):
             run_init("My Project", None, None)
 
+    @patch("myswat.cli.init_cmd._seed_team_workflows")
     @patch("myswat.cli.init_cmd._seed_default_agents")
     @patch("myswat.cli.init_cmd.MySwatSettings")
     @patch("myswat.cli.init_cmd.TiDBPool")
     @patch("myswat.cli.init_cmd.run_migrations")
     @patch("myswat.cli.init_cmd.MemoryStore")
     def test_new_project(self, mock_store_cls, mock_mig,
-                          mock_pool_cls, mock_settings_cls, mock_seed):
+                          mock_pool_cls, mock_settings_cls, mock_seed,
+                          mock_seed_wf):
         pool = MagicMock()
         pool.health_check.return_value = True
         mock_pool_cls.return_value = pool
@@ -271,14 +340,17 @@ class TestRunInit:
             description="Test desc", repo_path="/tmp/repo",
         )
         mock_seed.assert_called_once()
+        mock_seed_wf.assert_called_once()
 
+    @patch("myswat.cli.init_cmd._seed_team_workflows")
     @patch("myswat.cli.init_cmd._seed_default_agents")
     @patch("myswat.cli.init_cmd.MySwatSettings")
     @patch("myswat.cli.init_cmd.TiDBPool")
     @patch("myswat.cli.init_cmd.run_migrations")
     @patch("myswat.cli.init_cmd.MemoryStore")
     def test_existing_project(self, mock_store_cls, mock_mig,
-                               mock_pool_cls, mock_settings_cls, mock_seed):
+                               mock_pool_cls, mock_settings_cls, mock_seed,
+                               mock_seed_wf):
         pool = MagicMock()
         pool.health_check.return_value = True
         mock_pool_cls.return_value = pool
@@ -291,14 +363,17 @@ class TestRunInit:
         run_init("My Project", None, None)
         mock_store.create_project.assert_not_called()
         mock_seed.assert_called_once()
+        mock_seed_wf.assert_called_once()
 
+    @patch("myswat.cli.init_cmd._seed_team_workflows")
     @patch("myswat.cli.init_cmd._seed_default_agents")
     @patch("myswat.cli.init_cmd.MySwatSettings")
     @patch("myswat.cli.init_cmd.TiDBPool")
     @patch("myswat.cli.init_cmd.run_migrations")
     @patch("myswat.cli.init_cmd.MemoryStore")
     def test_migrations_applied(self, mock_store_cls, mock_mig,
-                                 mock_pool_cls, mock_settings_cls, mock_seed):
+                                 mock_pool_cls, mock_settings_cls, mock_seed,
+                                 mock_seed_wf):
         pool = MagicMock()
         pool.health_check.return_value = True
         mock_pool_cls.return_value = pool
@@ -312,6 +387,7 @@ class TestRunInit:
         run_init("Test", None, None)
         mock_mig.assert_called_once()
 
+    @patch("myswat.cli.init_cmd._seed_team_workflows")
     @patch("myswat.cli.init_cmd._seed_default_agents")
     @patch("myswat.cli.init_cmd.MySwatSettings")
     @patch("myswat.cli.init_cmd.TiDBPool")
@@ -319,7 +395,7 @@ class TestRunInit:
     @patch("myswat.cli.init_cmd.MemoryStore")
     def test_no_migrations_needed(self, mock_store_cls, mock_mig,
                                    mock_pool_cls, mock_settings_cls,
-                                   mock_seed):
+                                   mock_seed, mock_seed_wf):
         pool = MagicMock()
         pool.health_check.return_value = True
         mock_pool_cls.return_value = pool

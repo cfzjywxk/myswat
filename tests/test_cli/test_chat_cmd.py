@@ -1386,6 +1386,71 @@ class TestRunChat:
         mock_testplan_review.assert_called_once()
         assert mock_testplan_review.call_args.args[2] is sm
 
+    @patch("myswat.cli.chat_cmd._run_full_workflow_interactive")
+    @patch("myswat.cli.chat_cmd._run_inline_review_interactive")
+    @patch("myswat.cli.chat_cmd._send_with_timer")
+    @patch("myswat.cli.chat_cmd.PromptSession")
+    @patch("myswat.cli.chat_cmd.preload_model")
+    @patch("myswat.cli.chat_cmd.MySwatSettings")
+    @patch("myswat.cli.chat_cmd.TiDBPool")
+    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.MemoryStore")
+    @patch("myswat.cli.chat_cmd.SessionManager")
+    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
+    @patch("myswat.cli.learn_cmd.ensure_learned")
+    def test_architect_full_delegation_starts_full_workflow(
+        self,
+        mock_learn,
+        mock_comp,
+        mock_sm_cls,
+        mock_store_cls,
+        mock_mig,
+        mock_pool_cls,
+        mock_settings_cls,
+        mock_preload,
+        mock_prompt_session_cls,
+        mock_send_timer,
+        mock_review,
+        mock_full_workflow,
+    ):
+        from myswat.cli.chat_cmd import run_chat
+
+        settings = self._setup_mocks()
+        mock_settings_cls.return_value = settings
+
+        architect_row = _agent_row("architect")
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = _proj()
+        mock_store.get_agent.return_value = architect_row
+        mock_store.list_agents.return_value = [architect_row]
+        mock_store_cls.return_value = mock_store
+
+        sm = MagicMock()
+        sm.session = SimpleNamespace(session_uuid="uuid-1234")
+        sm.agent_id = 9
+        mock_sm_cls.return_value = sm
+
+        mock_send_timer.return_value = (
+            AgentResponse(
+                content="Sure\n```delegate\nMODE: full\nTASK: design and implement the auth module\n```",
+                exit_code=0,
+            ),
+            2.0,
+        )
+
+        prompt_session = MagicMock()
+        prompt_session.prompt.side_effect = ["finish the design and implementation", "/quit"]
+        mock_prompt_session_cls.return_value = prompt_session
+
+        run_chat("proj", role="architect")
+
+        mock_review.assert_not_called()
+        mock_full_workflow.assert_called_once()
+        # The proposer_sm (3rd positional arg) should be the architect session
+        assert mock_full_workflow.call_args.args[2] is sm
+        # The requirement (7th positional arg) should be the task
+        assert mock_full_workflow.call_args.args[6] == "design and implement the auth module"
+
     @patch("myswat.cli.chat_cmd.console.print")
     @patch("myswat.cli.chat_cmd._run_inline_review_interactive")
     @patch("myswat.cli.chat_cmd._send_with_timer")

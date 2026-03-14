@@ -884,3 +884,95 @@ class TestBuildPrompts:
         assert artifact in result
         assert feedback in result
         assert "technical design" in result
+
+
+# ===================================================================
+# 8. _run_full with architect-led design
+# ===================================================================
+
+class TestRunFullArchitectLed:
+    """Tests for _run_full using architect for design stages when arch_sm is provided."""
+
+    def test_full_mode_with_arch_uses_architect_for_startup(
+        self, mock_store, mock_dev_sm, mock_qa_sms, mock_arch_sm,
+    ):
+        """When arch_sm is provided in full mode, startup owner should be architect."""
+        engine = WorkflowEngine(
+            store=mock_store,
+            dev_sm=mock_dev_sm,
+            qa_sms=mock_qa_sms,
+            arch_sm=mock_arch_sm,
+            project_id="proj-full-arch",
+            work_item_id="wi-full-arch",
+            mode=WorkMode.full,
+        )
+        expected = MagicMock()
+
+        with patch.object(engine, "_run_full", return_value=expected):
+            result = engine.run("build feature")
+
+        assert result is expected
+        # Verify startup persisted with architect as owner
+        mock_store.update_work_item_state.assert_called_once_with(
+            "wi-full-arch",
+            current_stage="workflow_started",
+            latest_summary="build feature",
+            next_todos=["Architect produce design, then full workflow"],
+            open_issues=None,
+            last_artifact_id=None,
+            updated_by_agent_id=mock_arch_sm.agent_id,
+        )
+        mock_store.append_work_item_process_event.assert_called_once_with(
+            "wi-full-arch",
+            event_type="task_request",
+            title="Workflow requirement",
+            summary="build feature",
+            from_role="user",
+            to_role="architect",
+            updated_by_agent_id=mock_arch_sm.agent_id,
+        )
+
+    def test_full_mode_without_arch_uses_dev_for_startup(
+        self, mock_store, mock_dev_sm, mock_qa_sms,
+    ):
+        """Without arch_sm in full mode, startup owner should be dev (existing behavior)."""
+        mock_dev_sm.agent_id = 10
+        mock_dev_sm.agent_role = "developer"
+        engine = WorkflowEngine(
+            store=mock_store,
+            dev_sm=mock_dev_sm,
+            qa_sms=mock_qa_sms,
+            project_id="proj-full-dev",
+            work_item_id="wi-full-dev",
+            mode=WorkMode.full,
+        )
+        expected = MagicMock()
+
+        with patch.object(engine, "_run_full", return_value=expected):
+            result = engine.run("build feature")
+
+        assert result is expected
+        mock_store.update_work_item_state.assert_called_once_with(
+            "wi-full-dev",
+            current_stage="workflow_started",
+            latest_summary="build feature",
+            next_todos=["Produce technical design"],
+            open_issues=None,
+            last_artifact_id=None,
+            updated_by_agent_id=10,
+        )
+
+    def test_full_mode_arch_sm_allowed_without_validation_error(
+        self, mock_store, mock_dev_sm, mock_qa_sms, mock_arch_sm,
+    ):
+        """Full mode should accept arch_sm without raising ValueError."""
+        engine = WorkflowEngine(
+            store=mock_store,
+            dev_sm=mock_dev_sm,
+            qa_sms=mock_qa_sms,
+            arch_sm=mock_arch_sm,
+            project_id="proj-1",
+            mode=WorkMode.full,
+        )
+        assert engine._arch is mock_arch_sm
+        assert engine._mode == WorkMode.full

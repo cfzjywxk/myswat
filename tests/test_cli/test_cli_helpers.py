@@ -116,6 +116,16 @@ class TestExtractDelegation:
         result = _extract_delegation(text)
         assert result == ("add login endpoint", "code")
 
+    def test_mode_full_is_parsed(self):
+        text = "```delegate\nMODE: full\nTASK: design and implement the auth module\n```"
+        result = _extract_delegation(text)
+        assert result == ("design and implement the auth module", "full")
+
+    def test_mode_full_case_insensitive(self):
+        text = "```delegate\nMODE: Full\nTASK: build out the feature\n```"
+        result = _extract_delegation(text)
+        assert result == ("build out the feature", "full")
+
     def test_delegate_block_fallback_whole_content(self):
         text = "```delegate\nno task prefix here\njust raw instructions\n```"
         result = _extract_delegation(text)

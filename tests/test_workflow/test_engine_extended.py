@@ -456,6 +456,145 @@ class TestRunArchitectDesignMode:
         assert result.final_report == "Architect-design workflow cancelled during design review."
 
 
+class TestRunFullArchitectLed:
+    """Tests for _run_full when arch_sm is provided (architect-led design stages)."""
+
+    @patch.object(WorkflowEngine, "_generate_report", return_value="# Full Report")
+    @patch.object(WorkflowEngine, "_run_ga_test_phase")
+    @patch.object(WorkflowEngine, "_run_phase")
+    @patch.object(WorkflowEngine, "_parse_phases", return_value=["phase-A"])
+    @patch.object(WorkflowEngine, "_user_checkpoint")
+    @patch.object(WorkflowEngine, "_run_review_loop")
+    @patch.object(WorkflowEngine, "_run_planning", return_value="the plan")
+    def test_happy_path_uses_architect_for_design(
+        self, m_plan, m_review, m_checkpoint, m_phases,
+        m_phase, m_ga, m_report,
+    ):
+        arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=["the design"], session_id=300)
+        dev = make_fake_session_manager(agent_id=10, agent_role="developer", responses=[], session_id=100)
+        qa = make_fake_session_manager(agent_id=20, agent_role="qa-0", responses=[], session_id=101)
+        store = MagicMock()
+        store.create_artifact.return_value = 42
+        store.create_review_cycle.return_value = 99
+        engine = WorkflowEngine(
+            store=store, dev_sm=dev, qa_sms=[qa], arch_sm=arch,
+            project_id=1, work_item_id=1, mode=WorkMode.full,
+            ask_user=MagicMock(return_value="y"),
+        )
+        m_review.side_effect = [
+            ("reviewed design", 2, True),  # design review
+            ("reviewed plan", 1, True),    # plan review
+        ]
+        m_checkpoint.side_effect = ["approved design", "approved plan"]
+        m_phase.return_value = PhaseResult(
+            name="phase-A", summary="done", review_iterations=1, committed=True,
+        )
+        m_ga.return_value = GATestResult(passed=True)
+
+        result = engine.run("build a widget")
+
+        assert result.success is True
+        assert result.design == "approved design"
+        # Architect should have been called for the design draft
+        arch.send.assert_called_once()
+        # Design review should use arch as proposer, dev+qa as reviewers
+        design_review_call = m_review.call_args_list[0]
+        assert design_review_call.kwargs["proposer"] is arch
+        assert design_review_call.kwargs["reviewers"] == [dev, qa]
+        assert design_review_call.kwargs["artifact_type"] == "arch_design"
+        # Plan review should use default (no proposer/reviewers override)
+        plan_review_call = m_review.call_args_list[1]
+        assert "proposer" not in plan_review_call.kwargs
+        # User checkpoint should pass proposer=arch for design
+        design_cp_call = m_checkpoint.call_args_list[0]
+        assert design_cp_call.kwargs.get("proposer") is arch
+        assert design_cp_call.args[1] == "arch_design"
+
+    def test_architect_design_draft_failure_blocks(self):
+        arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=[_fail()], session_id=300)
+        dev = make_fake_session_manager(agent_id=10, agent_role="developer", responses=[], session_id=100)
+        qa = make_fake_session_manager(agent_id=20, agent_role="qa-0", responses=[], session_id=101)
+        store = MagicMock()
+        engine = WorkflowEngine(
+            store=store, dev_sm=dev, qa_sms=[qa], arch_sm=arch,
+            project_id=1, work_item_id=1, mode=WorkMode.full,
+        )
+
+        result = engine.run("build a widget")
+
+        assert result.success is False
+        assert result.blocked is True
+        assert "design draft failed" in result.failure_summary
+
+    @patch.object(WorkflowEngine, "_run_review_loop", return_value=("reviewed design", 1, False))
+    def test_design_review_failure_persists_state_and_report_says_not_approved(self, m_review):
+        arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=["the design"], session_id=300)
+        dev = make_fake_session_manager(agent_id=10, agent_role="developer", responses=[], session_id=100)
+        qa = make_fake_session_manager(agent_id=20, agent_role="qa-0", responses=[], session_id=101)
+        store = MagicMock()
+        engine = WorkflowEngine(
+            store=store, dev_sm=dev, qa_sms=[qa], arch_sm=arch,
+            project_id=1, work_item_id=1, mode=WorkMode.full,
+        )
+
+        result = engine.run("build a widget")
+
+        assert result.success is False
+        assert result.design_review_passed is False
+        # Report must not claim approval
+        assert "Not approved" in result.final_report
+        assert "Approved after" not in result.final_report
+        # Should persist design_review_failed state
+        state_calls = [
+            c for c in store.update_work_item_state.call_args_list
+            if c.kwargs.get("current_stage") == "design_review_failed"
+        ]
+        assert state_calls
+
+    @patch.object(WorkflowEngine, "_generate_report", return_value="# Report")
+    @patch.object(WorkflowEngine, "_user_checkpoint", return_value=None)
+    @patch.object(WorkflowEngine, "_run_review_loop", return_value=("reviewed design", 1, True))
+    def test_user_rejects_design_persists_rejection(self, m_review, m_checkpoint, m_report):
+        arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=["the design"], session_id=300)
+        dev = make_fake_session_manager(agent_id=10, agent_role="developer", responses=[], session_id=100)
+        qa = make_fake_session_manager(agent_id=20, agent_role="qa-0", responses=[], session_id=101)
+        store = MagicMock()
+        engine = WorkflowEngine(
+            store=store, dev_sm=dev, qa_sms=[qa], arch_sm=arch,
+            project_id=1, work_item_id=1, mode=WorkMode.full,
+        )
+
+        result = engine.run("build a widget")
+
+        assert result.success is False
+        assert result.final_report == "Workflow stopped by user after design review."
+        # Should persist design_rejected_by_user state
+        state_calls = [
+            c for c in store.update_work_item_state.call_args_list
+            if c.kwargs.get("current_stage") == "design_rejected_by_user"
+        ]
+        assert state_calls
+
+    @patch.object(WorkflowEngine, "_user_checkpoint", return_value=None)
+    @patch.object(WorkflowEngine, "_run_review_loop", return_value=("reviewed design", 1, True))
+    @patch.object(WorkflowEngine, "_run_design", return_value="the design")
+    def test_user_rejects_design_without_arch_also_persists_rejection(
+        self, m_design, m_review, m_checkpoint,
+    ):
+        """Dev-led full mode (no arch_sm) should also persist rejection state."""
+        engine, _, _ = _make_engine()
+
+        result = engine.run("build a widget")
+
+        assert result.success is False
+        assert result.final_report == "Workflow stopped by user after design review."
+        state_calls = [
+            c for c in engine._store.update_work_item_state.call_args_list
+            if c.kwargs.get("current_stage") == "design_rejected_by_user"
+        ]
+        assert state_calls
+
+
 class TestRunTestplanDesignMode:
     @patch.object(WorkflowEngine, "_generate_report", return_value="# Testplan Report")
     @patch.object(WorkflowEngine, "_user_checkpoint", return_value="approved plan")

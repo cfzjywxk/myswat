@@ -341,6 +341,20 @@ def _store_learned_knowledge(
         )
         count += 1
 
+    # Re-insert team workflow knowledge (deleted above with all project_ops)
+    from myswat.cli.init_cmd import TEAM_WORKFLOWS_KNOWLEDGE
+    store.store_knowledge(
+        project_id=project_id,
+        agent_id=None,
+        category="project_ops",
+        title="Team Workflows",
+        content=TEAM_WORKFLOWS_KNOWLEDGE,
+        tags=["workflow", "delegation", "team"],
+        relevance_score=1.0,
+        confidence=1.0,
+    )
+    count += 1
+
     return count
 
 
@@ -391,6 +405,10 @@ def _write_myswat_md(repo_path: Path, data: dict, slug: str) -> Path:
         else:
             content = json.dumps(value, indent=2)
         lines.append(f"### {title}\n{content}\n")
+
+    # Append team workflow knowledge (always present, written by init)
+    from myswat.cli.init_cmd import TEAM_WORKFLOWS_KNOWLEDGE
+    lines.append(f"\n{TEAM_WORKFLOWS_KNOWLEDGE}")
 
     md_path = repo_path / "myswat.md"
     md_path.write_text("\n".join(lines), encoding="utf-8")
@@ -600,9 +618,11 @@ def ensure_learned(
         if md_file.is_file():
             return
 
-    # Check TiDB
-    ops = store.list_knowledge(project_id, category="project_ops", limit=1)
-    if ops:
+    # Check TiDB — look for learned content specifically (not just the
+    # "Team Workflows" entry seeded by init, which doesn't mean the project
+    # has been scanned).
+    ops = store.list_knowledge(project_id, category="project_ops", limit=50)
+    if any(e.get("title") != "Team Workflows" for e in ops):
         return
 
     # No knowledge found — auto-learn

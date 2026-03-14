@@ -529,6 +529,19 @@ class TestStoreLearned:
 
         assert isinstance(count, int)
 
+    def test_reinserts_team_workflows_after_bulk_delete(self):
+        """After delete_knowledge_by_category wipes project_ops, team workflows must be re-stored."""
+        store = MagicMock()
+        data = self._make_data()
+
+        _store_learned_knowledge(store, "proj-1", data)
+
+        titles = [
+            call.kwargs.get("title")
+            for call in store.store_knowledge.call_args_list
+        ]
+        assert "Team Workflows" in titles
+
 
 # ---------------------------------------------------------------------------
 # _write_myswat_md
@@ -604,6 +617,18 @@ class TestWriteMyswatMd:
 
         assert str(result_path).startswith(str(tmp_path))
 
+    def test_file_contains_team_workflows(self, tmp_path):
+        """The written file should include team workflow knowledge."""
+        data = self._make_data()
+
+        result_path = _write_myswat_md(tmp_path, data, "my-project")
+        content = result_path.read_text()
+
+        assert "Team Workflows" in content
+        assert "MODE: full" in content
+        assert "MODE: design" in content
+        assert "MODE: testplan" in content
+
 
 # ---------------------------------------------------------------------------
 # ensure_learned
@@ -623,16 +648,30 @@ class TestEnsureLearned:
         # Store should not have been queried for knowledge either,
         # or at least run_learn should not have been triggered.
 
-    def test_returns_early_if_tidb_has_ops(self, tmp_path):
-        """If store.list_knowledge returns existing ops, should return without run_learn."""
+    def test_returns_early_if_tidb_has_learned_ops(self, tmp_path):
+        """If store has learned project_ops (not just Team Workflows), skip run_learn."""
         store = MagicMock()
-        # Simulate TiDB returning existing knowledge entries.
-        store.list_knowledge.return_value = [{"id": 1, "section": "build"}]
+        store.list_knowledge.return_value = [
+            {"id": 1, "title": "Project Overview"},
+            {"id": 2, "title": "Team Workflows"},
+        ]
 
         with patch("myswat.cli.learn_cmd.run_learn") as mock_run:
             ensure_learned(store, "my-project", "proj-1", tmp_path)
 
         mock_run.assert_not_called()
+
+    def test_triggers_learn_if_only_team_workflows_in_tidb(self, tmp_path):
+        """If TiDB only has the Team Workflows entry from init, auto-learn must still run."""
+        store = MagicMock()
+        store.list_knowledge.return_value = [
+            {"id": 1, "title": "Team Workflows"},
+        ]
+
+        with patch("myswat.cli.learn_cmd.run_learn") as mock_run:
+            ensure_learned(store, "my-project", "proj-1", tmp_path)
+
+        mock_run.assert_called_once()
 
     def test_calls_run_learn_if_neither(self, tmp_path):
         """If no myswat.md and no TiDB ops, should call run_learn."""

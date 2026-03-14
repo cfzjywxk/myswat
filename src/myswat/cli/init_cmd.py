@@ -60,47 +60,21 @@ def run_init(name: str, repo_path: str | None, description: str | None) -> None:
     # Seed default agents
     _seed_default_agents(store, settings, project_id)
 
+    # Seed team workflow knowledge
+    _seed_team_workflows(store, project_id)
+
     console.print(f"\n[bold green]Project '{name}' is ready![/bold green]")
     console.print(f"  Use: myswat status -p {slug}")
 
 
 ARCHITECT_SYSTEM_PROMPT = """\
-You are the Architect / PM for this project. You handle two kinds of work:
+You are the Architect / PM for this project. You can answer questions \
+directly (design discussions, architecture decisions, code review, planning) \
+or delegate work to your team.
 
-## Self-handled (answer directly):
-- Design discussions, architecture decisions, trade-off analysis
-- Code review, explaining existing code, debugging guidance
-- Project planning, task breakdown, priority decisions
-- Quick questions, clarifications, documentation
-
-## Delegate Design (requires team review):
-- When the user asks you to formalize or finalize a design with the team
-- When a design discussion has reached a clear enough state to propose formally
-
-When you decide a design needs team review, end your response with:
-
-```delegate
-MODE: design
-TASK: <concise description of the design to formalize>
-```
-
-The system will route this to an architect-led design workflow where you
-propose the design and developer plus QA review it until approved.
-
-## Delegate to Developer (requires implementation):
-- Writing new features, modules, or substantial code changes
-- Bug fixes that require code modification
-- Refactoring, migrations, or infrastructure changes
-- Any task where files need to be created or modified
-
-When you decide a task needs implementation, end your response with a delegation block:
-
-```delegate
-TASK: <clear, actionable task description for the developer>
-```
-
-The system will automatically route this to the Developer + QA review loop.
-If you handle it yourself, just respond normally without the delegate block.
+To delegate, end your response with a ```delegate block. Available modes: \
+full, design, code. See the Team Workflows section in the project knowledge \
+for details on when to use each mode.
 """
 
 DEVELOPER_SYSTEM_PROMPT = """\
@@ -110,43 +84,22 @@ potential technical debt. When implementing, write clean, tested code.
 """
 
 QA_MAIN_SYSTEM_PROMPT = """\
-You are a senior QA engineer. When reviewing designs or plans, focus on
-testability, edge cases, failure modes, and observability. When creating
-test plans, be thorough and systematic.
+You are a senior QA engineer. Focus on testability, edge cases, failure \
+modes, and observability. When creating test plans, be thorough and systematic.
 
-## Delegate Test Plan (requires team review):
-- When the user asks you to formalize or finalize a test plan with the team
-- When a test planning discussion has reached a clear enough state to propose formally
-
-When you decide a test plan needs team review, end your response with:
-
-```delegate
-MODE: testplan
-TASK: <concise description of the test plan to formalize>
-```
-
-The system will route this to a QA-led test-plan workflow where you propose
-the test plan and architect plus developer review it until approved.
+To delegate a test plan for team review, end your response with a \
+```delegate block with MODE: testplan. See the Team Workflows section \
+in the project knowledge for details.
 """
 
 QA_VICE_SYSTEM_PROMPT = """\
-You are a QA engineer providing a second review perspective. When reviewing
-designs or plans, focus on testability, edge cases, failure modes, and
-observability. Bring a fresh perspective independent of the primary QA reviewer.
+You are a QA engineer providing a second review perspective. Focus on \
+testability, edge cases, failure modes, and observability. Bring a fresh \
+perspective independent of the primary QA reviewer.
 
-## Delegate Test Plan (requires team review):
-- When the user asks you to formalize or finalize a test plan with the team
-- When a test planning discussion has reached a clear enough state to propose formally
-
-When you decide a test plan needs team review, end your response with:
-
-```delegate
-MODE: testplan
-TASK: <concise description of the test plan to formalize>
-```
-
-The system will route this to a QA-led test-plan workflow where you propose
-the test plan and architect plus developer review it until approved.
+To delegate a test plan for team review, end your response with a \
+```delegate block with MODE: testplan. See the Team Workflows section \
+in the project knowledge for details.
 """
 
 def _setting_str(settings_obj, name: str, default: str) -> str:
@@ -227,6 +180,102 @@ def _validate_pending_default_agents(agent_defs: list[dict], store: MemoryStore,
         "[agents].qa_main_backend to `codex` or `kimi` before running `myswat init`.[/dim]"
     )
     raise typer.Exit(1)
+
+
+TEAM_WORKFLOWS_KNOWLEDGE = """\
+## Team Workflows
+
+myswat orchestrates a multi-agent team: architect, developer, qa_main, qa_vice.
+Agents delegate work to the team by ending a response with a ```delegate block.
+The system reads the MODE and TASK lines and starts the matching workflow automatically.
+
+### Available Workflows
+
+#### MODE: full — End-to-end delivery
+Covers the entire lifecycle from design through tested, committed code.
+Stages: architect design → team design review → dev planning → team plan review \
+→ phased dev with per-phase code review → GA testing → final report.
+The architect leads design (stages 1-2); the developer leads planning and \
+implementation (stages 3-5); QA leads testing (stage 6).
+
+Use when: the user wants a feature designed AND implemented AND tested — \
+e.g. "build this out", "finish the design and implementation", \
+"take it from here and deliver", "implement this end-to-end".
+
+#### MODE: design — Design review only
+The architect (or developer) produces a technical design. Developer + QA review \
+it in a loop until all reviewers approve (LGTM). No code is written.
+
+Use when: the user wants a design formalized and reviewed by the team but \
+does NOT want implementation yet — e.g. "formalize this design", \
+"get the team's feedback on this architecture", "let's review this design together".
+
+#### MODE: code — Dev + QA code review loop (default)
+The developer implements the task. QA reviews the code in a loop until LGTM. \
+No design phase — assumes the design is already settled.
+
+Use when: the design is already decided and the user wants code written — \
+e.g. "implement this", "fix this bug", "add this feature". \
+This is the default when no MODE is specified.
+
+#### MODE: testplan — QA test plan review
+QA produces a test plan. Architect + developer review it in a loop until approved. \
+No tests are executed — this is plan formalization only.
+
+Use when: the user wants a test plan formalized and reviewed — \
+e.g. "write a test plan for this", "formalize our testing approach".
+
+### Delegation Format
+
+To delegate, end your response with:
+
+```delegate
+MODE: <full|design|code|testplan>
+TASK: <concise description of the work>
+```
+
+- MODE is optional; defaults to "code" if omitted.
+- Only the architect role can delegate with MODE: full, design, or code.
+- Only QA roles (qa_main, qa_vice) can delegate with MODE: testplan.
+- The developer role does not delegate — it receives delegated work.
+
+### Decision Guide
+
+Ask yourself: what does the user want at the END of this?
+- A reviewed design document → MODE: design
+- Working, tested, committed code → MODE: full
+- Code written (design already settled) → MODE: code (or omit MODE)
+- A reviewed test plan → MODE: testplan
+- Just an answer or discussion → respond directly, no delegation
+"""
+
+
+def _seed_team_workflows(store: MemoryStore, project_id: int) -> None:
+    """Store team workflow knowledge as a project_ops entry.
+
+    Idempotent — skips if content unchanged, replaces if updated.
+    """
+    existing = store.list_knowledge(project_id, category="project_ops", limit=50)
+    for entry in existing:
+        if entry.get("title") == "Team Workflows":
+            if entry.get("content", "").strip() == TEAM_WORKFLOWS_KNOWLEDGE.strip():
+                console.print("  [dim]Team workflow knowledge already up to date.[/dim]")
+                return
+            # Content changed — delete old entry before inserting updated one
+            store.delete_knowledge(entry["id"])
+            break
+
+    store.store_knowledge(
+        project_id=project_id,
+        agent_id=None,
+        category="project_ops",
+        title="Team Workflows",
+        content=TEAM_WORKFLOWS_KNOWLEDGE,
+        tags=["workflow", "delegation", "team"],
+        relevance_score=1.0,
+        confidence=1.0,
+    )
+    console.print("  [green]Stored team workflow knowledge.[/green]")
 
 
 def _seed_default_agents(store: MemoryStore, settings: MySwatSettings, project_id: int) -> None:

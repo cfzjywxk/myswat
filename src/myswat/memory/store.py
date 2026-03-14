@@ -650,6 +650,12 @@ class MemoryStore:
             (project_id, category),
         )
 
+    def delete_knowledge(self, knowledge_id: int) -> int:
+        """Delete a single knowledge entry by ID."""
+        return self._pool.execute(
+            "DELETE FROM knowledge WHERE id = %s", (knowledge_id,),
+        )
+
     def decay_relevance(self, decay_factor: float = 0.95) -> int:
         """Reduce relevance scores for aging knowledge entries."""
         return self._pool.execute(
