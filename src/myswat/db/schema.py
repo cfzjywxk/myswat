@@ -17,6 +17,11 @@ MIGRATION_MODULES = [
     "myswat.db.migrations.v006_flexible_vector_dimension",
     "myswat.db.migrations.v007_conversation_persistence",
     "myswat.db.migrations.v008_chat_workflow_agent_prompts",
+    "myswat.db.migrations.v009_memory_phase1a",
+    "myswat.db.migrations.v010_knowledge_terms",
+    "myswat.db.migrations.v011_document_sources_and_session_revision",
+    "myswat.db.migrations.v012_knowledge_graph",
+    "myswat.db.migrations.v013_drop_redundant_document_sources_index",
 ]
 
 

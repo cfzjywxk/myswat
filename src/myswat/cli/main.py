@@ -5,7 +5,7 @@ import json
 import typer
 
 from myswat.cli.progress import _describe_process_event
-from myswat.cli.memory_cmd import memory_app
+from myswat.cli.memory_cmd import memory_app, search as run_search_command
 from myswat.workflow.engine import WorkMode
 
 app = typer.Typer(
@@ -15,6 +15,32 @@ app = typer.Typer(
 )
 
 app.add_typer(memory_app, name="memory", help="Search and manage project knowledge")
+
+
+@app.command()
+def search(
+    query: str = typer.Argument(..., help="Search query"),
+    project: str = typer.Option(..., "--project", "-p", help="Project slug"),
+    category: str = typer.Option(None, "--category", "-c", help="Filter by category"),
+    source_type: str = typer.Option(None, "--source-type", help="Filter by source type"),
+    mode: str = typer.Option("auto", "--mode", help="Search mode"),
+    profile: str = typer.Option("standard", "--profile", help="Search profile"),
+    limit: int = typer.Option(10, "--limit", "-n", help="Max results"),
+    no_vector: bool = typer.Option(False, "--no-vector", help="Skip vector search (keyword only)"),
+    json_output: bool = typer.Option(False, "--json", help="Output machine-readable JSON"),
+):
+    """Search project knowledge with lexical + semantic retrieval."""
+    run_search_command(
+        query=query,
+        project=project,
+        category=category,
+        source_type=source_type,
+        mode=mode,
+        profile=profile,
+        limit=limit,
+        no_vector=no_vector,
+        json_output=json_output,
+    )
 
 
 @app.command()

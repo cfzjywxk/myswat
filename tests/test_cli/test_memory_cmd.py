@@ -37,7 +37,9 @@ class TestSearch:
 
         mock_store = MagicMock()
         mock_store.get_project_by_slug.return_value = {"id": 1}
-        mock_store.search_knowledge.return_value = []
+        mock_store.search_knowledge.side_effect = [[], []]
+        mock_store.match_entities.return_value = []
+        mock_store.get_related_entities.return_value = []
         mock_store_cls.return_value = mock_store
 
         search("hello", project="proj")
@@ -51,16 +53,18 @@ class TestSearch:
 
         mock_store = MagicMock()
         mock_store.get_project_by_slug.return_value = {"id": 1}
-        mock_store.search_knowledge.return_value = [
+        mock_store.search_knowledge.side_effect = [[
             {
                 "id": 1, "category": "decision", "title": "Use Rust",
                 "search_score": 0.95, "confidence": 0.9,
             },
-        ]
+        ], []]
+        mock_store.match_entities.return_value = []
+        mock_store.get_related_entities.return_value = []
         mock_store_cls.return_value = mock_store
 
         search("rust", project="proj", category=None, limit=10, no_vector=False)
-        mock_store.search_knowledge.assert_called_once()
+        assert mock_store.search_knowledge.call_count == 2
 
     @patch("myswat.cli.memory_cmd.MySwatSettings")
     @patch("myswat.cli.memory_cmd.TiDBPool")
@@ -71,11 +75,16 @@ class TestSearch:
 
         mock_store = MagicMock()
         mock_store.get_project_by_slug.return_value = {"id": 1}
-        mock_store.search_knowledge_fulltext_only.return_value = []
+        mock_store.search_knowledge.return_value = []
+        mock_store.match_entities.return_value = []
+        mock_store.get_related_entities.return_value = []
         mock_store_cls.return_value = mock_store
 
         search("hello", project="proj", no_vector=True)
-        mock_store.search_knowledge_fulltext_only.assert_called_once()
+        mock_store.search_knowledge.assert_called_once_with(
+            project_id=1, query="hello", agent_id=None, category=None,
+            source_type=None, limit=20, use_vector=False, use_fulltext=True,
+        )
 
     @patch("myswat.cli.memory_cmd.MySwatSettings")
     @patch("myswat.cli.memory_cmd.TiDBPool")
@@ -86,13 +95,13 @@ class TestSearch:
 
         mock_store = MagicMock()
         mock_store.get_project_by_slug.return_value = {"id": 1}
-        mock_store.search_knowledge.return_value = []
+        mock_store.search_knowledge.side_effect = [[], []]
+        mock_store.match_entities.return_value = []
+        mock_store.get_related_entities.return_value = []
         mock_store_cls.return_value = mock_store
 
         search("hello", project="proj", category="decision", limit=10, no_vector=False)
-        mock_store.search_knowledge.assert_called_once_with(
-            project_id=1, query="hello", category="decision", limit=10,
-        )
+        assert mock_store.search_knowledge.call_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -122,11 +131,11 @@ class TestAdd:
 
         mock_store = MagicMock()
         mock_store.get_project_by_slug.return_value = {"id": 1}
-        mock_store.store_knowledge.return_value = 42
+        mock_store.upsert_knowledge.return_value = (42, "created")
         mock_store_cls.return_value = mock_store
 
         add("Title", "Content", project="proj", category="decision", tags=None)
-        mock_store.store_knowledge.assert_called_once()
+        mock_store.upsert_knowledge.assert_called_once()
 
     @patch("myswat.cli.memory_cmd.MySwatSettings")
     @patch("myswat.cli.memory_cmd.TiDBPool")
@@ -137,11 +146,11 @@ class TestAdd:
 
         mock_store = MagicMock()
         mock_store.get_project_by_slug.return_value = {"id": 1}
-        mock_store.store_knowledge.return_value = 42
+        mock_store.upsert_knowledge.return_value = (42, "created")
         mock_store_cls.return_value = mock_store
 
         add("Title", "Content", project="proj", tags="rust,perf")
-        call_kwargs = mock_store.store_knowledge.call_args
+        call_kwargs = mock_store.upsert_knowledge.call_args
         assert call_kwargs.kwargs.get("tags") == ["rust", "perf"] or \
                call_kwargs[1].get("tags") == ["rust", "perf"]
 

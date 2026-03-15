@@ -1,6 +1,6 @@
 """Tests for DocumentIngester chunking logic."""
 
-from myswat.memory.ingester import chunk_text
+from myswat.memory.ingester import chunk_code_text, chunk_text
 
 
 class TestChunkText:
@@ -43,3 +43,17 @@ class TestChunkText:
         chunks = chunk_text("", chunk_size=100)
         assert len(chunks) == 1
         assert chunks[0] == ""
+
+    def test_rust_code_chunking_splits_on_functions(self):
+        text = "fn one() {}\n\nfn two() {}\n"
+        chunks = chunk_code_text(text, ".rs", chunk_size=8000, overlap=500)
+        assert len(chunks) == 2
+        assert chunks[0].startswith("fn one")
+        assert chunks[1].startswith("fn two")
+
+    def test_go_code_chunking_splits_on_funcs(self):
+        text = "func One() {}\n\nfunc Two() {}\n"
+        chunks = chunk_code_text(text, ".go", chunk_size=8000, overlap=500)
+        assert len(chunks) == 2
+        assert chunks[0].startswith("func One")
+        assert chunks[1].startswith("func Two")

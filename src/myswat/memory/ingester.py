@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -22,7 +24,8 @@ Source file: {source_file}
 Chunk {chunk_index} of {total_chunks}
 
 For each item, output a JSON object with:
-- "category": one of "architecture", "pattern", "decision", "api_reference", "configuration", "lesson_learned"
+- "category": one of "architecture", "pattern", "decision", "protocol", "invariant",
+  "failure_mode", "api_reference", "configuration", "performance_tuning", "lesson_learned"
 - "title": concise title (max 100 chars)
 - "content": detailed knowledge content (1-3 paragraphs)
 - "tags": list of relevant tags (max 5)
@@ -30,6 +33,8 @@ For each item, output a JSON object with:
 
 Output ONLY a JSON array of these objects. No other text.
 If the chunk has no useful technical knowledge, output [].
+Prefer concrete technical knowledge over vague summaries. When possible, anchor the item to
+subsystems, symbols, file paths, protocols, invariants, configuration keys, or failure modes.
 
 DOCUMENT CHUNK:
 {chunk}
@@ -64,6 +69,53 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
     return chunks
 
 
+def _chunk_by_boundaries(text: str, boundary_pattern: str) -> list[str]:
+    """Split code-ish text into logical units by regex boundaries."""
+    matches = list(re.finditer(boundary_pattern, text, flags=re.MULTILINE))
+    if not matches:
+        return [text]
+    starts = [match.start() for match in matches]
+    if starts[0] != 0:
+        starts.insert(0, 0)
+    chunks: list[str] = []
+    for idx, start in enumerate(starts):
+        end = starts[idx + 1] if idx + 1 < len(starts) else len(text)
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+    return chunks or [text]
+
+
+def chunk_code_text(
+    text: str,
+    file_suffix: str,
+    chunk_size: int = CHUNK_SIZE,
+    overlap: int = CHUNK_OVERLAP,
+) -> list[str]:
+    """Chunk Rust/Go code by logical boundaries before falling back to text chunking."""
+    suffix = file_suffix.casefold()
+    if suffix == ".rs":
+        logical = _chunk_by_boundaries(
+            text,
+            r"^(?:pub\s+)?(?:async\s+)?(?:fn|struct|enum|trait|impl|mod)\b",
+        )
+    elif suffix == ".go":
+        logical = _chunk_by_boundaries(
+            text,
+            r"^(?:func|type|const|var)\b",
+        )
+    else:
+        return chunk_text(text, chunk_size=chunk_size, overlap=overlap)
+
+    final_chunks: list[str] = []
+    for chunk in logical:
+        if len(chunk) <= chunk_size:
+            final_chunks.append(chunk)
+        else:
+            final_chunks.extend(chunk_text(chunk, chunk_size=chunk_size, overlap=overlap))
+    return final_chunks or [text]
+
+
 class DocumentIngester:
     """Ingests documents into knowledge entries via chunking + AI distillation."""
 
@@ -90,8 +142,17 @@ class DocumentIngester:
         if not text.strip():
             return []
 
+        raw_content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        existing_source = self._store.get_document_source(project_id, str(path))
+        if not isinstance(existing_source, dict):
+            existing_source = None
+        if existing_source and existing_source.get("content_hash") == raw_content_hash:
+            return []
+        if existing_source:
+            self._store.delete_knowledge_by_source_file(project_id, str(path))
+
         source_name = str(path.name)
-        chunks = chunk_text(text)
+        chunks = chunk_code_text(text, path.suffix)
         created_ids = []
 
         for i, chunk in enumerate(chunks):
@@ -106,6 +167,7 @@ class DocumentIngester:
             )
             created_ids.extend(ids)
 
+        self._store.upsert_document_source(project_id, str(path), raw_content_hash)
         return created_ids
 
     def _ingest_chunk(
@@ -159,8 +221,9 @@ class DocumentIngester:
                 tags.append(source_name)
             relevance = min(max(float(item.get("relevance_score", 0.7)), 0.0), 1.0)
 
-            kid = self._store.store_knowledge(
+            kid, _action = self._store.upsert_knowledge(
                 project_id=project_id,
+                source_type="document",
                 agent_id=agent_id,
                 source_file=source_file,
                 category=category,
@@ -169,6 +232,7 @@ class DocumentIngester:
                 tags=tags[:5],
                 relevance_score=relevance,
                 confidence=0.9,
+                merge_runner=self._runner,
             )
             created_ids.append(kid)
 
@@ -180,8 +244,9 @@ class DocumentIngester:
         project_id: int, agent_id: int | None,
     ) -> list[int]:
         """Store a raw chunk without AI distillation."""
-        kid = self._store.store_knowledge(
+        kid, _action = self._store.upsert_knowledge(
             project_id=project_id,
+            source_type="document",
             agent_id=agent_id,
             source_file=source_file,
             category="architecture",

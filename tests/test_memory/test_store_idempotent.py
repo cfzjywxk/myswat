@@ -373,6 +373,7 @@ class TestStoreReadOperations:
         deleted = store.delete_knowledge_by_category(1, "project_ops")
 
         assert deleted == 3
+        assert mock_pool.execute.call_count == 4
 
     def test_store_knowledge_without_embedding(self, mock_pool):
         mock_pool.insert_returning_id.return_value = 99

@@ -32,7 +32,7 @@ def _make_store():
     store.count_uncompacted_turns.return_value = 0
     store.count_session_turns.return_value = 0
     store.get_compactable_sessions.return_value = []
-    store.store_knowledge.return_value = 1
+    store.upsert_knowledge.return_value = (1, "created")
     return store
 
 
@@ -235,15 +235,16 @@ class TestCompactSession:
              "tags": [], "relevance_score": 0.8, "confidence": 0.9},
         ]
         runner = _make_runner(output=json.dumps(items))
-        store.store_knowledge.return_value = 42
+        store.upsert_knowledge.return_value = (42, "created")
 
         compactor = KnowledgeCompactor(store, runner=runner)
         result = compactor.compact_session(1, 1)
 
         assert len(result) == 1
         assert result[0] == 42
-        store.store_knowledge.assert_called_once()
-        assert store.store_knowledge.call_args.kwargs["agent_id"] is None
+        store.upsert_knowledge.assert_called_once()
+        assert store.upsert_knowledge.call_args.kwargs["agent_id"] is None
+        assert store.upsert_knowledge.call_args.kwargs["source_type"] == "session"
         store.advance_compaction_watermark.assert_called_once_with(1, 1)
         store.mark_session_fully_compacted.assert_called_once_with(1)
         store.mark_session_compacted.assert_not_called()
@@ -257,7 +258,7 @@ class TestCompactSession:
         ]
         items = [{"category": "progress", "title": "T", "content": "C"}]
         runner = _make_runner(output=json.dumps(items))
-        store.store_knowledge.return_value = 1
+        store.upsert_knowledge.return_value = (1, "created")
 
         compactor = KnowledgeCompactor(store, runner=runner)
         compactor.compact_session(1, 1, mark_compacted=False)
@@ -335,7 +336,7 @@ class TestCompactSession:
         ]
         items = [{"category": "progress", "title": "Greeting", "content": "A greeting exchange"}]
         runner = _make_runner(output=json.dumps(items))
-        store.store_knowledge.return_value = 99
+        store.upsert_knowledge.return_value = (99, "created")
 
         compactor = KnowledgeCompactor(store, runner=runner)
         result = compactor.compact_session(1, 1, mark_compacted=True)
@@ -343,7 +344,7 @@ class TestCompactSession:
         assert result == [99]
         store.advance_compaction_watermark.assert_called_once_with(1, 1)
         store.mark_session_fully_compacted.assert_not_called()
-        assert store.store_knowledge.call_args.kwargs["source_turn_ids"] == [1, 2]
+        assert store.upsert_knowledge.call_args.kwargs["source_turn_ids"] == [1, 2]
 
     def test_filters_turns_by_watermark(self):
         store = _make_store()
@@ -360,7 +361,7 @@ class TestCompactSession:
 
         items = [{"category": "progress", "title": "New", "content": "New stuff"}]
         runner = _make_runner(output=json.dumps(items))
-        store.store_knowledge.return_value = 1
+        store.upsert_knowledge.return_value = (1, "created")
 
         compactor = KnowledgeCompactor(store, runner=runner)
         result = compactor.compact_session(1, 1)
@@ -412,7 +413,7 @@ class TestCompactAllPending:
         ]
         items = [{"category": "progress", "title": "T", "content": "C"}]
         runner = _make_runner(output=json.dumps(items))
-        store.store_knowledge.return_value = 1
+        store.upsert_knowledge.return_value = (1, "created")
 
         compactor = KnowledgeCompactor(store, runner=runner)
         result = compactor.compact_all_pending(1)

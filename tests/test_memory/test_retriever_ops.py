@@ -336,16 +336,21 @@ class TestSearch:
 
     def test_passes_through(self, retriever, mock_store):
         expected = [{"title": "Result", "content": "body"}]
-        mock_store.search_knowledge.return_value = expected
+        mock_store.search_knowledge.side_effect = [expected, []]
+        mock_store.match_entities.return_value = []
+        mock_store.get_related_entities.return_value = []
+        mock_store._query_terms.return_value = ["deployment"]
         result = retriever.search(
             project_id=1, query="deployment", agent_id=1, category="ops", limit=5,
         )
-        mock_store.search_knowledge.assert_called_with(
-            project_id=1, query="deployment", agent_id=1, category="ops", limit=5,
-        )
-        assert result == expected
+        assert mock_store.search_knowledge.call_count == 2
+        assert len(result) == 1
+        assert result[0]["title"] == "Result"
+        assert result[0]["content"] == "body"
 
     def test_default_params(self, retriever, mock_store):
-        mock_store.search_knowledge.return_value = []
+        mock_store.search_knowledge.side_effect = [[], []]
+        mock_store.match_entities.return_value = []
+        mock_store.get_related_entities.return_value = []
         result = retriever.search(project_id=1, query="test")
         assert result == []

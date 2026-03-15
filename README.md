@@ -27,6 +27,8 @@ MySwat is a **conversation orchestrator** — it automates the copy-paste routin
 - **Full teamwork workflow** — auto-continue through design review, planning, phased implementation, and GA testing.
 - **Selective work modes** — `--design` for design+planning only, `--dev` for phased implementation, `--test` for GA testing.
 - **Knowledge compaction** — sessions distilled into reusable knowledge entries stored in TiDB, not raw transcripts.
+- **Hybrid knowledge search** — top-level `myswat search` combines lexical, vector, and graph-expanded retrieval for project knowledge.
+- **Incremental document feeding** — re-feeding updated docs/source retracts stale file-scoped knowledge and rebuilds it cleanly.
 - **Claude + Codex + Kimi backends** — mix and match AI backends per role (e.g., Claude Opus for QA, GPT-5 for dev).
 - **Project learning** — `myswat learn` teaches agents build commands, test tiers, conventions, and invariants.
 - **Interactive long-task monitor** — live progress display with stage, TODOs, issues, and `ESC` to cancel.
@@ -202,10 +204,14 @@ myswat feed /path/to/docs -p my-project --glob "**/*.md"
 myswat feed /path/to/src -p my-project --glob "**/*.rs"
 ```
 
+Re-feeding a changed file retracts prior file-scoped document knowledge and rebuilds it.
+Rust and Go sources are chunked by logical code boundaries before falling back to size-based chunks.
+
 ### 7. Search knowledge
 
 ```bash
-myswat memory search "transaction isolation" -p my-project
+myswat search "transaction isolation" -p my-project
+myswat search "LeaseRead timeout" -p my-project --profile precise --json
 ```
 
 ## CLI Reference
@@ -223,7 +229,7 @@ myswat memory search "transaction isolation" -p my-project
 | `myswat stop <id> -p <slug>` | Stop a background workflow |
 | `myswat gc -p <slug> [--grace-days N]` | Garbage-collect compacted turns |
 | `myswat history -p <slug> [--turns N]` | Show raw recent turns |
-| `myswat memory search <query> -p <slug>` | Search knowledge base |
+| `myswat search <query> -p <slug> [--profile P] [--mode M] [--json]` | Search knowledge base |
 | `myswat memory add <title> <content> -p <slug> [-c cat]` | Add knowledge manually |
 | `myswat memory list -p <slug> [-c category]` | List knowledge entries |
 | `myswat memory compact -p <slug>` | Compact sessions into knowledge |
@@ -235,8 +241,9 @@ myswat memory search "transaction isolation" -p my-project
 | **CLI** (Typer) | `myswat init`, `learn`, `chat`, `run`, `work`, `gc` |
 | **SessionManager** | Agent lifecycle, subprocess launch (codex/claude/kimi) |
 | **WorkflowEngine** | Mode dispatch: full, design, development, test |
-| **MemoryRetriever** | 4-tier context: project_ops → recent turns → knowledge → hints |
-| **MemoryStore** | TiDB CRUD (sessions, turns, knowledge, work items) |
+| **MemoryRetriever** | 4-tier context: project_ops → recent turns → searched knowledge → hints |
+| **KnowledgeSearchEngine** | Search planning, lexical/vector fusion, graph expansion, and Tier 2 rendering |
+| **MemoryStore** | TiDB CRUD plus source-aware upsert, lexical index maintenance, and graph metadata |
 | **KnowledgeCompactor** | Distill session turns into reusable knowledge entries |
 | **Embedder** | BGE-M3 local embeddings for vector search (optional) |
 | **GC** | Lazy garbage collection with 7-day grace period |
@@ -269,9 +276,13 @@ Session active
 |-------|---------|
 | `projects` | Project registry |
 | `agents` | Role configs per project |
-| `sessions` | Dialog sessions with compaction watermark + `compacted_at` |
+| `sessions` | Dialog sessions with compaction watermark, `compacted_at`, and context memory revision |
 | `session_turns` | Individual messages (recency-indexed) |
-| `knowledge` | Compacted/ingested knowledge with VECTOR(1024) |
+| `knowledge` | Compacted/ingested knowledge with embeddings, source metadata, hashes, and merge lineage |
+| `knowledge_terms` | Lexical term index for exact technical retrieval |
+| `knowledge_entities` | Extracted entity anchors for graph expansion |
+| `knowledge_relations` | Lightweight relationship graph between entities |
+| `document_sources` | Source-file content tracking for incremental re-ingestion |
 | `work_items` | Task tracking |
 | `artifacts` | Proposals/diffs under review |
 | `review_cycles` | Review iterations with structured verdicts |

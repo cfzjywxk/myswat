@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from myswat.cli.progress import _describe_process_event, _preview_text
+from myswat.memory.search_engine import KnowledgeSearchEngine, SearchPlanBuilder
 from myswat.memory.store import MemoryStore
 
 
@@ -15,6 +16,7 @@ class MemoryRetriever:
 
     def __init__(self, store: MemoryStore) -> None:
         self._store = store
+        self._search = KnowledgeSearchEngine(store)
 
     def _build_myswat_cli_context(self, project: dict | None, repo_path: str | None) -> str:
         if not isinstance(project, dict):
@@ -33,7 +35,7 @@ class MemoryRetriever:
             f"- `{launcher} status -p {slug}` — show project work items, stages, process logs, review rounds, sessions\n"
             f"- `{launcher} status -p {slug} --details` — show detailed handoffs, process logs, and review breakdowns\n"
             f"- `{launcher} task <id> -p {slug}` — show one work item with process log, artifacts, and teamwork details\n"
-            f"- `{launcher} memory search \"<query>\" -p {slug}` — search project knowledge\n"
+            f"- `{launcher} search \"<query>\" -p {slug}` — search project knowledge\n"
             f"- `{launcher} memory list -p {slug}` — inspect stored knowledge entries\n"
             f"- `{launcher} learn -p {slug}` — refresh project operations knowledge\n\n"
             "Useful commands inside `myswat chat`:\n"
@@ -198,6 +200,7 @@ class MemoryRetriever:
         self,
         project_id: int,
         agent_id: int,
+        agent_role: str | None = None,
         task_description: str | None = None,
         current_session_id: int | None = None,
         max_tokens: int = 8000,
@@ -230,6 +233,7 @@ class MemoryRetriever:
             sections.append(ops_text)
 
         # ── 0b. Current task state (ALWAYS loaded for work item sessions) ──
+        current_stage: str | None = None
         if current_session_id is not None:
             session = self._store.get_session(current_session_id)
             work_item_id = session.get("work_item_id") if session else None
@@ -237,6 +241,11 @@ class MemoryRetriever:
                 task_state = self._build_work_item_state_context(work_item_id)
                 if task_state:
                     sections.append(task_state)
+                work_item_state = self._store.get_work_item_state(work_item_id)
+                if isinstance(work_item_state, dict):
+                    stage = work_item_state.get("current_stage")
+                    if isinstance(stage, str) and stage.strip():
+                        current_stage = stage.strip()
 
         # ── 1. Recent project turns (ALWAYS loaded, project-scoped) ──
         history_budget = int(max_tokens * 0.25)
@@ -250,43 +259,36 @@ class MemoryRetriever:
             if history_section:
                 sections.append(history_section)
 
-        # ── 2. Knowledge base search (PRIMARY — vector + keyword) ──
-        # This is the core: fed documents + compacted session knowledge,
-        # searched by semantic similarity (VEC_COSINE_DISTANCE) when the
-        # embedder is available, falling back to keyword LIKE matching
-        # otherwise. The search_knowledge() method handles both paths
-        # internally — the retriever just uses the results.
+        # ── 2. Knowledge base search (PRIMARY — vector + lexical) ──
         knowledge_budget = int(max_tokens * 0.5) - ops_tokens_used
 
         if task_description:
-            results = self._store.search_knowledge(
+            plan = SearchPlanBuilder.build(
                 project_id=project_id,
                 query=task_description,
                 agent_id=agent_id,
+                agent_role=agent_role,
+                current_stage=current_stage,
                 limit=15,
+                mode="auto",
+                profile="standard",
             )
+            results = self._search.search(plan)
         else:
-            results = self._store.search_knowledge(
+            plan = SearchPlanBuilder.build(
                 project_id=project_id,
                 query="",
                 agent_id=agent_id,
+                agent_role=agent_role,
+                current_stage=current_stage,
                 limit=5,
-                use_vector=False,
-                use_fulltext=False,
             )
+            results = self._search.search(plan)
 
         if results:
-            knowledge_lines = ["## Relevant Knowledge\n"]
-            knowledge_tokens_used = 0
-            for entry in results:
-                line = f"### [{entry['category']}] {entry['title']}\n{entry['content']}\n"
-                line_tokens = len(line) // 4
-                if knowledge_tokens_used + line_tokens > knowledge_budget:
-                    break
-                knowledge_tokens_used += line_tokens
-                knowledge_lines.append(line)
-            if len(knowledge_lines) > 1:
-                sections.append("\n".join(knowledge_lines))
+            knowledge_section = self._search.render_for_context(results, knowledge_budget)
+            if knowledge_section:
+                sections.append(knowledge_section)
 
         # ── 3. Current session turns (within-session continuity) ──
         if current_session_id is not None:
@@ -439,14 +441,19 @@ class MemoryRetriever:
         project_id: int,
         query: str,
         agent_id: int | None = None,
+        agent_role: str | None = None,
+        current_stage: str | None = None,
         category: str | None = None,
         limit: int = 10,
     ) -> list[dict]:
-        """Direct search pass-through for CLI usage."""
-        return self._store.search_knowledge(
+        """Search using the Phase 1c search engine."""
+        plan = SearchPlanBuilder.build(
             project_id=project_id,
             query=query,
             agent_id=agent_id,
+            agent_role=agent_role,
+            current_stage=current_stage,
             category=category,
             limit=limit,
         )
+        return self._search.search(plan)

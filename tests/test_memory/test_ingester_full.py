@@ -128,17 +128,20 @@ class TestIngestFile:
     def test_normal_file_returns_knowledge_ids(self, tmp_path):
         """Ingesting a normal file should return a list of knowledge IDs."""
         store = MagicMock()
-        store.store_knowledge.return_value = "kid-1"
+        store.get_document_source.return_value = None
+        store.upsert_knowledge.return_value = ("kid-1", "created")
         ingester = DocumentIngester(store)
         normal_file = tmp_path / "doc.txt"
         normal_file.write_text("Some content for ingestion.")
         result = ingester.ingest_file(str(normal_file), project_id="proj1")
         assert isinstance(result, list)
         assert len(result) > 0
+        store.upsert_document_source.assert_called_once()
 
     def test_normal_file_processes_all_chunks(self, tmp_path):
         """Each chunk from chunk_text should be processed via _ingest_chunk."""
         store = MagicMock()
+        store.get_document_source.return_value = None
         ingester = DocumentIngester(store)
         # Patch _ingest_chunk to track calls
         ingester._ingest_chunk = MagicMock(return_value=["kid-1"])
@@ -154,6 +157,7 @@ class TestIngestFile:
     def test_ingest_file_passes_agent_id(self, tmp_path):
         """agent_id should be forwarded to _ingest_chunk."""
         store = MagicMock()
+        store.get_document_source.return_value = None
         ingester = DocumentIngester(store)
         ingester._ingest_chunk = MagicMock(return_value=["kid-1"])
         f = tmp_path / "doc.txt"
@@ -164,6 +168,35 @@ class TestIngestFile:
         # agent_id should appear in either args or kwargs
         all_args = list(call_kwargs.args) + list(call_kwargs.kwargs.values())
         assert "agent-42" in all_args
+
+    def test_skips_unchanged_source_file(self, tmp_path):
+        store = MagicMock()
+        file_path = tmp_path / "doc.txt"
+        file_path.write_text("stable content")
+        import hashlib
+        content_hash = hashlib.sha256("stable content".encode("utf-8")).hexdigest()
+        store.get_document_source.return_value = {"content_hash": content_hash}
+
+        ingester = DocumentIngester(store)
+        result = ingester.ingest_file(str(file_path), project_id="proj1")
+
+        assert result == []
+        store.delete_knowledge_by_source_file.assert_not_called()
+        store.upsert_document_source.assert_not_called()
+
+    def test_changed_source_file_retracts_old_knowledge(self, tmp_path):
+        store = MagicMock()
+        store.get_document_source.return_value = {"content_hash": "old-hash"}
+        ingester = DocumentIngester(store)
+        ingester._ingest_chunk = MagicMock(return_value=["kid-1"])
+        file_path = tmp_path / "doc.txt"
+        file_path.write_text("new content")
+
+        result = ingester.ingest_file(str(file_path), project_id="proj1")
+
+        assert result == ["kid-1"]
+        store.delete_knowledge_by_source_file.assert_called_once_with("proj1", str(file_path))
+        store.upsert_document_source.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +230,7 @@ class TestIngestChunk:
     def test_successful_runner_parses_and_stores(self):
         """A successful runner invocation should parse output and store knowledge entries."""
         store = MagicMock()
-        store.store_knowledge.return_value = "kid-parsed"
+        store.upsert_knowledge.return_value = ("kid-parsed", "created")
         runner = MagicMock()
         # Simulate runner returning a successful AgentResponse with parseable content
         runner_response = AgentResponse(
@@ -218,7 +251,7 @@ class TestIngestChunk:
         runner.invoke.assert_called_once()
         assert isinstance(result, list)
         # Should have stored at least one knowledge entry
-        assert store.store_knowledge.call_count >= 1
+        assert store.upsert_knowledge.call_count >= 1
 
     def test_runner_exception_propagates(self):
         """When the runner raises an exception, it propagates (no internal catch)."""
@@ -280,7 +313,7 @@ class TestIngestChunk:
     def test_items_with_empty_content_skipped(self):
         """Parsed items whose content is empty should be skipped."""
         store = MagicMock()
-        store.store_knowledge.return_value = "kid-valid"
+        store.upsert_knowledge.return_value = ("kid-valid", "created")
         runner = MagicMock()
         # Two items: one with content, one with empty content
         runner_response = AgentResponse(
@@ -302,7 +335,7 @@ class TestIngestChunk:
             agent_id="agent-1",
         )
         # Only the item with non-empty content should have been stored
-        assert store.store_knowledge.call_count == 1
+        assert store.upsert_knowledge.call_count == 1
 
     def test_all_items_empty_content_returns_empty(self):
         """If all parsed items have empty content, returns empty list (no store calls)."""
@@ -323,7 +356,7 @@ class TestIngestChunk:
             project_id="proj1",
             agent_id=None,
         )
-        store.store_knowledge.assert_not_called()
+        store.upsert_knowledge.assert_not_called()
         assert result == []
 
 
@@ -335,9 +368,9 @@ class TestStoreRawChunk:
     """Tests for DocumentIngester._store_raw_chunk."""
 
     def test_stores_with_correct_params(self):
-        """_store_raw_chunk should call store.store_knowledge with category='architecture'."""
+        """_store_raw_chunk should call store.upsert_knowledge with category='architecture'."""
         store = MagicMock()
-        store.store_knowledge.return_value = "kid-raw-1"
+        store.upsert_knowledge.return_value = ("kid-raw-1", "created")
         ingester = DocumentIngester(store)
         result = ingester._store_raw_chunk(
             chunk="raw chunk content",
@@ -347,22 +380,22 @@ class TestStoreRawChunk:
             project_id="proj1",
             agent_id="agent-5",
         )
-        store.store_knowledge.assert_called_once()
-        call_kwargs = store.store_knowledge.call_args
+        store.upsert_knowledge.assert_called_once()
+        call_kwargs = store.upsert_knowledge.call_args
         # Flatten args and kwargs to check key values
         all_kwargs = call_kwargs.kwargs if call_kwargs.kwargs else {}
         all_args = call_kwargs.args if call_kwargs.args else ()
         # Category should be "architecture"
         assert "architecture" in list(all_kwargs.values()) + list(all_args), (
-            "Expected category='architecture' in store.store_knowledge call"
+            "Expected category='architecture' in store.upsert_knowledge call"
         )
         # project_id should be passed
         assert "proj1" in list(all_kwargs.values()) + list(all_args), (
-            "Expected project_id='proj1' in store.store_knowledge call"
+            "Expected project_id='proj1' in store.upsert_knowledge call"
         )
         # The chunk content should be passed
         assert "raw chunk content" in list(all_kwargs.values()) + list(all_args), (
-            "Expected chunk content in store.store_knowledge call"
+            "Expected chunk content in store.upsert_knowledge call"
         )
         # Should return a list with the knowledge ID
         assert result == ["kid-raw-1"]
@@ -370,7 +403,7 @@ class TestStoreRawChunk:
     def test_returns_list_of_single_kid(self):
         """_store_raw_chunk should return a list containing exactly one knowledge ID."""
         store = MagicMock()
-        store.store_knowledge.return_value = "kid-abc"
+        store.upsert_knowledge.return_value = ("kid-abc", "created")
         ingester = DocumentIngester(store)
         result = ingester._store_raw_chunk(
             chunk="text",
@@ -387,7 +420,7 @@ class TestStoreRawChunk:
     def test_passes_agent_id_to_store(self):
         """agent_id should be forwarded to the store."""
         store = MagicMock()
-        store.store_knowledge.return_value = "kid-1"
+        store.upsert_knowledge.return_value = ("kid-1", "created")
         ingester = DocumentIngester(store)
         ingester._store_raw_chunk(
             chunk="text",
@@ -397,17 +430,17 @@ class TestStoreRawChunk:
             project_id="p1",
             agent_id="agent-99",
         )
-        call_kwargs = store.store_knowledge.call_args
+        call_kwargs = store.upsert_knowledge.call_args
         all_kwargs = call_kwargs.kwargs if call_kwargs.kwargs else {}
         all_args = call_kwargs.args if call_kwargs.args else ()
         assert "agent-99" in list(all_kwargs.values()) + list(all_args), (
-            "Expected agent_id='agent-99' in store.store_knowledge call"
+            "Expected agent_id='agent-99' in store.upsert_knowledge call"
         )
 
     def test_source_file_and_name_passed(self):
         """source_file and source_name should be forwarded to the store."""
         store = MagicMock()
-        store.store_knowledge.return_value = "kid-1"
+        store.upsert_knowledge.return_value = ("kid-1", "created")
         ingester = DocumentIngester(store)
         ingester._store_raw_chunk(
             chunk="text",
@@ -417,13 +450,13 @@ class TestStoreRawChunk:
             project_id="p1",
             agent_id=None,
         )
-        call_kwargs = store.store_knowledge.call_args
+        call_kwargs = store.upsert_knowledge.call_args
         all_kwargs = call_kwargs.kwargs if call_kwargs.kwargs else {}
         all_args = call_kwargs.args if call_kwargs.args else ()
         combined = list(all_kwargs.values()) + list(all_args)
         assert "/some/path/readme.md" in combined or any(
             "/some/path/readme.md" in str(v) for v in combined
-        ), "Expected source_file in store.store_knowledge call"
+        ), "Expected source_file in store.upsert_knowledge call"
         assert "readme.md" in combined or any(
             "readme.md" in str(v) for v in combined
-        ), "Expected source_name in store.store_knowledge call"
+        ), "Expected source_name in store.upsert_knowledge call"

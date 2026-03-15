@@ -241,6 +241,7 @@ class TestSend:
         store.create_session.return_value = Session(
             id=1, agent_id=1, session_uuid="uuid-1",
         )
+        store.get_project_memory_revision.return_value = 3
         type(runner).is_session_started = PropertyMock(return_value=False)
         runner.invoke.return_value = AgentResponse(
             content="response", exit_code=0,
@@ -252,6 +253,7 @@ class TestSend:
         # invoke called with system_context (not None)
         call_args = runner.invoke.call_args
         assert call_args[1].get("system_context") is not None or len(call_args[0]) > 1
+        store.set_session_memory_revision.assert_called_once_with(1, 3)
 
     def test_records_user_and_assistant_turns(self):
         sm, store, runner = _make_sm()
@@ -287,6 +289,29 @@ class TestSend:
         resp = sm.send("do something")
 
         assert resp.cancelled
+
+    def test_stale_memory_revision_prefixes_hint_once(self):
+        sm, store, runner = _make_sm()
+        sm._session = Session(
+            id=1,
+            agent_id=1,
+            session_uuid="uuid-1",
+            memory_revision_at_context_build=1,
+        )
+        type(runner).is_session_started = PropertyMock(return_value=True)
+        store.get_project_memory_revision.return_value = 2
+        runner.invoke.return_value = AgentResponse(content="ok", exit_code=0)
+        store.count_session_turns.return_value = 2
+
+        sm.send("continue implementation")
+
+        sent_prompt = runner.invoke.call_args[0][0]
+        assert "project knowledge changed since this session started" in sent_prompt
+
+        runner.invoke.reset_mock()
+        sm.send("continue implementation")
+        sent_prompt = runner.invoke.call_args[0][0]
+        assert "project knowledge changed since this session started" not in sent_prompt
 
 
 class TestClose:

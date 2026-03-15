@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import uuid
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import pymysql.err
 
@@ -14,6 +16,49 @@ from myswat.memory import embedder
 from myswat.models.knowledge import KnowledgeEntry
 from myswat.models.session import Session, SessionTurn
 from myswat.models.work_item import Artifact, ReviewCycle, WorkItem
+
+if TYPE_CHECKING:
+    from myswat.agents.base import AgentRunner
+
+TRANSIENT_KNOWLEDGE_CATEGORIES = frozenset({"progress", "review_feedback"})
+LLM_MERGE_THRESHOLD = 0.60
+LEXICAL_STOP_WORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
+    "in", "is", "it", "of", "on", "or", "that", "the", "this", "to", "with",
+})
+FIELD_WEIGHTS: dict[str, float] = {
+    "title": 4.0,
+    "entity": 4.0,
+    "symbol": 4.0,
+    "tag": 3.0,
+    "source_file": 2.0,
+    "content": 1.0,
+}
+RELATION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\b(?P<src>[A-Za-z][A-Za-z0-9_-]+)\s+depends on\s+(?P<tgt>[A-Za-z][A-Za-z0-9 _-]+)", re.IGNORECASE), "depends_on"),
+    (re.compile(r"\b(?P<src>[A-Za-z][A-Za-z0-9_-]+)\s+uses\s+(?P<tgt>[A-Za-z][A-Za-z0-9 _-]+)", re.IGNORECASE), "uses"),
+    (re.compile(r"\b(?P<src>[A-Za-z][A-Za-z0-9_-]+)\s+handles\s+(?P<tgt>[A-Za-z][A-Za-z0-9 _-]+)", re.IGNORECASE), "handles"),
+    (re.compile(r"\b(?P<src>[A-Za-z][A-Za-z0-9_-]+)\s+executes\s+(?P<tgt>[A-Za-z][A-Za-z0-9 _-]+)", re.IGNORECASE), "executes"),
+    (re.compile(r"\b(?P<src>[A-Za-z][A-Za-z0-9_-]+)\s+triggers\s+(?P<tgt>[A-Za-z][A-Za-z0-9 _-]+)", re.IGNORECASE), "triggers"),
+    (re.compile(r"\b(?P<src>[A-Za-z][A-Za-z0-9_-]+)\s+requires\s+(?P<tgt>[A-Za-z][A-Za-z0-9 _-]+)", re.IGNORECASE), "requires"),
+)
+
+MERGE_PROMPT = """You are merging two project knowledge entries that refer to the same topic.
+
+Rules:
+- Preserve concrete technical facts.
+- Prefer the more specific and more up-to-date details.
+- Remove duplicates and contradictions when one side clearly supersedes the other.
+- Output only the merged knowledge content, no markdown fences or commentary.
+
+Existing title: {title}
+
+Existing content:
+{existing_content}
+
+New content:
+{new_content}
+"""
 
 
 class MemoryStore:
@@ -33,6 +78,668 @@ class MemoryStore:
             except json.JSONDecodeError:
                 return None
         return value
+
+    @staticmethod
+    def _normalize_text(value: str) -> str:
+        """Normalize text for dedup and conservative merge checks."""
+        text = re.sub(r"\s+", " ", value.strip().casefold())
+        return text
+
+    @classmethod
+    def _compute_content_hash(cls, content: str) -> str:
+        normalized = cls._normalize_text(content)
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _compute_raw_hash(content: str) -> str:
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _token_set(cls, content: str) -> set[str]:
+        return set(re.findall(r"[a-z0-9]+", cls._normalize_text(content)))
+
+    @classmethod
+    def _token_overlap_ratio(cls, left: str, right: str) -> float:
+        left_tokens = cls._token_set(left)
+        right_tokens = cls._token_set(right)
+        if not left_tokens or not right_tokens:
+            return 0.0
+        union = left_tokens | right_tokens
+        if not union:
+            return 0.0
+        return len(left_tokens & right_tokens) / len(union)
+
+    @staticmethod
+    def _merge_tags(*tag_lists: list[str] | None) -> list[str] | None:
+        merged: list[str] = []
+        seen: set[str] = set()
+        for tag_list in tag_lists:
+            if not tag_list:
+                continue
+            for tag in tag_list:
+                key = str(tag).strip()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                merged.append(key)
+        return merged or None
+
+    @staticmethod
+    def _ensure_dict(value: Any) -> dict[str, Any] | None:
+        return value if isinstance(value, dict) else None
+
+    @staticmethod
+    def _ensure_list_of_dicts(value: Any) -> list[dict[str, Any]] | None:
+        if not isinstance(value, list):
+            return None
+        return [item for item in value if isinstance(item, dict)] or None
+
+    @staticmethod
+    def _infer_source_type(
+        *,
+        source_type: str | None,
+        category: str,
+        source_file: str | None,
+    ) -> str:
+        if source_type:
+            return source_type
+        if category == "project_ops":
+            return "manual"
+        if source_file:
+            return "document"
+        return "session"
+
+    def _bump_project_memory_revision(self, project_id: int) -> None:
+        self._pool.execute(
+            "UPDATE projects SET memory_revision = memory_revision + 1 WHERE id = %s",
+            (project_id,),
+        )
+
+    def _scope_sql_and_args(
+        self,
+        *,
+        project_id: int,
+        category: str,
+        source_type: str,
+        source_file: str | None,
+        alias: str = "k",
+    ) -> tuple[str, list[Any]]:
+        sql = (
+            f"{alias}.project_id = %s AND {alias}.category = %s AND "
+            f"{alias}.source_type = %s"
+        )
+        args: list[Any] = [project_id, category, source_type]
+        if source_type == "document":
+            sql += f" AND {alias}.source_file = %s"
+            args.append(source_file)
+        return sql, args
+
+    def _parse_knowledge_row(self, row: dict | None) -> dict | None:
+        if not row:
+            return None
+        parsed = dict(row)
+        for field in ("source_turn_ids", "tags", "search_metadata_json", "merged_from"):
+            if parsed.get(field) is not None:
+                parsed[field] = self._parse_json_field(parsed[field])
+        return parsed
+
+    @staticmethod
+    def _infer_language_from_source_file(source_file: str | None) -> str | None:
+        if not source_file:
+            return None
+        lower = source_file.casefold()
+        if lower.endswith(".rs"):
+            return "rust"
+        if lower.endswith(".go"):
+            return "go"
+        if lower.endswith(".py"):
+            return "python"
+        if lower.endswith(".md"):
+            return "markdown"
+        return None
+
+    @classmethod
+    def _build_default_search_metadata(
+        cls,
+        *,
+        source_type: str,
+        source_file: str | None,
+        tags: list[str] | None,
+        search_metadata_json: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        metadata = dict(search_metadata_json or {})
+        metadata.setdefault("source_type", source_type)
+        if source_file:
+            metadata.setdefault("source_file", source_file)
+        language = cls._infer_language_from_source_file(source_file)
+        if language:
+            metadata.setdefault("language", language)
+        if tags:
+            metadata.setdefault("tags", tags)
+            for tag in tags:
+                if ":" not in str(tag):
+                    continue
+                key, value = str(tag).split(":", 1)
+                key = key.strip()
+                value = value.strip()
+                if key in {"repo", "subsystem", "language"} and value:
+                    metadata.setdefault(key, value)
+        return metadata or None
+
+    @staticmethod
+    def _split_camel(token: str) -> list[str]:
+        parts = re.findall(
+            r"[A-Z]+(?=[A-Z][a-z]|\d|$)|[A-Z]?[a-z]+|\d+",
+            token,
+        )
+        return [part.casefold() for part in parts if part]
+
+    @staticmethod
+    def _add_term(term_map: dict[tuple[str, str], float], field: str, term: str) -> None:
+        normalized = term.strip().casefold()
+        if not normalized:
+            return
+        if not re.search(r"[a-z0-9]", normalized):
+            return
+        if normalized in LEXICAL_STOP_WORDS:
+            return
+        key = (field, normalized)
+        term_map[key] = max(term_map.get(key, 0.0), FIELD_WEIGHTS[field])
+
+    @classmethod
+    def _tokenize_structured_token(
+        cls,
+        token: str,
+        *,
+        field: str,
+        include_phrase_terms: bool,
+        term_map: dict[tuple[str, str], float],
+    ) -> None:
+        raw = token.strip()
+        if not raw:
+            return
+        cls._add_term(term_map, field, raw)
+
+        if "::" in raw:
+            for part in raw.split("::"):
+                cls._tokenize_structured_token(
+                    part, field=field, include_phrase_terms=False, term_map=term_map,
+                )
+
+        if "/" in raw:
+            for part in [seg for seg in raw.split("/") if seg]:
+                cls._tokenize_structured_token(
+                    part, field=field, include_phrase_terms=False, term_map=term_map,
+                )
+
+        if "." in raw:
+            pieces = [seg for seg in raw.split(".") if seg]
+            if len(pieces) >= 2:
+                cls._add_term(term_map, field, ".".join(pieces[:2]))
+            for part in pieces:
+                cls._tokenize_structured_token(
+                    part, field=field, include_phrase_terms=False, term_map=term_map,
+                )
+            if raw.endswith(".go") or raw.endswith(".rs"):
+                base = raw.rsplit(".", 1)[0]
+                cls._add_term(term_map, field, base)
+                cls._tokenize_structured_token(
+                    base, field=field, include_phrase_terms=False, term_map=term_map,
+                )
+
+        split_tokens: list[str] = []
+        for kebab_part in [seg for seg in re.split(r"[-_]", raw) if seg]:
+            cls._add_term(term_map, field, kebab_part)
+            camel_parts = cls._split_camel(kebab_part)
+            if camel_parts:
+                split_tokens.extend(camel_parts)
+                for part in camel_parts:
+                    cls._add_term(term_map, field, part)
+            else:
+                split_tokens.append(kebab_part.casefold())
+        if include_phrase_terms and len(split_tokens) >= 2:
+            for idx in range(len(split_tokens) - 1):
+                cls._add_term(term_map, field, f"{split_tokens[idx]} {split_tokens[idx + 1]}")
+
+    @classmethod
+    def _extract_terms_for_field(
+        cls,
+        *,
+        field: str,
+        text: str,
+        structured: bool,
+        include_phrase_terms: bool,
+    ) -> list[tuple[str, str, float]]:
+        term_map: dict[tuple[str, str], float] = {}
+        if not text.strip():
+            return []
+
+        if structured:
+            candidates = re.findall(r"[A-Za-z0-9_:/.\-]+", text)
+            for candidate in candidates:
+                cls._tokenize_structured_token(
+                    candidate,
+                    field=field,
+                    include_phrase_terms=include_phrase_terms,
+                    term_map=term_map,
+                )
+            if include_phrase_terms:
+                words = re.findall(r"[A-Za-z0-9]+", text.casefold())
+                words = [word for word in words if word not in LEXICAL_STOP_WORDS]
+                for idx in range(len(words) - 1):
+                    cls._add_term(term_map, field, f"{words[idx]} {words[idx + 1]}")
+        else:
+            for token in re.findall(r"[A-Za-z0-9_:/.\-]+", text):
+                cls._tokenize_structured_token(
+                    token,
+                    field=field,
+                    include_phrase_terms=False,
+                    term_map=term_map,
+                )
+
+        return [(field, term, weight) for (field, term), weight in term_map.items()]
+
+    @classmethod
+    def _build_knowledge_terms(
+        cls,
+        *,
+        title: str,
+        content: str,
+        tags: list[str] | None,
+        source_file: str | None,
+        entities: list[str] | None = None,
+    ) -> list[tuple[str, str, float]]:
+        terms: dict[tuple[str, str], float] = {}
+        for field_name, text, structured, include_phrases in [
+            ("title", title, True, True),
+            ("content", content, False, False),
+        ]:
+            for field, term, weight in cls._extract_terms_for_field(
+                field=field_name,
+                text=text,
+                structured=structured,
+                include_phrase_terms=include_phrases,
+            ):
+                terms[(field, term)] = max(terms.get((field, term), 0.0), weight)
+
+        for tag in tags or []:
+            for field, term, weight in cls._extract_terms_for_field(
+                field="tag",
+                text=str(tag),
+                structured=True,
+                include_phrase_terms=True,
+            ):
+                terms[(field, term)] = max(terms.get((field, term), 0.0), weight)
+
+        if source_file:
+            for field, term, weight in cls._extract_terms_for_field(
+                field="source_file",
+                text=source_file,
+                structured=True,
+                include_phrase_terms=False,
+            ):
+                terms[(field, term)] = max(terms.get((field, term), 0.0), weight)
+
+        for entity in entities or []:
+            for field, term, weight in cls._extract_terms_for_field(
+                field="entity",
+                text=entity,
+                structured=True,
+                include_phrase_terms=True,
+            ):
+                terms[(field, term)] = max(terms.get((field, term), 0.0), weight)
+
+        return [(field, term, weight) for (field, term), weight in terms.items()]
+
+    @classmethod
+    def _extract_entities(
+        cls,
+        *,
+        title: str,
+        content: str,
+        tags: list[str] | None,
+        source_file: str | None,
+    ) -> list[str]:
+        candidates: dict[str, str] = {}
+
+        def add_entity(raw: str) -> None:
+            cleaned = raw.strip(" .,:;()[]{}")
+            if not cleaned or len(cleaned) < 2:
+                return
+            normalized = cleaned.casefold()
+            if normalized in LEXICAL_STOP_WORDS:
+                return
+            candidates.setdefault(normalized, cleaned)
+
+        for text in [title, *(tags or [])]:
+            for token in re.findall(r"[A-Za-z][A-Za-z0-9_:\-./]+", text):
+                if any(ch.isupper() for ch in token) or any(sep in token for sep in ("-", "_", "::", ".", "/")):
+                    add_entity(token)
+
+        if source_file:
+            path = source_file.replace("\\", "/")
+            add_entity(path)
+            for segment in [part for part in path.split("/") if part]:
+                add_entity(segment)
+            basename = path.rsplit("/", 1)[-1]
+            add_entity(basename)
+            if "." in basename:
+                add_entity(basename.rsplit(".", 1)[0])
+
+        for token in re.findall(r"\b[A-Z][A-Za-z0-9_]+\b", content):
+            add_entity(token)
+
+        return list(candidates.values())
+
+    @classmethod
+    def _extract_relations(
+        cls,
+        *,
+        title: str,
+        content: str,
+    ) -> list[tuple[str, str, str]]:
+        text = f"{title}\n{content[:500]}"
+        relations: list[tuple[str, str, str]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for pattern, relation in RELATION_PATTERNS:
+            for match in pattern.finditer(text):
+                source = " ".join(match.group("src").split()).strip(" .,:;")
+                target = " ".join(match.group("tgt").split()).strip(" .,:;")
+                if not source or not target or source.casefold() == target.casefold():
+                    continue
+                key = (source.casefold(), relation, target.casefold())
+                if key in seen:
+                    continue
+                seen.add(key)
+                relations.append((source, relation, target))
+        return relations
+
+    def _replace_knowledge_terms(
+        self,
+        *,
+        project_id: int,
+        knowledge_id: int,
+        title: str,
+        content: str,
+        tags: list[str] | None,
+        source_file: str | None,
+        entities: list[str] | None = None,
+    ) -> None:
+        self._pool.execute(
+            "DELETE FROM knowledge_terms WHERE knowledge_id = %s",
+            (knowledge_id,),
+        )
+        terms = self._build_knowledge_terms(
+            title=title,
+            content=content,
+            tags=tags,
+            source_file=source_file,
+            entities=entities,
+        )
+        if not terms:
+            return
+        rows = [
+            (project_id, knowledge_id, term, field, weight)
+            for field, term, weight in terms
+        ]
+        values_sql = ", ".join(["(%s, %s, %s, %s, %s)"] * len(rows))
+        args: list[Any] = []
+        for row in rows:
+            args.extend(row)
+        self._pool.execute(
+            "INSERT INTO knowledge_terms "
+            "(project_id, knowledge_id, term, field, weight) "
+            f"VALUES {values_sql}",
+            tuple(args),
+        )
+
+    def _replace_knowledge_graph(
+        self,
+        *,
+        project_id: int,
+        knowledge_id: int,
+        title: str,
+        content: str,
+        tags: list[str] | None,
+        source_file: str | None,
+    ) -> list[str]:
+        self._pool.execute(
+            "DELETE FROM knowledge_entities WHERE knowledge_id = %s",
+            (knowledge_id,),
+        )
+        self._pool.execute(
+            "DELETE FROM knowledge_relations WHERE knowledge_id = %s",
+            (knowledge_id,),
+        )
+        entities = self._extract_entities(
+            title=title,
+            content=content,
+            tags=tags,
+            source_file=source_file,
+        )
+        if entities:
+            entity_rows = [
+                (project_id, knowledge_id, entity, 0.8)
+                for entity in entities
+            ]
+            values_sql = ", ".join(["(%s, %s, %s, %s)"] * len(entity_rows))
+            args: list[Any] = []
+            for row in entity_rows:
+                args.extend(row)
+            self._pool.execute(
+                "INSERT INTO knowledge_entities "
+                "(project_id, knowledge_id, entity_name, confidence) "
+                f"VALUES {values_sql}",
+                tuple(args),
+            )
+
+        relations = self._extract_relations(title=title, content=content)
+        if relations:
+            relation_rows = [
+                (project_id, knowledge_id, source, relation, target, 0.7)
+                for source, relation, target in relations
+            ]
+            values_sql = ", ".join(["(%s, %s, %s, %s, %s, %s)"] * len(relation_rows))
+            args = []
+            for row in relation_rows:
+                args.extend(row)
+            self._pool.execute(
+                "INSERT INTO knowledge_relations "
+                "(project_id, knowledge_id, source_entity, relation, target_entity, confidence) "
+                f"VALUES {values_sql}",
+                tuple(args),
+            )
+        return entities
+
+    def _query_terms(self, query: str) -> list[str]:
+        term_map: dict[tuple[str, str], float] = {}
+        for field, term, _weight in self._extract_terms_for_field(
+            field="content",
+            text=query,
+            structured=True,
+            include_phrase_terms=True,
+        ):
+            term_map[(field, term)] = 1.0
+        return [term for (_field, term) in term_map.keys()]
+
+    def _find_exact_knowledge_in_scope(
+        self,
+        *,
+        project_id: int,
+        category: str,
+        source_type: str,
+        source_file: str | None,
+        content_hash: str,
+    ) -> dict | None:
+        scope_sql, args = self._scope_sql_and_args(
+            project_id=project_id,
+            category=category,
+            source_type=source_type,
+            source_file=source_file,
+        )
+        sql = (
+            "SELECT * FROM knowledge k "
+            f"WHERE {scope_sql} AND k.content_hash = %s "
+            "AND (k.expires_at IS NULL OR k.expires_at > NOW()) "
+            "ORDER BY k.updated_at DESC LIMIT 1"
+        )
+        args.append(content_hash)
+        return self._parse_knowledge_row(self._pool.fetch_one(sql, tuple(args)))
+
+    def _find_merge_candidates(
+        self,
+        *,
+        project_id: int,
+        category: str,
+        source_type: str,
+        source_file: str | None,
+        normalized_title: str,
+        limit: int = 5,
+    ) -> list[dict]:
+        scope_sql, args = self._scope_sql_and_args(
+            project_id=project_id,
+            category=category,
+            source_type=source_type,
+            source_file=source_file,
+        )
+        sql = (
+            "SELECT * FROM knowledge k "
+            f"WHERE {scope_sql} "
+            "AND (k.expires_at IS NULL OR k.expires_at > NOW()) "
+            "ORDER BY k.version DESC, k.updated_at DESC LIMIT %s"
+        )
+        args.append(max(limit * 5, limit))
+        rows = self._pool.fetch_all(sql, tuple(args))
+        filtered: list[dict] = []
+        for row in rows:
+            parsed = self._parse_knowledge_row(row)
+            if not parsed:
+                continue
+            if self._normalize_text(str(parsed.get("title") or "")) == normalized_title:
+                filtered.append(parsed)
+            if len(filtered) >= limit:
+                break
+        return filtered
+
+    def _compute_merge_score(
+        self,
+        *,
+        title: str,
+        content: str,
+        candidate: dict,
+        source_type: str,
+        source_file: str | None,
+    ) -> float:
+        score = 0.0
+        if self._normalize_text(candidate.get("title") or "") == self._normalize_text(title):
+            score += 0.6
+        score += 0.4 * self._token_overlap_ratio(content, candidate.get("content") or "")
+        if source_type == "document" and candidate.get("source_file") == source_file:
+            score += 0.05
+        return min(score, 1.0)
+
+    def _update_knowledge_after_merge(
+        self,
+        *,
+        knowledge_id: int,
+        project_id: int,
+        title: str,
+        content: str,
+        source_file: str | None,
+        tags: list[str] | None,
+        relevance_score: float,
+        confidence: float,
+        search_metadata_json: dict[str, Any] | None,
+        previous_row: dict,
+        compute_embedding: bool,
+        content_hash: str,
+        merged_from_entry: dict[str, Any] | None = None,
+    ) -> None:
+        vec_sql = "NULL"
+        embed_args: list[Any] = []
+        if compute_embedding:
+            vec_sql, embed_args = embedder.resolve_embed_sql(
+                f"{title}\n{content}", self._tidb_embedding_model,
+            )
+
+        merged_from = self._ensure_list_of_dicts(previous_row.get("merged_from")) or []
+        if merged_from_entry is not None:
+            merged_from.append(merged_from_entry)
+
+        sql = (
+            "UPDATE knowledge SET "
+            "title = %s, content = %s, embedding = "
+            f"{vec_sql}, tags = %s, relevance_score = %s, confidence = %s, "
+            "content_hash = %s, version = %s, search_metadata_json = %s, "
+            "merged_from = %s "
+            "WHERE id = %s"
+        )
+        args: list[Any] = [title, content]
+        args.extend(embed_args)
+        args.extend([
+            json.dumps(tags) if tags else None,
+            relevance_score,
+            confidence,
+            content_hash,
+            int(previous_row.get("version") or 1) + 1,
+            json.dumps(search_metadata_json) if search_metadata_json else None,
+            json.dumps(merged_from) if merged_from else None,
+            knowledge_id,
+        ])
+        self._pool.execute(sql, tuple(args))
+        entities = self._replace_knowledge_graph(
+            project_id=project_id,
+            knowledge_id=knowledge_id,
+            title=title,
+            content=content,
+            tags=tags,
+            source_file=source_file,
+        )
+        self._replace_knowledge_terms(
+            project_id=project_id,
+            knowledge_id=knowledge_id,
+            title=title,
+            content=content,
+            tags=tags,
+            source_file=source_file,
+            entities=entities,
+        )
+        self._bump_project_memory_revision(project_id)
+
+    def _merge_with_runner(
+        self,
+        *,
+        runner: "AgentRunner",
+        title: str,
+        existing_content: str,
+        new_content: str,
+    ) -> str | None:
+        try:
+            response = runner.invoke(
+                MERGE_PROMPT.format(
+                    title=title,
+                    existing_content=existing_content,
+                    new_content=new_content,
+                ),
+            )
+        except Exception:
+            return None
+        if not getattr(response, "success", False):
+            return None
+        merged = str(getattr(response, "content", "") or "").strip()
+        return merged or None
+
+    def _supersede_knowledge(
+        self,
+        *,
+        knowledge_id: int,
+        project_id: int,
+    ) -> None:
+        self._pool.execute(
+            "UPDATE knowledge SET expires_at = NOW(), relevance_score = 0.0 WHERE id = %s",
+            (knowledge_id,),
+        )
+        self._bump_project_memory_revision(project_id)
 
     # ──────────────────────────── Projects ────────────────────────────
 
@@ -60,6 +767,15 @@ class MemoryStore:
 
     def get_project(self, project_id: int) -> dict | None:
         return self._pool.fetch_one("SELECT * FROM projects WHERE id = %s", (project_id,))
+
+    def get_project_memory_revision(self, project_id: int) -> int:
+        row = self._pool.fetch_one(
+            "SELECT memory_revision FROM projects WHERE id = %s",
+            (project_id,),
+        )
+        if not row:
+            return 0
+        return int(row.get("memory_revision") or 0)
 
     # ──────────────────────────── Agents ────────────────────────────
 
@@ -102,9 +818,10 @@ class MemoryStore:
     ) -> Session:
         session_uuid = str(uuid.uuid4())
         sid = self._pool.insert_returning_id(
-            "INSERT INTO sessions (agent_id, session_uuid, parent_session_id, purpose, work_item_id) "
-            "VALUES (%s, %s, %s, %s, %s)",
-            (agent_id, session_uuid, parent_session_id, purpose, work_item_id),
+            "INSERT INTO sessions (agent_id, session_uuid, parent_session_id, purpose, work_item_id, "
+            "memory_revision_at_context_build) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (agent_id, session_uuid, parent_session_id, purpose, work_item_id, None),
         )
         return Session(id=sid, agent_id=agent_id, session_uuid=session_uuid,
                         parent_session_id=parent_session_id, purpose=purpose,
@@ -161,6 +878,12 @@ class MemoryStore:
         self._pool.execute(
             "UPDATE sessions SET purpose = %s WHERE id = %s",
             (progress_note[:512], session_id),
+        )
+
+    def set_session_memory_revision(self, session_id: int, memory_revision: int) -> None:
+        self._pool.execute(
+            "UPDATE sessions SET memory_revision_at_context_build = %s WHERE id = %s",
+            (memory_revision, session_id),
         )
 
     def get_session(self, session_id: int) -> dict | None:
@@ -526,8 +1249,25 @@ class MemoryStore:
         source_turn_ids: list[int] | None = None, source_file: str | None = None,
         tags: list[str] | None = None, relevance_score: float = 1.0,
         confidence: float = 1.0, ttl_days: int | None = None,
-        compute_embedding: bool = True,
+        compute_embedding: bool = True, source_type: str | None = None,
+        search_metadata_json: dict[str, Any] | None = None,
+        merged_from: list[dict[str, Any]] | None = None,
+        content_hash: str | None = None,
+        version: int = 1,
+        bump_revision: bool = False,
     ) -> int:
+        effective_source_type = self._infer_source_type(
+            source_type=source_type,
+            category=category,
+            source_file=source_file,
+        )
+        effective_content_hash = content_hash or self._compute_content_hash(content)
+        effective_metadata = self._build_default_search_metadata(
+            source_type=effective_source_type,
+            source_file=source_file,
+            tags=tags,
+            search_metadata_json=search_metadata_json,
+        )
         vec_sql = "NULL"
         embed_args: list[Any] = []
         if compute_embedding:
@@ -541,27 +1281,287 @@ class MemoryStore:
 
         sql = (
             "INSERT INTO knowledge (project_id, agent_id, source_session_id, "
-            "source_turn_ids, source_file, category, title, content, embedding, tags, "
-            "relevance_score, confidence, ttl_days, expires_at) "
-            f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s, {vec_sql}, %s, %s, %s, %s, %s)"
+            "source_turn_ids, source_file, source_type, category, title, content, embedding, "
+            "tags, relevance_score, confidence, ttl_days, expires_at, content_hash, "
+            "version, search_metadata_json, merged_from) "
+            f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, {vec_sql}, %s, %s, %s, %s, %s, %s, %s, %s)"
         )
         args: list[Any] = [
             project_id, agent_id, source_session_id,
             json.dumps(source_turn_ids) if source_turn_ids else None,
-            source_file, category, title, content,
+            source_file, effective_source_type, category, title, content,
         ]
         args.extend(embed_args)
         args.extend([
             json.dumps(tags) if tags else None,
             relevance_score, confidence, ttl_days, expires_at,
+            effective_content_hash,
+            version,
+            json.dumps(effective_metadata) if effective_metadata else None,
+            json.dumps(merged_from) if merged_from else None,
         ])
 
-        return self._pool.insert_returning_id(sql, tuple(args))
+        knowledge_id = self._pool.insert_returning_id(sql, tuple(args))
+        entities = self._replace_knowledge_graph(
+            project_id=project_id,
+            knowledge_id=knowledge_id,
+            title=title,
+            content=content,
+            tags=tags,
+            source_file=source_file,
+        )
+        self._replace_knowledge_terms(
+            project_id=project_id,
+            knowledge_id=knowledge_id,
+            title=title,
+            content=content,
+            tags=tags,
+            source_file=source_file,
+            entities=entities,
+        )
+        if bump_revision:
+            self._bump_project_memory_revision(project_id)
+        return knowledge_id
+
+    def upsert_knowledge(
+        self,
+        project_id: int,
+        category: str,
+        title: str,
+        content: str,
+        *,
+        source_type: str | None = None,
+        agent_id: int | None = None,
+        source_session_id: int | None = None,
+        source_turn_ids: list[int] | None = None,
+        source_file: str | None = None,
+        tags: list[str] | None = None,
+        relevance_score: float = 1.0,
+        confidence: float = 1.0,
+        ttl_days: int | None = None,
+        compute_embedding: bool = True,
+        search_metadata_json: dict[str, Any] | None = None,
+        merge_threshold: float = 0.85,
+        merge_runner: "AgentRunner | None" = None,
+    ) -> tuple[int, str]:
+        effective_source_type = self._infer_source_type(
+            source_type=source_type,
+            category=category,
+            source_file=source_file,
+        )
+        effective_tags = [str(tag).strip() for tag in (tags or []) if str(tag).strip()] or None
+        effective_hash = self._compute_content_hash(content)
+        effective_metadata = self._build_default_search_metadata(
+            source_type=effective_source_type,
+            source_file=source_file,
+            tags=effective_tags,
+            search_metadata_json=search_metadata_json,
+        )
+
+        if category in TRANSIENT_KNOWLEDGE_CATEGORIES:
+            knowledge_id = self.store_knowledge(
+                project_id=project_id,
+                category=category,
+                title=title,
+                content=content,
+                agent_id=agent_id,
+                source_session_id=source_session_id,
+                source_turn_ids=source_turn_ids,
+                source_file=source_file,
+                tags=effective_tags,
+                relevance_score=relevance_score,
+                confidence=confidence,
+                ttl_days=ttl_days,
+                compute_embedding=compute_embedding,
+                source_type=effective_source_type,
+                search_metadata_json=effective_metadata,
+                content_hash=effective_hash,
+                bump_revision=True,
+            )
+            return knowledge_id, "created"
+
+        existing = self._find_exact_knowledge_in_scope(
+            project_id=project_id,
+            category=category,
+            source_type=effective_source_type,
+            source_file=source_file,
+            content_hash=effective_hash,
+        )
+        if existing:
+            return int(existing["id"]), "skipped"
+
+        normalized_title = self._normalize_text(title)
+        candidates = self._find_merge_candidates(
+            project_id=project_id,
+            category=category,
+            source_type=effective_source_type,
+            source_file=source_file,
+            normalized_title=normalized_title,
+        )
+
+        best_candidate: dict | None = None
+        best_score = -1.0
+        for candidate in candidates:
+            score = self._compute_merge_score(
+                title=title,
+                content=content,
+                candidate=candidate,
+                source_type=effective_source_type,
+                source_file=source_file,
+            )
+            if score > best_score:
+                best_score = score
+                best_candidate = candidate
+
+        normalized_content = self._normalize_text(content)
+        if best_candidate is not None:
+            existing_content = best_candidate.get("content") or ""
+            normalized_existing = self._normalize_text(existing_content)
+            existing_tags = best_candidate.get("tags")
+            if isinstance(existing_tags, str):
+                existing_tags = self._parse_json_field(existing_tags)
+            merged_tags = self._merge_tags(existing_tags, effective_tags)
+
+            if normalized_existing in normalized_content:
+                merged_from_entry = {
+                    "merged_at": datetime.now().isoformat(timespec="seconds"),
+                    "source_type": effective_source_type,
+                    "source_session_id": source_session_id,
+                    "source_turn_ids": source_turn_ids,
+                    "source_file": source_file,
+                }
+                self._update_knowledge_after_merge(
+                    knowledge_id=int(best_candidate["id"]),
+                    project_id=project_id,
+                    title=title,
+                    content=content,
+                    source_file=source_file,
+                    tags=merged_tags,
+                    relevance_score=max(relevance_score, float(best_candidate.get("relevance_score") or 0.0)),
+                    confidence=max(confidence, float(best_candidate.get("confidence") or 0.0)),
+                    search_metadata_json=effective_metadata,
+                    previous_row=best_candidate,
+                    compute_embedding=compute_embedding,
+                    content_hash=effective_hash,
+                    merged_from_entry=merged_from_entry,
+                )
+                return int(best_candidate["id"]), "merged"
+
+            if normalized_content in normalized_existing:
+                changed = merged_tags != existing_tags
+                if changed:
+                    self._update_knowledge_after_merge(
+                        knowledge_id=int(best_candidate["id"]),
+                        project_id=project_id,
+                        title=str(best_candidate.get("title") or title),
+                        content=existing_content,
+                        source_file=str(best_candidate.get("source_file") or source_file or ""),
+                        tags=merged_tags,
+                        relevance_score=max(relevance_score, float(best_candidate.get("relevance_score") or 0.0)),
+                        confidence=max(confidence, float(best_candidate.get("confidence") or 0.0)),
+                        search_metadata_json=effective_metadata or self._ensure_dict(
+                            best_candidate.get("search_metadata_json"),
+                        ),
+                        previous_row=best_candidate,
+                        compute_embedding=compute_embedding,
+                        content_hash=str(best_candidate.get("content_hash") or effective_hash),
+                    )
+                    return int(best_candidate["id"]), "merged"
+                return int(best_candidate["id"]), "skipped"
+
+            if best_score >= min(merge_threshold, LLM_MERGE_THRESHOLD) and merge_runner is not None:
+                merged_content = self._merge_with_runner(
+                    runner=merge_runner,
+                    title=title,
+                    existing_content=existing_content,
+                    new_content=content,
+                )
+                if merged_content:
+                    merged_hash = self._compute_content_hash(merged_content)
+                    self._update_knowledge_after_merge(
+                        knowledge_id=int(best_candidate["id"]),
+                        project_id=project_id,
+                        title=title,
+                        content=merged_content,
+                        source_file=source_file,
+                        tags=merged_tags,
+                        relevance_score=max(relevance_score, float(best_candidate.get("relevance_score") or 0.0)),
+                        confidence=max(confidence, float(best_candidate.get("confidence") or 0.0)),
+                        search_metadata_json=effective_metadata,
+                        previous_row=best_candidate,
+                        compute_embedding=compute_embedding,
+                        content_hash=merged_hash,
+                        merged_from_entry={
+                            "merged_at": datetime.now().isoformat(timespec="seconds"),
+                            "source_type": effective_source_type,
+                            "source_session_id": source_session_id,
+                            "source_turn_ids": source_turn_ids,
+                            "source_file": source_file,
+                        },
+                    )
+                    return int(best_candidate["id"]), "merged"
+
+            if (
+                best_score >= merge_threshold
+                and effective_source_type == "document"
+                and source_file
+                and best_candidate.get("source_file") == source_file
+                and self._normalize_text(best_candidate.get("title") or "") == normalized_title
+                and confidence >= float(best_candidate.get("confidence") or 0.0)
+            ):
+                self._supersede_knowledge(
+                    knowledge_id=int(best_candidate["id"]),
+                    project_id=project_id,
+                )
+                knowledge_id = self.store_knowledge(
+                    project_id=project_id,
+                    category=category,
+                    title=title,
+                    content=content,
+                    agent_id=agent_id,
+                    source_session_id=source_session_id,
+                    source_turn_ids=source_turn_ids,
+                    source_file=source_file,
+                    tags=effective_tags,
+                    relevance_score=relevance_score,
+                    confidence=confidence,
+                    ttl_days=ttl_days,
+                    compute_embedding=compute_embedding,
+                    source_type=effective_source_type,
+                    search_metadata_json=effective_metadata,
+                    content_hash=effective_hash,
+                    bump_revision=True,
+                )
+                return knowledge_id, "superseded"
+
+            if best_score < merge_threshold:
+                best_candidate = None
+
+        knowledge_id = self.store_knowledge(
+            project_id=project_id,
+            category=category,
+            title=title,
+            content=content,
+            agent_id=agent_id,
+            source_session_id=source_session_id,
+            source_turn_ids=source_turn_ids,
+            source_file=source_file,
+            tags=effective_tags,
+            relevance_score=relevance_score,
+            confidence=confidence,
+            ttl_days=ttl_days,
+            compute_embedding=compute_embedding,
+            source_type=effective_source_type,
+            search_metadata_json=effective_metadata,
+            content_hash=effective_hash,
+            bump_revision=True,
+        )
+        return knowledge_id, "created"
 
     def search_knowledge(
         self, project_id: int, query: str,
         agent_id: int | None = None, category: str | None = None,
-        tags: list[str] | None = None, limit: int = 10,
+        tags: list[str] | None = None, source_type: str | None = None, limit: int = 10,
         use_vector: bool = True, use_fulltext: bool = True,
     ) -> list[dict]:
         """Hybrid search across project knowledge.
@@ -578,17 +1578,26 @@ class MemoryStore:
         if category:
             conditions.append("k.category = %s")
             where_args.append(category)
+        if source_type:
+            conditions.append("k.source_type = %s")
+            where_args.append(source_type)
 
         # Build score components
         score_parts = ["k.relevance_score"]
 
         if use_fulltext and query:
-            # TiDB Serverless doesn't support FULLTEXT; use LIKE for keyword matching
-            score_parts.append(
-                "CASE WHEN k.title LIKE %s OR k.content LIKE %s THEN 1.0 ELSE 0.0 END"
-            )
-            like_pattern = f"%{query}%"
-            score_args.extend([like_pattern, like_pattern])
+            query_terms = self._query_terms(query)
+            if query_terms:
+                placeholders = ", ".join(["%s"] * len(query_terms))
+                score_parts.append(
+                    "COALESCE(("
+                    "SELECT SUM(kt.weight) FROM knowledge_terms kt "
+                    "WHERE kt.project_id = k.project_id "
+                    "AND kt.knowledge_id = k.id "
+                    f"AND kt.term IN ({placeholders})"
+                    "), 0)"
+                )
+                score_args.extend(query_terms)
 
         if use_vector and query:
             vec_sql, vec_args = embedder.resolve_embed_sql(
@@ -617,12 +1626,12 @@ class MemoryStore:
         return self._pool.fetch_all(sql, tuple(args))
 
     def search_knowledge_fulltext_only(
-        self, project_id: int, query: str, limit: int = 10,
+        self, project_id: int, query: str, limit: int = 10, source_type: str | None = None,
     ) -> list[dict]:
         """Keyword-only search (no embedding model needed)."""
         return self.search_knowledge(
             project_id=project_id, query=query, limit=limit,
-            use_vector=False, use_fulltext=True,
+            use_vector=False, use_fulltext=True, source_type=source_type,
         )
 
     def list_knowledge(
@@ -645,13 +1654,64 @@ class MemoryStore:
         re-learn without affecting other categories.
         Returns the number of rows deleted.
         """
+        self._pool.execute(
+            "DELETE kt FROM knowledge_terms kt "
+            "JOIN knowledge k ON kt.knowledge_id = k.id "
+            "WHERE k.project_id = %s AND k.category = %s",
+            (project_id, category),
+        )
+        self._pool.execute(
+            "DELETE ke FROM knowledge_entities ke "
+            "JOIN knowledge k ON ke.knowledge_id = k.id "
+            "WHERE k.project_id = %s AND k.category = %s",
+            (project_id, category),
+        )
+        self._pool.execute(
+            "DELETE kr FROM knowledge_relations kr "
+            "JOIN knowledge k ON kr.knowledge_id = k.id "
+            "WHERE k.project_id = %s AND k.category = %s",
+            (project_id, category),
+        )
         return self._pool.execute(
             "DELETE FROM knowledge WHERE project_id = %s AND category = %s",
             (project_id, category),
         )
 
+    def delete_knowledge_by_source_file(self, project_id: int, source_file: str) -> int:
+        self._pool.execute(
+            "DELETE kt FROM knowledge_terms kt "
+            "JOIN knowledge k ON kt.knowledge_id = k.id "
+            "WHERE k.project_id = %s AND k.source_file = %s",
+            (project_id, source_file),
+        )
+        self._pool.execute(
+            "DELETE ke FROM knowledge_entities ke "
+            "JOIN knowledge k ON ke.knowledge_id = k.id "
+            "WHERE k.project_id = %s AND k.source_file = %s",
+            (project_id, source_file),
+        )
+        self._pool.execute(
+            "DELETE kr FROM knowledge_relations kr "
+            "JOIN knowledge k ON kr.knowledge_id = k.id "
+            "WHERE k.project_id = %s AND k.source_file = %s",
+            (project_id, source_file),
+        )
+        return self._pool.execute(
+            "DELETE FROM knowledge WHERE project_id = %s AND source_file = %s",
+            (project_id, source_file),
+        )
+
     def delete_knowledge(self, knowledge_id: int) -> int:
         """Delete a single knowledge entry by ID."""
+        self._pool.execute(
+            "DELETE FROM knowledge_terms WHERE knowledge_id = %s", (knowledge_id,),
+        )
+        self._pool.execute(
+            "DELETE FROM knowledge_entities WHERE knowledge_id = %s", (knowledge_id,),
+        )
+        self._pool.execute(
+            "DELETE FROM knowledge_relations WHERE knowledge_id = %s", (knowledge_id,),
+        )
         return self._pool.execute(
             "DELETE FROM knowledge WHERE id = %s", (knowledge_id,),
         )
@@ -665,9 +1725,101 @@ class MemoryStore:
 
     def expire_stale_knowledge(self) -> int:
         """Delete knowledge entries past their TTL."""
+        self._pool.execute(
+            "DELETE kt FROM knowledge_terms kt "
+            "JOIN knowledge k ON kt.knowledge_id = k.id "
+            "WHERE k.expires_at IS NOT NULL AND k.expires_at < NOW()",
+        )
+        self._pool.execute(
+            "DELETE ke FROM knowledge_entities ke "
+            "JOIN knowledge k ON ke.knowledge_id = k.id "
+            "WHERE k.expires_at IS NOT NULL AND k.expires_at < NOW()",
+        )
+        self._pool.execute(
+            "DELETE kr FROM knowledge_relations kr "
+            "JOIN knowledge k ON kr.knowledge_id = k.id "
+            "WHERE k.expires_at IS NOT NULL AND k.expires_at < NOW()",
+        )
         return self._pool.execute(
             "DELETE FROM knowledge WHERE expires_at IS NOT NULL AND expires_at < NOW()",
         )
+
+    def get_document_source(self, project_id: int, source_file: str) -> dict | None:
+        source_file_hash = self._compute_raw_hash(source_file)
+        return self._pool.fetch_one(
+            "SELECT * FROM document_sources WHERE project_id = %s AND source_file_hash = %s",
+            (project_id, source_file_hash),
+        )
+
+    def upsert_document_source(self, project_id: int, source_file: str, content_hash: str) -> None:
+        source_file_hash = self._compute_raw_hash(source_file)
+        existing = self.get_document_source(project_id, source_file)
+        if existing:
+            self._pool.execute(
+                "UPDATE document_sources SET source_file = %s, content_hash = %s "
+                "WHERE project_id = %s AND source_file_hash = %s",
+                (source_file, content_hash, project_id, source_file_hash),
+            )
+            return
+        self._pool.insert_returning_id(
+            "INSERT INTO document_sources "
+            "(project_id, source_file, source_file_hash, content_hash) "
+            "VALUES (%s, %s, %s, %s)",
+            (project_id, source_file, source_file_hash, content_hash),
+        )
+
+    def match_entities(self, project_id: int, query: str, limit: int = 5) -> list[str]:
+        query_terms = self._query_terms(query)
+        if not query_terms:
+            return []
+        placeholders = ", ".join(["%s"] * len(query_terms))
+        sql = (
+            "SELECT DISTINCT entity_name FROM knowledge_entities "
+            "WHERE project_id = %s "
+            f"AND LOWER(entity_name) IN ({placeholders}) "
+            "ORDER BY entity_name LIMIT %s"
+        )
+        rows = self._pool.fetch_all(sql, tuple([project_id, *query_terms, limit]))
+        return [str(row["entity_name"]) for row in rows]
+
+    def get_related_entities(self, project_id: int, entities: list[str], limit: int = 8) -> list[dict]:
+        if not entities:
+            return []
+        normalized = [entity.casefold() for entity in entities if entity]
+        if not normalized:
+            return []
+        placeholders = ", ".join(["%s"] * len(normalized))
+        sql = (
+            "SELECT source_entity, relation, target_entity FROM knowledge_relations "
+            "WHERE project_id = %s AND ("
+            f"LOWER(source_entity) IN ({placeholders}) OR LOWER(target_entity) IN ({placeholders})"
+            ") LIMIT %s"
+        )
+        rows = self._pool.fetch_all(
+            sql,
+            tuple([project_id, *normalized, *normalized, limit]),
+        )
+        related: list[dict] = []
+        seen: set[tuple[str, str, str]] = set()
+        normalized_set = set(normalized)
+        for row in rows:
+            source = str(row["source_entity"])
+            target = str(row["target_entity"])
+            relation = str(row["relation"])
+            if source.casefold() in normalized_set:
+                related_entity = target
+            else:
+                related_entity = source
+            key = (source.casefold(), relation, target.casefold())
+            if key in seen:
+                continue
+            seen.add(key)
+            related.append({
+                "source_entity": source,
+                "related_entity": related_entity,
+                "relation": relation,
+            })
+        return related
 
     # ──────────────────────────── Work Items ────────────────────────────
 

@@ -14,7 +14,9 @@ COMPACTION_PROMPT = """You are a knowledge extraction specialist. Given the foll
 conversation transcript between a user and an AI agent, extract the key knowledge items.
 
 For each item, output a JSON object with:
-- "category": one of "decision", "architecture", "pattern", "bug_fix", "review_feedback", "progress", "lesson_learned"
+- "category": one of "decision", "architecture", "pattern", "protocol", "invariant",
+  "failure_mode", "bug_fix", "configuration", "api_reference", "performance_tuning",
+  "review_feedback", "progress", "lesson_learned"
 - "title": concise title (max 100 chars)
 - "content": detailed knowledge content (1-3 paragraphs)
 - "tags": list of relevant tags (max 5)
@@ -24,6 +26,8 @@ For each item, output a JSON object with:
 Output ONLY a JSON array of these objects. No other text before or after.
 Only include genuinely useful knowledge — skip pleasantries, clarification questions,
 and routine back-and-forth. If the conversation has no useful knowledge, output [].
+Prefer stable, reusable technical knowledge over chatty summaries. When possible, anchor
+items to concrete file paths, symbols, subsystems, config keys, or operational invariants.
 
 TRANSCRIPT:
 {transcript}
@@ -189,8 +193,9 @@ class KnowledgeCompactor:
             relevance = min(max(float(item.get("relevance_score", 0.8)), 0.0), 1.0)
             confidence = min(max(float(item.get("confidence", 0.8)), 0.0), 1.0)
 
-            kid = self._store.store_knowledge(
+            kid, _action = self._store.upsert_knowledge(
                 project_id=project_id,
+                source_type="session",
                 agent_id=None,
                 source_session_id=session_id,
                 source_turn_ids=turn_ids,
@@ -200,6 +205,7 @@ class KnowledgeCompactor:
                 tags=tags,
                 relevance_score=relevance,
                 confidence=confidence,
+                merge_runner=self._runner,
             )
             created_ids.append(kid)
 

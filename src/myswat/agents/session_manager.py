@@ -45,6 +45,7 @@ class SessionManager:
         self._compactor = compactor
         self._retriever = MemoryRetriever(store)
         self._session: Session | None = None
+        self._memory_revision_warned = False
 
     @property
     def session(self) -> Session | None:
@@ -65,6 +66,7 @@ class SessionManager:
         existing = self._store.get_active_session(self._agent_row["id"], work_item_id=work_item_id)
         if existing:
             self._session = existing
+            self._memory_revision_warned = False
             self._restore_cli_session(existing.id)
             return existing
 
@@ -74,6 +76,7 @@ class SessionManager:
             work_item_id=work_item_id,
         )
         self._session = session
+        self._memory_revision_warned = False
         return session
 
     def fork_for_work_item(
@@ -126,6 +129,22 @@ class SessionManager:
                 self._runner.restore_session(cli_session_id)
                 return
 
+    def _maybe_prefix_memory_revision_hint(self, prompt: str) -> str:
+        if self._session is None or self._memory_revision_warned:
+            return prompt
+        built_revision = getattr(self._session, "memory_revision_at_context_build", None)
+        if built_revision is None:
+            return prompt
+        current_revision = self._store.get_project_memory_revision(self._project_id)
+        if current_revision <= built_revision:
+            return prompt
+        self._memory_revision_warned = True
+        note = (
+            "[myswat note: project knowledge changed since this session started. "
+            "Use `./myswat search \"<query>\" -p <project>` if you need fresh recall.]\n\n"
+        )
+        return note + prompt
+
     def reset_ai_session(self) -> None:
         """Reset the underlying AI CLI session.
 
@@ -172,13 +191,28 @@ class SessionManager:
             context = self._retriever.build_context_for_agent(
                 project_id=self._project_id,
                 agent_id=self._agent_row["id"],
+                agent_role=self._agent_row.get("role"),
                 task_description=task_description or prompt,
                 current_session_id=self._session.id,
                 repo_path=self._runner.workdir,
             )
+            current_memory_revision = self._store.get_project_memory_revision(self._project_id)
+            self._store.set_session_memory_revision(
+                self._session.id,
+                current_memory_revision,
+            )
+            if self._session is not None:
+                self._session.memory_revision_at_context_build = current_memory_revision
+            self._memory_revision_warned = False
             if context:
                 parts.append(context)
             system_context = "\n\n---\n\n".join(parts) if parts else None
+
+        prompt_to_send = (
+            self._maybe_prefix_memory_revision_hint(prompt)
+            if self._runner.is_session_started
+            else prompt
+        )
 
         # Save user turn
         token_est = len(prompt) // 4
@@ -191,7 +225,7 @@ class SessionManager:
 
         # Invoke agent (first call starts session, subsequent calls resume)
         t0 = time.monotonic()
-        response = self._runner.invoke(prompt, system_context=system_context)
+        response = self._runner.invoke(prompt_to_send, system_context=system_context)
         elapsed = time.monotonic() - t0
 
         # Save assistant turn with timing

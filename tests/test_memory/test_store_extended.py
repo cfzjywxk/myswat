@@ -1,9 +1,11 @@
 """Extended tests for MemoryStore – covers remaining uncovered methods."""
 
+import json
 from unittest.mock import MagicMock, patch, call
 import pytest
 
 import myswat.memory.store as store_module
+from myswat.agents.base import AgentResponse
 from myswat.memory.store import MemoryStore
 from myswat.models.session import SessionTurn
 
@@ -200,6 +202,185 @@ class TestStoreKnowledge:
         assert result == 99
 
 
+class TestUpsertKnowledge:
+    def test_skips_exact_duplicate_in_same_scope(self, store, mock_pool):
+        mock_pool.fetch_one.return_value = {
+            "id": 17,
+            "title": "Architecture",
+            "content": "Some content",
+            "source_type": "session",
+            "content_hash": store._compute_content_hash("Some content"),
+        }
+
+        kid, action = store.upsert_knowledge(
+            project_id=1,
+            source_type="session",
+            category="architecture",
+            title="Architecture",
+            content="Some content",
+        )
+
+        assert (kid, action) == (17, "skipped")
+        mock_pool.insert_returning_id.assert_not_called()
+
+    def test_merges_when_new_content_textually_subsumes_existing(self, store, mock_pool):
+        mock_pool.fetch_one.return_value = None
+        mock_pool.fetch_all.return_value = [
+            {
+                "id": 33,
+                "title": "Architecture",
+                "content": "short explanation",
+                "tags": json.dumps(["existing"]),
+                "source_type": "session",
+                "version": 2,
+                "relevance_score": 0.6,
+                "confidence": 0.7,
+                "search_metadata_json": None,
+                "merged_from": None,
+            },
+        ]
+
+        kid, action = store.upsert_knowledge(
+            project_id=1,
+            source_type="session",
+            category="architecture",
+            title="Architecture",
+            content="short explanation with more detail",
+            tags=["new-tag"],
+        )
+
+        assert (kid, action) == (33, "merged")
+        assert mock_pool.execute.call_count >= 2  # UPDATE + memory_revision bump
+        update_sql = mock_pool.execute.call_args_list[0][0][0]
+        assert "UPDATE knowledge SET" in update_sql
+        mock_pool.insert_returning_id.assert_not_called()
+
+    def test_creates_new_row_when_no_safe_merge_exists(self, store, mock_pool):
+        mock_pool.fetch_one.return_value = None
+        mock_pool.fetch_all.return_value = []
+        mock_pool.insert_returning_id.return_value = 81
+
+        kid, action = store.upsert_knowledge(
+            project_id=1,
+            source_type="manual",
+            category="decision",
+            title="Use Rust",
+            content="Prefer Rust for the storage engine",
+            tags=["rust"],
+        )
+
+        assert (kid, action) == (81, "created")
+        mock_pool.insert_returning_id.assert_called_once()
+
+    def test_uses_merge_runner_for_ambiguous_same_scope_update(self, store, mock_pool):
+        mock_pool.fetch_one.return_value = None
+        mock_pool.fetch_all.return_value = [
+            {
+                "id": 50,
+                "title": "LeaseRead",
+                "content": "LeaseRead avoids extra round trips.",
+                "tags": None,
+                "source_type": "session",
+                "version": 1,
+                "relevance_score": 0.7,
+                "confidence": 0.7,
+                "search_metadata_json": None,
+                "merged_from": None,
+            },
+        ]
+        merge_runner = MagicMock()
+        merge_runner.invoke.return_value = AgentResponse(
+            content="LeaseRead avoids extra round trips and depends on leader lease validity.",
+            exit_code=0,
+        )
+
+        kid, action = store.upsert_knowledge(
+            project_id=1,
+            source_type="session",
+            category="architecture",
+            title="LeaseRead",
+            content="LeaseRead depends on leader lease validity.",
+            merge_runner=merge_runner,
+        )
+
+        assert (kid, action) == (50, "merged")
+        merge_runner.invoke.assert_called_once()
+
+    def test_document_update_can_supersede_older_row(self, store, mock_pool):
+        mock_pool.fetch_one.return_value = None
+        mock_pool.fetch_all.return_value = [
+            {
+                "id": 60,
+                "title": "LeaseRead config",
+                "content": "LeaseRead uses a legacy config path.",
+                "tags": None,
+                "source_type": "document",
+                "source_file": "/tmp/doc.md",
+                "version": 1,
+                "relevance_score": 0.5,
+                "confidence": 0.5,
+                "search_metadata_json": None,
+                "merged_from": None,
+            },
+        ]
+        mock_pool.insert_returning_id.return_value = 61
+
+        kid, action = store.upsert_knowledge(
+            project_id=1,
+            source_type="document",
+            category="configuration",
+            title="LeaseRead config",
+            content="LeaseRead uses the new config path.",
+            source_file="/tmp/doc.md",
+            confidence=0.9,
+        )
+
+        assert (kid, action) == (61, "superseded")
+        assert mock_pool.insert_returning_id.called
+
+
+class TestKnowledgeTermExtraction:
+    def test_title_generates_exact_and_phrase_terms(self, store, mock_pool):
+        terms = store._build_knowledge_terms(
+            title="LeaseRead behavior",
+            content="",
+            tags=None,
+            source_file=None,
+        )
+        term_set = {(field, term) for field, term, _weight in terms}
+        assert ("title", "leaseread") in term_set
+        assert ("title", "lease") in term_set
+        assert ("title", "read") in term_set
+        assert ("title", "lease read") in term_set
+
+    def test_source_file_generates_go_path_terms(self, store, mock_pool):
+        terms = store._build_knowledge_terms(
+            title="",
+            content="",
+            tags=None,
+            source_file="pkg/store/tikv/region_cache.go",
+        )
+        term_set = {(field, term) for field, term, _weight in terms}
+        assert ("source_file", "pkg/store/tikv/region_cache.go") in term_set
+        assert ("source_file", "region_cache.go") in term_set
+        assert ("source_file", "region_cache") in term_set
+        assert ("source_file", "region") in term_set
+        assert ("source_file", "cache") in term_set
+        assert ("source_file", "tikv") in term_set
+
+    def test_content_does_not_generate_phrase_terms_in_phase1(self, store, mock_pool):
+        terms = store._build_knowledge_terms(
+            title="",
+            content="leader lease behavior",
+            tags=None,
+            source_file=None,
+        )
+        term_set = {(field, term) for field, term, _weight in terms}
+        assert ("content", "leader") in term_set
+        assert ("content", "lease") in term_set
+        assert ("content", "leader lease") not in term_set
+
+
 # ── 8. search_knowledge ────────────────────────────────────────────────
 
 
@@ -256,7 +437,73 @@ class TestDeleteKnowledgeByCategory:
         mock_pool.execute.return_value = 5
         result = store.delete_knowledge_by_category("p1", "obsolete")
         assert result == 5
+        assert mock_pool.execute.call_count == 4
+
+
+class TestDeleteKnowledgeBySourceFile:
+    def test_deletes_and_returns_count(self, store, mock_pool):
+        mock_pool.execute.return_value = 4
+        result = store.delete_knowledge_by_source_file("p1", "/tmp/doc.md")
+        assert result == 4
+        assert mock_pool.execute.call_count == 4
+
+
+class TestDocumentSourceTracking:
+    def test_get_document_source_hashes_lookup_key(self, store, mock_pool):
+        mock_pool.fetch_one.return_value = {"id": 1, "content_hash": "abc"}
+        row = store.get_document_source(1, "/tmp/doc.md")
+        assert row == {"id": 1, "content_hash": "abc"}
+        mock_pool.fetch_one.assert_called_once()
+
+    def test_upsert_document_source_updates_existing(self, store, mock_pool):
+        store.get_document_source = MagicMock(return_value={"id": 1})
+        store.upsert_document_source(1, "/tmp/doc.md", "hash-1")
         mock_pool.execute.assert_called_once()
+        mock_pool.insert_returning_id.assert_not_called()
+
+    def test_upsert_document_source_inserts_new(self, store, mock_pool):
+        store.get_document_source = MagicMock(return_value=None)
+        store.upsert_document_source(1, "/tmp/doc.md", "hash-1")
+        mock_pool.insert_returning_id.assert_called_once()
+
+
+class TestKnowledgeGraphExtraction:
+    def test_extracts_entities_from_title_tags_and_source(self, store, mock_pool):
+        entities = store._extract_entities(
+            title="LeaseRead in TiKV",
+            content="Region may use SplitChecker.",
+            tags=["raftstore", "region-max-size"],
+            source_file="pkg/store/tikv/region_cache.go",
+        )
+        normalized = {entity.casefold() for entity in entities}
+        assert "leaseread" in normalized
+        assert "tikv" in normalized
+        assert "region-max-size" in normalized
+        assert "region_cache.go" in normalized
+
+    def test_extracts_simple_relations(self, store, mock_pool):
+        relations = store._extract_relations(
+            title="LeaseRead depends on leader lease",
+            content="Region uses SplitChecker thresholds.",
+        )
+        assert ("LeaseRead", "depends_on", "leader lease") in relations
+        assert ("Region", "uses", "SplitChecker thresholds") in relations
+
+    def test_match_entities_returns_names(self, store, mock_pool):
+        mock_pool.fetch_all.return_value = [{"entity_name": "LeaseRead"}]
+        result = store.match_entities(1, "debug LeaseRead timeout")
+        assert result == ["LeaseRead"]
+
+    def test_get_related_entities_returns_expanded_rows(self, store, mock_pool):
+        mock_pool.fetch_all.return_value = [
+            {"source_entity": "LeaseRead", "relation": "depends_on", "target_entity": "ReadIndex"},
+        ]
+        result = store.get_related_entities(1, ["LeaseRead"])
+        assert result == [{
+            "source_entity": "LeaseRead",
+            "related_entity": "ReadIndex",
+            "relation": "depends_on",
+        }]
 
 
 # ── 11. get_work_item ──────────────────────────────────────────────────
@@ -460,6 +707,7 @@ class TestExpireStaleKnowledge:
         mock_pool.execute.return_value = 3
         result = store.expire_stale_knowledge()
         assert result == 3
+        assert mock_pool.execute.call_count == 4
 
 
 # ── 18. get_session ────────────────────────────────────────────────────
