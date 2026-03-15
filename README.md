@@ -1,7 +1,6 @@
 <p align="center">
   <img src="assets/myswat.png" alt="myswat — ARCH, DEV, QA" width="480"/><br/>
-  <strong>Multi-AI agent conversation orchestrator for software development.</strong><br/>
-  Route prompts, capture diffs, loop until LGTM — humans architect, AI agents build and review.<br/><br/>
+  <strong>Multi-AI agent conversation orchestrator for software development.</strong><br/><br/>
   <img src="https://img.shields.io/badge/python-3.12+-blue?logo=python&logoColor=white" alt="Python 3.12+"/>
   <img src="https://img.shields.io/badge/backend-TiDB_Cloud-4479A1?logo=tidb&logoColor=white" alt="TiDB Cloud"/>
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"/>
@@ -10,290 +9,87 @@
 
 ---
 
-## What is MySwat?
+You have a codebase. You have AI agents that can write code and review it. But you're still the one copying outputs between them, deciding who goes next, and re-explaining context every session.
 
-MySwat is a **conversation orchestrator** — it automates the copy-paste routing between AI agents (developer and QA review loops) that humans currently do manually. MySwat routes outputs, captures context, and loops until LGTM. It does **not** run builds or tests itself — that's the agents' job.
+**MySwat automates that.** It routes prompts between agents, persists everything to a shared knowledge base, and loops dev/QA review cycles until LGTM — while you stay in the architect seat.
 
 <p align="center">
   <img src="assets/workflow.svg" alt="myswat workflow — design, review, plan, dev, QA test, report" width="800"/>
 </p>
 
-## Key Features
+## Why MySwat
 
-- **Conversation persistence** — all turns persisted to TiDB, never deleted on close. Cross-role context restored on session start.
-- **Project-scoped memory** — every role (architect, dev, QA) sees each other's recent 10 turns. No more siloed agents.
-- **Lazy GC with grace period** — raw turns kept for 7 days after compaction. `myswat gc` reclaims storage safely.
-- **Multi-agent review loops** — developer proposes, QA reviews, iterate until LGTM with structured verdicts.
-- **Full teamwork workflow** — auto-continue through design review, planning, phased implementation, and GA testing.
-- **Selective work modes** — `--design` for design+planning only, `--dev` for phased implementation, `--test` for GA testing.
-- **Knowledge compaction** — sessions distilled into reusable knowledge entries stored in TiDB, not raw transcripts.
-- **Hybrid knowledge search** — top-level `myswat search` combines lexical, vector, and graph-expanded retrieval for project knowledge.
-- **Incremental document feeding** — re-feeding updated docs/source retracts stale file-scoped knowledge and rebuilds it cleanly.
-- **Claude + Codex + Kimi backends** — mix and match AI backends per role (e.g., Claude Opus for QA, GPT-5 for dev).
-- **Project learning** — `myswat learn` teaches agents build commands, test tiers, conventions, and invariants.
-- **Interactive long-task monitor** — live progress display with stage, TODOs, issues, and `ESC` to cancel.
-- **CLAUDE.md / AGENTS.md aware** — extracts project conventions from AI instruction files.
+**You architect. Agents build and review. MySwat connects them.**
 
-## Recent Updates
+- **Automated review loops** — developer proposes, QA reviews, iterate until LGTM. No manual copy-paste.
+- **Shared project memory** — every agent sees what others said and learned. Knowledge compounds across sessions, not just within one.
+- **Mix any AI backend** — Claude Opus for QA, GPT for dev, Kimi for a second opinion. Per-role configuration.
+- **Full workflow or pick stages** — run the whole pipeline (design → plan → dev → QA → report), or just `--dev` or `--test`.
+- **Learns your project** — build commands, test tiers, invariants, conventions. Agents stop guessing.
 
-### Conversation Persistence Model (v0.7)
+## Quick Start
 
-The memory system has been redesigned from the ground up:
+```bash
+# Install (auto-creates venv on first run)
+./myswat --help
 
-- **No more turn deletion on close** — raw turns stay until GC'd after a grace period
-- **Cross-role context restore** — new sessions pre-load 10 recent turns per role across the entire project, not just the current agent's history
-- **Compaction threshold raised to 50 turns** (from 10 turns / 5K tokens) — less aggressive, more useful compaction
-- **`myswat gc` replaces `myswat memory purge`** — safe, idempotent garbage collection with 7-day grace
-- **Watermark decoupled from visibility** — compaction watermark only controls what gets re-compacted, not what agents can see
-- **Pre-load hints** — agents told they can query deeper history via CLI, not force-fed everything
+# Set up a project
+myswat init "my-project" --repo /path/to/repo
+myswat learn -p my-project
 
-### Claude CLI Backend Support
+# Run a task — full dev/QA loop
+myswat work -p my-project "Implement bloom filter for compaction"
 
-- Full Claude Code subprocess integration alongside Codex and Kimi
-- Per-role backend configuration (e.g., Claude Opus for QA, Codex for dev)
-- IP-based launch environment validation for Claude sessions
-- `--dangerously-skip-permissions` for non-interactive automation (configurable)
+# Or just chat
+myswat chat -p my-project
+```
 
-### Work Mode System
+## How It Works
 
-- `myswat work --design` — design + planning with interactive checkpoints
-- `myswat work --dev` — phased implementation, skip design/plan
-- `myswat work --test` — GA testing only
-- `myswat work --background` — detach and keep running after terminal exits
+```
+ You (architect)
+  |
+  |  "Implement bloom filter for compaction"
+  v
+ MySwat ──────────────────────────────────────────────
+  |                                                    |
+  |  1. Loads project knowledge from TiDB              |
+  |  2. Sends to Developer agent (codex/claude/kimi)   |
+  |  3. Captures output, feeds to QA agent             |
+  |  4. QA reviews → issues found? loop back to Dev    |
+  |  5. LGTM → done. Knowledge compacted & persisted.  |
+  |                                                    |
+ ──────────────────────────────────────────────────────
+```
+
+MySwat does **not** run builds or tests — the agents do that themselves via their terminal access. MySwat handles routing, context, and persistence.
+
+## What Agents Remember
+
+Every conversation is persisted to TiDB and searchable:
+
+- **Session turns** — raw conversation history, cross-role visible
+- **Compacted knowledge** — AI-distilled insights from past sessions (architecture decisions, bug fixes, patterns, failure modes)
+- **Ingested documents** — your docs and source code, chunked and indexed
+- **Project ops** — build commands, test tiers, conventions (via `myswat learn`)
+
+Search across all of it:
+
+```bash
+myswat search "transaction isolation" -p my-project
+```
 
 ## Prerequisites
 
 - Python 3.12+
 - [TiDB Cloud](https://tidbcloud.com) account (free tier works)
-- At least one AI CLI tool: [Codex CLI](https://github.com/openai/codex) (`codex`), Claude Code (`claude`), or Kimi CLI (`kimi`)
-- (Optional) `FlagEmbedding` for vector search with BGE-M3
+- At least one AI CLI: [Codex](https://github.com/openai/codex), [Claude Code](https://claude.com/claude-code), or [Kimi](https://www.kimi.com/code)
 
-## Installation
+## Documentation
 
-```bash
-# Self-bootstrapping — auto-creates venv, installs deps on first run
-./myswat --help
-```
-
-Or manually:
-
-```bash
-python3 -m venv .venv
-.venv/bin/pip install pymysql pydantic pydantic-settings "typer[all]" rich prompt_toolkit
-.venv/bin/pip install --no-deps -e .
-```
-
-## Configuration
-
-Create `~/.myswat/config.toml`:
-
-```toml
-[tidb]
-host = "your-tidb-host.tidbcloud.com"
-port = 4000
-user = "your_user"
-password = "your_password"
-ssl_ca = "/etc/ssl/certs/ca-certificates.crt"
-
-[agents]
-codex_path = "codex"
-claude_path = "claude"
-kimi_path = "kimi"
-claude_required_ip = "your_claude_cli_ip"
-architect_backend = "codex"
-developer_backend = "codex"
-qa_main_backend = "claude"
-qa_vice_backend = "kimi"
-architect_model = "gpt-5.4"
-developer_model = "gpt-5.4"
-qa_main_model = "claude-opus-4-6"
-qa_vice_model = "kimi-code/kimi-for-coding"
-```
-
-Or use environment variables: `MYSWAT_TIDB_HOST`, `MYSWAT_TIDB_PASSWORD`, etc.
-
-To use Claude for all roles:
-
-```toml
-[agents]
-architect_backend = "claude"
-developer_backend = "claude"
-qa_main_backend = "claude"
-qa_vice_backend = "claude"
-claude_path = "claude"
-architect_model = "claude-sonnet-4-6"
-developer_model = "claude-sonnet-4-6"
-qa_main_model = "claude-opus-4-6"
-qa_vice_model = "claude-sonnet-4-6"
-```
-
-When using Claude, MySwat validates the launch environment before every `claude` subprocess start: both `http_proxy` and `https_proxy` must be set, and `curl ipinfo.io` must report the configured IP. If that check fails, the workflow aborts before Claude is started.
-
-By default, Claude runners add `--dangerously-skip-permissions` for non-interactive automation. Override `claude_default_flags` for a different permission model.
-
-## Quick Start
-
-### 1. Initialize a project
-
-```bash
-myswat init "my-project" --desc "Project description" --repo /path/to/repo
-```
-
-Creates the database schema, project record, and seeds 4 default agent roles (architect, developer, qa_main, qa_vice).
-
-### 2. Learn the project
-
-```bash
-myswat learn -p my-project
-```
-
-The architect agent scans indicator files (Makefile, Cargo.toml, package.json, CI configs, CLAUDE.md, etc.) and extracts structured knowledge about build commands, test tiers, git workflow, code style rules, and invariants.
-
-### 3. Interactive chat
-
-```bash
-myswat chat -p my-project
-```
-
-REPL with role switching (`/role developer`), inline review (`/review "task"`), and persistent sessions. Long-running `/work` and `/review` tasks show a live monitor with current stage, TODOs, and `ESC` to cancel.
-
-### 4. Run a task
-
-```bash
-# Single agent
-myswat run --single -p my-project "Implement feature X"
-
-# Developer + reviewer loop
-myswat run -p my-project "Add error handling to the parser"
-```
-
-### 5. Full teamwork workflow
-
-```bash
-# Full workflow (default): design -> review -> plan -> dev -> GA test -> report
-myswat work -p my-project "Implement bloom filter for compaction"
-
-# Design + planning only
-myswat work -p my-project --design "Implement bloom filter for compaction"
-
-# Development only (skip design/plan)
-myswat work -p my-project --dev "Implement bloom filter for compaction"
-
-# GA testing only
-myswat work -p my-project --test "Validate bloom filter correctness"
-
-# Detach and keep running
-myswat work -p my-project --background "Implement bloom filter for compaction"
-
-# Monitor or stop
-myswat task 42 -p my-project
-myswat stop 42 -p my-project
-```
-
-| Mode | Flags | Stages | Success criteria |
-|------|-------|--------|------------------|
-| `full` | _(default)_ | design, design review, plan, plan review, phased dev, GA test, report | all phases committed AND GA passed |
-| `design` | `--design`, `--plan` | design, design review, plan, plan review, report | both reviews passed |
-| `development` | `--development`, `--dev` | phased dev (with informational QA review), report | all phases committed |
-| `test` | `--test`, `--ga-test` | GA test plan/review, execute tests, bug fixes, report | GA passed |
-
-### 6. Feed documents
-
-```bash
-myswat feed /path/to/docs -p my-project --glob "**/*.md"
-myswat feed /path/to/src -p my-project --glob "**/*.rs"
-```
-
-Re-feeding a changed file retracts prior file-scoped document knowledge and rebuilds it.
-Rust and Go sources are chunked by logical code boundaries before falling back to size-based chunks.
-
-### 7. Search knowledge
-
-```bash
-myswat search "transaction isolation" -p my-project
-myswat search "LeaseRead timeout" -p my-project --profile precise --json
-```
-
-## CLI Reference
-
-| Command | Description |
-|---------|-------------|
-| `myswat init <name> [-r repo] [-d desc]` | Initialize a project |
-| `myswat learn -p <slug> [-w workdir]` | Learn project build/test/conventions |
-| `myswat chat -p <slug> [--role R]` | Interactive chat session |
-| `myswat run <task> -p <slug> [--single] [--role R] [--reviewer R]` | Run agent task |
-| `myswat work <req> -p <slug> [--background] [--design\|--dev\|--test]` | Full or selective teamwork workflow |
-| `myswat feed <path> -p <slug> [--glob pattern]` | Ingest documents into knowledge |
-| `myswat status -p <slug>` | Show project status |
-| `myswat task <id> -p <slug>` | Show detailed status for one work item |
-| `myswat stop <id> -p <slug>` | Stop a background workflow |
-| `myswat gc -p <slug> [--grace-days N]` | Garbage-collect compacted turns |
-| `myswat history -p <slug> [--turns N]` | Show raw recent turns |
-| `myswat search <query> -p <slug> [--profile P] [--mode M] [--json]` | Search knowledge base |
-| `myswat memory add <title> <content> -p <slug> [-c cat]` | Add knowledge manually |
-| `myswat memory list -p <slug> [-c category]` | List knowledge entries |
-| `myswat memory compact -p <slug>` | Compact sessions into knowledge |
-
-## Architecture
-
-| Component | Role |
-|-----------|------|
-| **CLI** (Typer) | `myswat init`, `learn`, `chat`, `run`, `work`, `gc` |
-| **SessionManager** | Agent lifecycle, subprocess launch (codex/claude/kimi) |
-| **WorkflowEngine** | Mode dispatch: full, design, development, test |
-| **MemoryRetriever** | 4-tier context: project_ops → recent turns → searched knowledge → hints |
-| **KnowledgeSearchEngine** | Search planning, lexical/vector fusion, graph expansion, and Tier 2 rendering |
-| **MemoryStore** | TiDB CRUD plus source-aware upsert, lexical index maintenance, and graph metadata |
-| **KnowledgeCompactor** | Distill session turns into reusable knowledge entries |
-| **Embedder** | BGE-M3 local embeddings for vector search (optional) |
-| **GC** | Lazy garbage collection with 7-day grace period |
-
-### Conversation Persistence Lifecycle
-
-```
-Session active
-  |
-  +-- All turns saved to session_turns (always)
-  |
-  +-- At 50 uncompacted turns --> mid-session compaction
-  |     +-- AI extracts knowledge, advance watermark
-  |     +-- Raw turns stay (visible for pre-load)
-  |
-  +-- Session close
-  |     +-- status = 'completed', run final compaction
-  |     +-- If fully compacted: status = 'compacted', set compacted_at
-  |     +-- Raw turns NOT deleted
-  |
-  +-- GC (myswat gc, separate pass)
-        +-- Deletes turns from compacted sessions past grace period
-        +-- Keeps most recent 50 turns per project regardless
-        +-- Session rows never deleted (FK safety)
-```
-
-### TiDB Schema
-
-| Table | Purpose |
-|-------|---------|
-| `projects` | Project registry |
-| `agents` | Role configs per project |
-| `sessions` | Dialog sessions with compaction watermark, `compacted_at`, and context memory revision |
-| `session_turns` | Individual messages (recency-indexed) |
-| `knowledge` | Compacted/ingested knowledge with embeddings, source metadata, hashes, and merge lineage |
-| `knowledge_terms` | Lexical term index for exact technical retrieval |
-| `knowledge_entities` | Extracted entity anchors for graph expansion |
-| `knowledge_relations` | Lightweight relationship graph between entities |
-| `document_sources` | Source-file content tracking for incremental re-ingestion |
-| `work_items` | Task tracking |
-| `artifacts` | Proposals/diffs under review |
-| `review_cycles` | Review iterations with structured verdicts |
-
-## Target Use Cases
-
-MySwat is designed for large, complex codebases where coordinated multi-agent development shines:
-
-- **Rust systems** — [TiSql](https://github.com/cfzjywxk/tisql) (51K lines, 18 invariants, segmented Makefile)
-- **Distributed databases** — [TiDB](https://github.com/pingcap/tidb) (Go), [TiKV](https://github.com/tikv/tikv) (Rust)
-- **Any project with CI gates** — agents learn your test tiers and respect them
+- [Configuration](docs/configuration.md) — config file, environment variables, per-backend setup
+- [CLI Reference](docs/cli-reference.md) — all commands, work modes, chat commands
+- [Architecture](docs/architecture.md) — components, memory tiers, knowledge pipeline, TiDB schema
 
 ## License
 

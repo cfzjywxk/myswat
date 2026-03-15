@@ -38,3 +38,4 @@ WORK_MODE_DESIGN.md
 # Ignore markdown docs in this repo, but keep the root README tracked
 *.md
 !/README.md
+!/docs/*.md
