@@ -839,7 +839,7 @@ class MemoryStore:
                 learn_request_id,
                 worker_backend,
                 worker_model,
-                json.dumps(input_context_json),
+                json.dumps(input_context_json, default=str),
                 status,
             ),
         )
@@ -869,7 +869,7 @@ class MemoryStore:
         self._pool.execute(
             "UPDATE learn_runs SET status = 'completed', output_envelope_json = %s, error_text = NULL "
             "WHERE id = %s",
-            (json.dumps(output_envelope_json), run_id),
+            (json.dumps(output_envelope_json, default=str), run_id),
         )
 
     def fail_learn_run(self, run_id: int, *, error_text: str) -> None:
