@@ -25,6 +25,7 @@ Workflow:
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 
@@ -65,6 +66,7 @@ from myswat.workflow.prompts import (
 )
 
 if TYPE_CHECKING:
+    from myswat.agents.base import AgentResponse
     from myswat.agents.session_manager import SessionManager
     from myswat.memory.store import MemoryStore
 
@@ -1586,6 +1588,7 @@ class WorkflowEngine:
         prop = proposer or self._dev
         revs = reviewers or self._qas
         current = artifact
+        change_summary: str = ""  # empty on first iteration
 
         for iteration in range(1, self._max_review + 1):
             if self._cancelled():
@@ -1614,6 +1617,28 @@ class WorkflowEngine:
             all_issues: list[str] = []
             all_lgtm = True
 
+            if not revs:
+                console.print(f"[dim]No reviewers configured — auto-approving {artifact_type}.[/dim]")
+                self._append_process_event(
+                    event_type="reaction",
+                    title="MySwat reaction",
+                    summary=f"No reviewers configured — auto-approved {artifact_type}.",
+                    from_role="myswat",
+                    to_role=prop.agent_role,
+                    updated_by_agent_id=prop.agent_id,
+                )
+                self._persist_task_state(
+                    current_stage=f"{artifact_type}_approved",
+                    latest_summary=current[:4000],
+                    next_todos=["Proceed to the next workflow stage"],
+                    open_issues=[],
+                    last_artifact_id=artifact_id,
+                    updated_by_agent_id=prop.agent_id,
+                )
+                return current, iteration, True
+
+            # Build prompts and log review requests for all reviewers upfront.
+            reviewer_prompts: list[tuple[SessionManager, str]] = []
             for reviewer in revs:
                 console.print(f"[yellow]{reviewer.agent_role} reviewing {artifact_type}...[/yellow]")
                 self._append_process_event(
@@ -1624,34 +1649,47 @@ class WorkflowEngine:
                     to_role=reviewer.agent_role,
                     updated_by_agent_id=prop.agent_id,
                 )
-
                 prompt = self._build_review_prompt(
                     artifact_type,
                     context,
                     current,
                     iteration,
                     reviewer=reviewer,
+                    change_summary=change_summary,
                 )
-                response = reviewer.send(prompt, task_description=f"Review {artifact_type} (iter {iteration})")
+                reviewer_prompts.append((reviewer, prompt))
+
+            # Send review requests to all reviewers concurrently.
+            review_results: dict[str, tuple[SessionManager, AgentResponse]] = {}
+            with ThreadPoolExecutor(max_workers=len(reviewer_prompts)) as executor:
+                future_to_reviewer = {
+                    executor.submit(
+                        reviewer.send,
+                        prompt,
+                        task_description=f"Review {artifact_type} (iter {iteration})",
+                    ): reviewer
+                    for reviewer, prompt in reviewer_prompts
+                }
+                for future in as_completed(future_to_reviewer):
+                    reviewer = future_to_reviewer[future]
+                    review_results[reviewer.agent_id] = (reviewer, future.result())
+
+            # Process ALL results in stable reviewer order before deciding on abort.
+            abort_failure: str | None = None
+            abort_reviewer: SessionManager | None = None
+            for reviewer in revs:
+                _, response = review_results[reviewer.agent_id]
 
                 if not response.success:
                     console.print(f"[red]{reviewer.agent_role} failed (exit={response.exit_code})[/red]")
                     if response.raw_stderr.strip():
                         console.print(f"[dim]  stderr: {response.raw_stderr.strip()}[/dim]")
                     failure_summary = f"[{reviewer.agent_role}] review failed (exit={response.exit_code})"
-                    if abort_on_agent_failure:
-                        self._record_blocked_failure(
-                            stage=f"{artifact_type}_review_blocked",
-                            summary=failure_summary,
-                            updated_by_agent_id=reviewer.agent_id,
-                            from_role=reviewer.agent_role,
-                            to_role=prop.agent_role,
-                            event_type="review_failure",
-                            title=f"{artifact_type} review failed",
-                        )
-                        return current, iteration, False
                     all_lgtm = False
                     all_issues.append(failure_summary)
+                    if abort_on_agent_failure and abort_failure is None:
+                        abort_failure = failure_summary
+                        abort_reviewer = reviewer
                     continue
 
                 verdict = _parse_verdict(response.content)
@@ -1702,6 +1740,19 @@ class WorkflowEngine:
                         )
                     except Exception as e:
                         console.print(f"[dim red]Warning: Failed to persist review cycle: {e}[/dim red]")
+
+            # After processing all responses, abort if any reviewer failed fatally.
+            if abort_failure is not None and abort_reviewer is not None:
+                self._record_blocked_failure(
+                    stage=f"{artifact_type}_review_blocked",
+                    summary=abort_failure,
+                    updated_by_agent_id=abort_reviewer.agent_id,
+                    from_role=abort_reviewer.agent_role,
+                    to_role=prop.agent_role,
+                    event_type="review_failure",
+                    title=f"{artifact_type} review failed",
+                )
+                return current, iteration, False
 
             if all_lgtm:
                 self._append_process_event(
@@ -1765,6 +1816,13 @@ class WorkflowEngine:
                 break
 
             current = response.content
+            # Build change summary for the next review round so reviewers
+            # know what was addressed since the previous iteration.
+            change_summary = (
+                f"Issues raised in iteration {iteration}:\n"
+                + feedback
+                + f"\n\nProposer's revision response:\n{response.content[:6000]}"
+            )
             self._persist_task_state(
                 current_stage=f"{artifact_type}_revision_ready",
                 latest_summary=current[:4000],
@@ -1811,21 +1869,26 @@ class WorkflowEngine:
         artifact: str,
         iteration: int,
         reviewer: "SessionManager | None" = None,
+        change_summary: str = "",
     ) -> str:
         reviewer_role = getattr(reviewer, "agent_role", None)
         if not isinstance(reviewer_role, str):
             reviewer_role = None
         if artifact_type == "arch_design":
-            return DESIGN_REVIEW.format(context=context, design=artifact[:12000], iteration=iteration)
-        if artifact_type == "design":
-            return QA_DESIGN_REVIEW.format(context=context, design=artifact[:12000], iteration=iteration)
-        if artifact_type == "plan":
-            return QA_PLAN_REVIEW.format(context=context, plan=artifact[:12000], iteration=iteration)
-        if artifact_type == "test_plan" and reviewer_role == "architect":
-            return TEST_PLAN_REVIEW.format(context=context, test_plan=artifact[:12000], iteration=iteration)
-        if artifact_type == "test_plan":
-            return DEV_REVIEW_TEST_PLAN.format(context=context, test_plan=artifact[:12000], iteration=iteration)
-        return QA_CODE_REVIEW.format(context=context, summary=artifact[:12000], iteration=iteration)
+            base = DESIGN_REVIEW.format(context=context, design=artifact[:12000], iteration=iteration)
+        elif artifact_type == "design":
+            base = QA_DESIGN_REVIEW.format(context=context, design=artifact[:12000], iteration=iteration)
+        elif artifact_type == "plan":
+            base = QA_PLAN_REVIEW.format(context=context, plan=artifact[:12000], iteration=iteration)
+        elif artifact_type == "test_plan" and reviewer_role == "architect":
+            base = TEST_PLAN_REVIEW.format(context=context, test_plan=artifact[:12000], iteration=iteration)
+        elif artifact_type == "test_plan":
+            base = DEV_REVIEW_TEST_PLAN.format(context=context, test_plan=artifact[:12000], iteration=iteration)
+        else:
+            base = QA_CODE_REVIEW.format(context=context, summary=artifact[:12000], iteration=iteration)
+        if change_summary:
+            base += f"\n\n## Changes Since Last Review\n{change_summary}\n"
+        return base
 
     def _build_address_prompt(
         self, artifact_type: str, artifact: str, feedback: str,

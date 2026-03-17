@@ -1538,12 +1538,62 @@ class TestRunReviewLoopEdgeCases:
         assert engine._blocked is True
         assert engine._failure_summary == "[qa-0] review failed (exit=1)"
         dev.send.assert_not_called()
-        qas[1].send.assert_not_called()
+        # With concurrent reviews, all reviewers are dispatched simultaneously,
+        # so qas[1] will have been called even though qas[0] failed.
+        qas[1].send.assert_called_once()
         engine._store.update_work_item_state.assert_called()
+        # All responses are still processed before aborting: both the failure
+        # event and the successful LGTM review_response should be logged.
+        event_types = [
+            call.kwargs.get("event_type")
+            for call in engine._store.append_work_item_process_event.call_args_list
+        ]
+        assert "review_failure" in event_types
+        assert "review_response" in event_types
+
+    def test_empty_reviewers_auto_approves(self):
+        """With no reviewers, the loop auto-approves with proper state persistence."""
+        engine, dev, _qas = _make_engine(qa_count=0, max_review=3)
+        result, iters, passed = engine._run_review_loop(
+            artifact="artifact",
+            artifact_type="design",
+            context="ctx",
+        )
+        assert result == "artifact"
+        assert passed is True
+        dev.send.assert_not_called()
+        # Verify work item state was persisted as approved.
+        engine._store.update_work_item_state.assert_called()
+        state_call = engine._store.update_work_item_state.call_args
+        assert state_call.kwargs["current_stage"] == "design_approved"
+        # Verify a reaction event was logged.
         assert any(
-            call.kwargs.get("event_type") == "review_failure"
+            call.kwargs.get("event_type") == "reaction"
             for call in engine._store.append_work_item_process_event.call_args_list
         )
+
+    def test_second_round_prompt_includes_change_summary(self):
+        """On iteration 2+, the review prompt includes what changed since last round."""
+        engine, dev, qas = _make_engine(qa_count=1, max_review=3)
+        # iter 1: changes_requested with a specific issue
+        changes = _changes_json(["Missing error handling"])
+        qas[0].send.side_effect = [
+            _ok(changes),       # iter 1: request changes
+            _ok(_lgtm_json()),  # iter 2: approve
+        ]
+        dev.send.return_value = _ok("Revised: added error handling for edge cases")
+        result, iters, passed = engine._run_review_loop(
+            artifact="original design",
+            artifact_type="design",
+            context="ctx",
+        )
+        assert iters == 2
+        assert passed is True
+        # The second call to qas[0].send should contain the change summary.
+        second_call_prompt = qas[0].send.call_args_list[1][0][0]
+        assert "Changes Since Last Review" in second_call_prompt
+        assert "Missing error handling" in second_call_prompt
+        assert "Revised: added error handling for edge cases" in second_call_prompt
 
     def test_reviewer_verdict_with_summary_no_issues(self):
         """Non-lgtm verdict with summary but no issues uses summary as issue."""
