@@ -33,23 +33,24 @@ from myswat.db.schema import run_migrations
 from myswat.memory.embedder import preload_model
 from myswat.memory.learn_triggers import submit_chat_learn_request
 from myswat.memory.store import MemoryStore
+from myswat.workflow.modes import (
+    DEFAULT_DELEGATION_MODE,
+    DELEGATION_MODE_SPECS,
+    WorkMode,
+    normalize_delegation_mode,
+)
 
 console = Console()
-
-_DELEGATION_MODE_CODE = "code"
-_DELEGATION_MODE_DESIGN = "design"
-_DELEGATION_MODE_TESTPLAN = "testplan"
-_DELEGATION_MODE_FULL = "full"
 
 HELP_TEXT = """
 [bold]Commands:[/bold]
   /help                 Show this help
   /status               Show project status
   /task [id]            Show details for a work item (latest active item if omitted)
-  /work <requirement>   Start full workflow: design -> review -> plan -> dev -> commit
+  /work <requirement>   Start full workflow: design -> plan -> develop -> test
   /role <role>          Switch agent role (developer, architect, qa_main, qa_vice)
   /reset                Reset AI session (fresh context reload, same TiDB session)
-  /review <task>        Start dev+reviewer loop for a task (legacy)
+  /review <task>        Start the legacy dev+reviewer loop for a task
   /agents               List available agents
   /sessions             Show active sessions
   /history [n]          Show last n turns (default 10)
@@ -60,7 +61,7 @@ def _extract_delegation(text: str) -> tuple[str, str] | None:
     """Extract a delegation task and mode from an agent response.
 
     Looks for a ```delegate block with TASK:/MODE: lines.
-    Returns (task, mode) or None. Mode defaults to ``code``.
+    Returns (task, mode) or None. Mode defaults to ``develop``.
     """
     import re
 
@@ -70,14 +71,13 @@ def _extract_delegation(text: str) -> tuple[str, str] | None:
 
     block = match.group(1)
     task = None
-    mode = _DELEGATION_MODE_CODE
+    mode = DEFAULT_DELEGATION_MODE
     for line in block.strip().splitlines():
         line = line.strip()
         if line.upper().startswith("TASK:"):
             task = line[5:].strip()
         elif line.upper().startswith("MODE:"):
-            parsed_mode = line[5:].strip().lower()
-            mode = parsed_mode or _DELEGATION_MODE_CODE
+            mode = normalize_delegation_mode(line[5:])
 
     if not task:
         fallback_lines: list[str] = []
@@ -334,81 +334,72 @@ def run_chat(
             delegation = _extract_delegation(response.content)
             if delegation:
                 delegation_task, delegation_mode = delegation
-                if current_role == "architect" and delegation_mode == _DELEGATION_MODE_CODE:
-                    console.print(
-                        f"\n[bold cyan]Architect delegated to developer:[/bold cyan] {delegation_task[:160]}"
-                    )
-                    console.print("[dim]Starting dev+QA review loop automatically.[/dim]")
-                    if sm:
-                        with console.status("[dim]Saving session to TiDB...[/dim]", spinner="dots"):
-                            sm.close()
-                    _run_inline_review_interactive(
-                        store,
-                        proj,
-                        effective_workdir,
-                        settings,
-                        delegation_task,
-                        initial_process_events=[
-                            {
-                                "event_type": "delegation",
-                                "title": "Architect delegation",
-                                "summary": delegation_task,
-                                "from_role": "architect",
-                                "to_role": "developer",
-                                "updated_by_agent_id": getattr(sm, "agent_id", None),
-                            }
-                        ],
-                    )
-                    sm = _switch_agent(current_role, settings)
-                elif current_role == "architect" and delegation_mode == _DELEGATION_MODE_DESIGN:
-                    console.print(
-                        f"\n[bold cyan]Architect started a design review workflow:[/bold cyan] {delegation_task[:160]}"
-                    )
-                    _run_design_review_interactive(
-                        store,
-                        proj,
-                        sm,
-                        effective_workdir,
-                        settings,
-                        delegation_task,
-                        prompt_session=prompt_session,
-                    )
-                elif current_role == "architect" and delegation_mode == _DELEGATION_MODE_FULL:
-                    console.print(
-                        f"\n[bold cyan]Architect delegated full workflow:[/bold cyan] {delegation_task[:160]}"
-                    )
-                    console.print("[dim]Starting architect-led full workflow (design → plan → dev → test → report).[/dim]")
-                    _run_full_workflow_interactive(
-                        store,
-                        proj,
-                        sm,
-                        effective_workdir,
-                        settings,
-                        delegation_task,
-                        prompt_session=prompt_session,
-                    )
-                    sm = _switch_agent(current_role, settings)
-                elif current_role in {"qa_main", "qa_vice"} and delegation_mode == _DELEGATION_MODE_TESTPLAN:
-                    console.print(
-                        f"\n[bold cyan]QA started a test-plan review workflow:[/bold cyan] {delegation_task[:160]}"
-                    )
-                    _run_testplan_review_interactive(
-                        store,
-                        proj,
-                        sm,
-                        effective_workdir,
-                        settings,
-                        delegation_task,
-                        prompt_session=prompt_session,
-                    )
-                elif delegation_mode == _DELEGATION_MODE_CODE:
-                    console.print(
-                        f"[yellow]Delegation mode 'code' is not available for role '{current_role}' yet.[/yellow]"
-                    )
-                else:
+                delegation_spec = DELEGATION_MODE_SPECS.get(delegation_mode)
+                if delegation_spec is None:
                     console.print(
                         f"[yellow]Delegation mode '{delegation_mode}' is not supported.[/yellow]"
                     )
+                elif current_role not in delegation_spec.allowed_roles:
+                    allowed_roles = ", ".join(sorted(delegation_spec.allowed_roles))
+                    console.print(
+                        f"[yellow]Delegation mode '{delegation_mode}' is only available for role(s): {allowed_roles}. Current role: '{current_role}'.[/yellow]"
+                    )
+                else:
+                    delegation_handlers = {
+                        "workflow": lambda: _run_workflow_interactive(
+                            store,
+                            proj,
+                            effective_workdir,
+                            settings,
+                            delegation_task,
+                            prompt_session=prompt_session,
+                            mode=delegation_spec.engine_mode,
+                        ),
+                        "design_review": lambda: _run_design_review_interactive(
+                            store,
+                            proj,
+                            sm,
+                            effective_workdir,
+                            settings,
+                            delegation_task,
+                            prompt_session=prompt_session,
+                        ),
+                        "full_workflow": lambda: _run_full_workflow_interactive(
+                            store,
+                            proj,
+                            sm,
+                            effective_workdir,
+                            settings,
+                            delegation_task,
+                            prompt_session=prompt_session,
+                        ),
+                        "testplan_review": lambda: _run_testplan_review_interactive(
+                            store,
+                            proj,
+                            sm,
+                            effective_workdir,
+                            settings,
+                            delegation_task,
+                            prompt_session=prompt_session,
+                        ),
+                    }
+                    handler = delegation_handlers.get(delegation_spec.chat_handler)
+                    if handler is None:
+                        console.print(
+                            f"[yellow]Delegation mode '{delegation_mode}' is misconfigured.[/yellow]"
+                        )
+                    else:
+                        console.print(
+                            f"\n[bold cyan]{delegation_spec.banner}:[/bold cyan] {delegation_task[:160]}"
+                        )
+                        if delegation_spec.detail:
+                            console.print(f"[dim]{delegation_spec.detail}[/dim]")
+                        if delegation_spec.save_session_before_run and sm:
+                            with console.status("[dim]Saving session to TiDB...[/dim]", spinner="dots"):
+                                sm.close()
+                        handler()
+                        if delegation_spec.reset_role_session:
+                            sm = _switch_agent(current_role, settings)
         else:
             console.print(Panel(
                 response.content,
@@ -636,99 +627,22 @@ def _run_design_review(
     on_work_item_created: Callable[[int], None] | None = None,
     register_cancel_target: Callable[[AgentRunner], None] | None = None,
 ) -> None:
-    from myswat.workflow.engine import WorkflowEngine, WorkMode
-
     if proposer_sm is None:
         console.print("[red]Missing architect session.[/red]")
         return
-
-    dev_agent = store.get_agent(proj["id"], "developer")
-    if not dev_agent:
-        console.print("[red]Missing developer agent.[/red]")
-        return
-
-    qa_sms = []
-    for qa_role in ("qa_main", "qa_vice"):
-        qa_agent = store.get_agent(proj["id"], qa_role)
-        if qa_agent:
-            qa_runner = make_runner_from_row(qa_agent, settings=settings)
-            qa_runner.workdir = workdir
-            if register_cancel_target:
-                register_cancel_target(qa_runner)
-            qa_sms.append(SessionManager(
-                store=store, runner=qa_runner, agent_row=qa_agent,
-                project_id=proj["id"], settings=settings,
-            ))
-
-    if not qa_sms:
-        console.print("[red]No QA agents found.[/red]")
-        return
-
-    dev_runner = make_runner_from_row(dev_agent, settings=settings)
-    dev_runner.workdir = workdir
-    if register_cancel_target:
-        register_cancel_target(dev_runner)
-    proposer_runner = getattr(proposer_sm, "_runner", None)
-    if proposer_runner is not None and register_cancel_target:
-        register_cancel_target(proposer_runner)
-
-    dev_sm = SessionManager(
-        store=store, runner=dev_runner, agent_row=dev_agent,
-        project_id=proj["id"], settings=settings,
-    )
-
-    work_item_id = store.create_work_item(
-        project_id=proj["id"],
-        title=task[:200],
-        description=task,
-        item_type="design",
-        assigned_agent_id=proposer_sm.agent_id,
-        metadata_json={"work_mode": WorkMode.architect_design.value},
-    )
-    if on_work_item_created:
-        on_work_item_created(work_item_id)
-    store.update_work_item_status(work_item_id, "in_progress")
-
-    arch_workflow_sm = proposer_sm.fork_for_work_item(
-        work_item_id,
-        purpose=f"Arch design: {task[:80]}",
-    )
-    dev_sm.create_or_resume(purpose=f"Workflow dev review: {task[:80]}", work_item_id=work_item_id)
-    for qa_sm in qa_sms:
-        qa_sm.create_or_resume(purpose=f"Workflow QA review: {task[:80]}", work_item_id=work_item_id)
-
-    engine = WorkflowEngine(
+    return _run_workflow(
         store=store,
-        dev_sm=dev_sm,
-        qa_sms=qa_sms,
-        arch_sm=arch_workflow_sm,
-        project_id=proj["id"],
-        work_item_id=work_item_id,
-        max_review_iterations=settings.workflow.max_review_iterations,
-        mode=WorkMode.architect_design,
-        ask_user=_make_prompt_callback(prompt_session),
-        auto_approve=False,
+        proj=proj,
+        workdir=workdir,
+        settings=settings,
+        requirement=task,
+        prompt_session=prompt_session,
         should_cancel=should_cancel,
+        on_work_item_created=on_work_item_created,
+        register_cancel_target=register_cancel_target,
+        mode=WorkMode.architect_design,
+        proposer_sm=proposer_sm,
     )
-
-    try:
-        result = engine.run(task)
-        if should_cancel and should_cancel():
-            store.update_work_item_status(work_item_id, "blocked")
-        elif getattr(result, "blocked", False):
-            store.update_work_item_status(work_item_id, "blocked")
-        elif result.success:
-            store.update_work_item_status(work_item_id, "completed")
-        else:
-            store.update_work_item_status(work_item_id, "review")
-    except Exception:
-        store.update_work_item_status(work_item_id, "blocked")
-        raise
-    finally:
-        arch_workflow_sm.close()
-        dev_sm.close()
-        for qa_sm in qa_sms:
-            qa_sm.close()
 
 
 def _run_testplan_review(
@@ -835,14 +749,54 @@ def _run_workflow(
     should_cancel: Callable[[], bool] | None = None,
     on_work_item_created: Callable[[int], None] | None = None,
     register_cancel_target: Callable[[AgentRunner], None] | None = None,
+    mode: WorkMode = WorkMode.full,
+    proposer_sm: SessionManager | None = None,
 ) -> None:
-    """Run the full teamwork workflow: design -> review -> plan -> dev -> commit."""
+    """Run a teamwork workflow, optionally reusing an architect chat session."""
     from myswat.workflow.engine import WorkflowEngine
+
+    if proposer_sm is not None and mode not in {WorkMode.full, WorkMode.architect_design}:
+        proposer_sm = None
 
     # Set up Dev
     dev_agent = store.get_agent(proj["id"], "developer")
     if not dev_agent:
         console.print("[red]Missing developer agent.[/red]")
+        return
+
+    arch_agent = None
+    arch_sm: SessionManager | None = None
+    if mode in {WorkMode.full, WorkMode.architect_design}:
+        if proposer_sm is not None:
+            proposed_row = getattr(proposer_sm, "_agent_row", None)
+            if isinstance(proposed_row, dict):
+                arch_agent = proposed_row
+            else:
+                arch_agent = store.get_agent(proj["id"], "architect") or {
+                    "id": proposer_sm.agent_id,
+                    "display_name": "Architect / PM",
+                    "cli_backend": "",
+                    "model_name": "",
+                }
+            proposer_runner = getattr(proposer_sm, "_runner", None)
+            if proposer_runner is not None and register_cancel_target:
+                register_cancel_target(proposer_runner)
+        else:
+            arch_agent = store.get_agent(proj["id"], "architect")
+            if arch_agent:
+                arch_runner = make_runner_from_row(arch_agent, settings=settings)
+                arch_runner.workdir = workdir
+                if register_cancel_target:
+                    register_cancel_target(arch_runner)
+                arch_sm = SessionManager(
+                    store=store,
+                    runner=arch_runner,
+                    agent_row=arch_agent,
+                    project_id=proj["id"],
+                    settings=settings,
+                )
+    if mode == WorkMode.architect_design and arch_agent is None:
+        console.print("[red]Missing architect agent.[/red]")
         return
 
     dev_runner = make_runner_from_row(dev_agent, settings=settings)
@@ -876,31 +830,35 @@ def _run_workflow(
     # Create work item
     work_item_id = store.create_work_item(
         project_id=proj["id"], title=requirement[:200],
-        description=requirement, item_type="code_change",
-        assigned_agent_id=dev_agent["id"],
+        description=requirement,
+        item_type="design" if mode in {WorkMode.design, WorkMode.architect_design} else "code_change",
+        assigned_agent_id=arch_agent["id"] if isinstance(arch_agent, dict) else dev_agent["id"],
+        metadata_json={"work_mode": mode.value},
     )
     if on_work_item_created:
         on_work_item_created(work_item_id)
     store.update_work_item_status(work_item_id, "in_progress")
 
     # Create sessions
+    if proposer_sm is not None:
+        arch_sm = proposer_sm.fork_for_work_item(
+            work_item_id,
+            purpose=("Arch design" if mode == WorkMode.architect_design else "Arch workflow") + f": {requirement[:80]}",
+        )
+    elif arch_sm is not None:
+        arch_sm.create_or_resume(
+            purpose=("Workflow architect design" if mode == WorkMode.architect_design else "Workflow architect") + f": {requirement[:80]}",
+            work_item_id=work_item_id,
+        )
     dev_sm.create_or_resume(purpose=f"Workflow dev: {requirement[:80]}", work_item_id=work_item_id)
     for qa_sm in qa_sms:
         qa_sm.create_or_resume(purpose=f"Workflow QA: {requirement[:80]}", work_item_id=work_item_id)
 
-    # User input callback — use prompt_toolkit if available, else plain input
-    def ask_user(prompt_text: str) -> str:
-        if prompt_session:
-            try:
-                return prompt_session.prompt(prompt_text, multiline=False).strip()
-            except (EOFError, KeyboardInterrupt):
-                return "n"
-        try:
-            return input(f"\n{prompt_text}").strip()
-        except (EOFError, KeyboardInterrupt):
-            return "n"
-
     console.print(f"\n[bold]Starting workflow for:[/bold] {requirement}")
+    if isinstance(arch_agent, dict):
+        console.print(
+            f"[dim]Architect: {arch_agent['display_name']} ({arch_agent['cli_backend']}/{arch_agent['model_name']})[/dim]"
+        )
     console.print(
         f"[dim]Dev: {dev_agent['display_name']} ({dev_agent['cli_backend']}/{dev_agent['model_name']})[/dim]"
     )
@@ -915,28 +873,36 @@ def _run_workflow(
         store=store,
         dev_sm=dev_sm,
         qa_sms=qa_sms,
+        arch_sm=arch_sm,
         project_id=proj["id"],
         work_item_id=work_item_id,
         max_review_iterations=settings.workflow.max_review_iterations,
+        mode=mode,
         ask_user=_make_prompt_callback(prompt_session),
-        auto_approve=True,
+        auto_approve=False,
         should_cancel=should_cancel,
     )
 
-    result = engine.run(requirement)
+    try:
+        result = engine.run(requirement)
 
-    # Update work item
-    if should_cancel and should_cancel():
+        if should_cancel and should_cancel():
+            store.update_work_item_status(work_item_id, "blocked")
+        elif getattr(result, "blocked", False):
+            store.update_work_item_status(work_item_id, "blocked")
+        elif result.success:
+            store.update_work_item_status(work_item_id, "completed")
+        else:
+            store.update_work_item_status(work_item_id, "review")
+    except Exception:
         store.update_work_item_status(work_item_id, "blocked")
-    elif result.success:
-        store.update_work_item_status(work_item_id, "completed")
-    else:
-        store.update_work_item_status(work_item_id, "review")
-
-    # Close sessions
-    dev_sm.close()
-    for qa_sm in qa_sms:
-        qa_sm.close()
+        raise
+    finally:
+        if arch_sm is not None:
+            arch_sm.close()
+        dev_sm.close()
+        for qa_sm in qa_sms:
+            qa_sm.close()
 
 
 def _run_inline_review_interactive(
@@ -985,33 +951,16 @@ def _run_design_review_interactive(
     task: str,
     prompt_session: PromptSession | None = None,
 ) -> None:
-    work_item_ref: dict[str, int | None] = {"id": None}
-    cancel_targets: list[AgentRunner] = []
-    cancel_event = threading.Event()
-
-    def _worker():
-        return _run_design_review(
-            store=store,
-            proj=proj,
-            proposer_sm=proposer_sm,
-            workdir=workdir,
-            settings=settings,
-            task=task,
-            prompt_session=prompt_session,
-            should_cancel=cancel_event.is_set,
-            on_work_item_created=lambda wid: work_item_ref.__setitem__("id", wid),
-            register_cancel_target=cancel_targets.append,
-        )
-
-    _run_with_task_monitor(
-        console=console,
+    _run_workflow_interactive(
         store=store,
         proj=proj,
-        label="Running architect design workflow",
-        worker_fn=_worker,
-        work_item_ref=work_item_ref,
-        cancel_targets=cancel_targets,
-        cancel_event=cancel_event,
+        workdir=workdir,
+        settings=settings,
+        requirement=task,
+        prompt_session=prompt_session,
+        mode=WorkMode.architect_design,
+        proposer_sm=proposer_sm,
+        label="Running design workflow",
     )
 
 
@@ -1061,6 +1010,9 @@ def _run_workflow_interactive(
     settings: MySwatSettings,
     requirement: str,
     prompt_session: PromptSession | None = None,
+    mode: WorkMode = WorkMode.full,
+    proposer_sm: SessionManager | None = None,
+    label: str | None = None,
 ) -> None:
     work_item_ref: dict[str, int | None] = {"id": None}
     cancel_targets: list[AgentRunner] = []
@@ -1077,13 +1029,15 @@ def _run_workflow_interactive(
             should_cancel=cancel_event.is_set,
             on_work_item_created=lambda wid: work_item_ref.__setitem__("id", wid),
             register_cancel_target=cancel_targets.append,
+            mode=mode,
+            proposer_sm=proposer_sm,
         )
 
     _run_with_task_monitor(
         console=console,
         store=store,
         proj=proj,
-        label="Running full teamwork workflow",
+        label=label or ("Running full teamwork workflow" if mode == WorkMode.full else f"Running {mode.value} teamwork workflow"),
         worker_fn=_worker,
         work_item_ref=work_item_ref,
         cancel_targets=cancel_targets,
@@ -1103,100 +1057,19 @@ def _run_full_workflow(
     on_work_item_created: Callable[[int], None] | None = None,
     register_cancel_target: Callable[[AgentRunner], None] | None = None,
 ) -> None:
-    """Run the full workflow with the architect leading design stages."""
-    from myswat.workflow.engine import WorkflowEngine, WorkMode
-
-    if proposer_sm is None:
-        console.print("[red]Missing architect session.[/red]")
-        return
-
-    dev_agent = store.get_agent(proj["id"], "developer")
-    if not dev_agent:
-        console.print("[red]Missing developer agent.[/red]")
-        return
-
-    qa_sms = []
-    for qa_role in ("qa_main", "qa_vice"):
-        qa_agent = store.get_agent(proj["id"], qa_role)
-        if qa_agent:
-            qa_runner = make_runner_from_row(qa_agent, settings=settings)
-            qa_runner.workdir = workdir
-            if register_cancel_target:
-                register_cancel_target(qa_runner)
-            qa_sms.append(SessionManager(
-                store=store, runner=qa_runner, agent_row=qa_agent,
-                project_id=proj["id"], settings=settings,
-            ))
-
-    if not qa_sms:
-        console.print("[red]No QA agents found.[/red]")
-        return
-
-    dev_runner = make_runner_from_row(dev_agent, settings=settings)
-    dev_runner.workdir = workdir
-    if register_cancel_target:
-        register_cancel_target(dev_runner)
-    proposer_runner = getattr(proposer_sm, "_runner", None)
-    if proposer_runner is not None and register_cancel_target:
-        register_cancel_target(proposer_runner)
-
-    dev_sm = SessionManager(
-        store=store, runner=dev_runner, agent_row=dev_agent,
-        project_id=proj["id"], settings=settings,
-    )
-
-    work_item_id = store.create_work_item(
-        project_id=proj["id"],
-        title=requirement[:200],
-        description=requirement,
-        item_type="code_change",
-        assigned_agent_id=proposer_sm.agent_id,
-        metadata_json={"work_mode": WorkMode.full.value},
-    )
-    if on_work_item_created:
-        on_work_item_created(work_item_id)
-    store.update_work_item_status(work_item_id, "in_progress")
-
-    arch_workflow_sm = proposer_sm.fork_for_work_item(
-        work_item_id,
-        purpose=f"Arch full workflow: {requirement[:80]}",
-    )
-    dev_sm.create_or_resume(purpose=f"Workflow dev: {requirement[:80]}", work_item_id=work_item_id)
-    for qa_sm in qa_sms:
-        qa_sm.create_or_resume(purpose=f"Workflow QA: {requirement[:80]}", work_item_id=work_item_id)
-
-    engine = WorkflowEngine(
+    return _run_workflow(
         store=store,
-        dev_sm=dev_sm,
-        qa_sms=qa_sms,
-        arch_sm=arch_workflow_sm,
-        project_id=proj["id"],
-        work_item_id=work_item_id,
-        max_review_iterations=settings.workflow.max_review_iterations,
-        mode=WorkMode.full,
-        ask_user=_make_prompt_callback(prompt_session),
-        auto_approve=False,
+        proj=proj,
+        workdir=workdir,
+        settings=settings,
+        requirement=requirement,
+        prompt_session=prompt_session,
         should_cancel=should_cancel,
+        on_work_item_created=on_work_item_created,
+        register_cancel_target=register_cancel_target,
+        mode=WorkMode.full,
+        proposer_sm=proposer_sm,
     )
-
-    try:
-        result = engine.run(requirement)
-        if should_cancel and should_cancel():
-            store.update_work_item_status(work_item_id, "blocked")
-        elif getattr(result, "blocked", False):
-            store.update_work_item_status(work_item_id, "blocked")
-        elif result.success:
-            store.update_work_item_status(work_item_id, "completed")
-        else:
-            store.update_work_item_status(work_item_id, "review")
-    except Exception:
-        store.update_work_item_status(work_item_id, "blocked")
-        raise
-    finally:
-        arch_workflow_sm.close()
-        dev_sm.close()
-        for qa_sm in qa_sms:
-            qa_sm.close()
 
 
 def _run_full_workflow_interactive(
@@ -1208,31 +1081,14 @@ def _run_full_workflow_interactive(
     requirement: str,
     prompt_session: PromptSession | None = None,
 ) -> None:
-    work_item_ref: dict[str, int | None] = {"id": None}
-    cancel_targets: list[AgentRunner] = []
-    cancel_event = threading.Event()
-
-    def _worker():
-        return _run_full_workflow(
-            store=store,
-            proj=proj,
-            proposer_sm=proposer_sm,
-            workdir=workdir,
-            settings=settings,
-            requirement=requirement,
-            prompt_session=prompt_session,
-            should_cancel=cancel_event.is_set,
-            on_work_item_created=lambda wid: work_item_ref.__setitem__("id", wid),
-            register_cancel_target=cancel_targets.append,
-        )
-
-    _run_with_task_monitor(
-        console=console,
+    _run_workflow_interactive(
         store=store,
         proj=proj,
+        workdir=workdir,
+        settings=settings,
+        requirement=requirement,
+        prompt_session=prompt_session,
+        mode=WorkMode.full,
+        proposer_sm=proposer_sm,
         label="Running architect-led full workflow",
-        worker_fn=_worker,
-        work_item_ref=work_item_ref,
-        cancel_targets=cancel_targets,
-        cancel_event=cancel_event,
     )

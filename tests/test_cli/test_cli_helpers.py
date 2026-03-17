@@ -8,6 +8,14 @@ from myswat.cli.chat_cmd import _extract_delegation
 from myswat.cli.init_cmd import _slugify
 from myswat.cli.main import _infer_stage_labels
 from myswat.cli.progress import _fmt_duration, _build_live_display
+from myswat.workflow.engine import WorkMode
+from myswat.workflow.modes import (
+    DEFAULT_DELEGATION_MODE,
+    DELEGATION_MODE_SPECS,
+    INTERNAL_WORK_MODES,
+    PUBLIC_WORK_MODES,
+    normalize_delegation_mode,
+)
 
 
 # ── _fmt_duration ──
@@ -49,12 +57,12 @@ class TestExtractDelegation:
     def test_extracts_task_line(self):
         text = "Here is my plan:\n```delegate\nTASK: implement the auth module\n```\nDone."
         result = _extract_delegation(text)
-        assert result == ("implement the auth module", "code")
+        assert result == ("implement the auth module", "develop")
 
     def test_task_case_insensitive(self):
         text = "```delegate\ntask: do something\n```"
         result = _extract_delegation(text)
-        assert result == ("do something", "code")
+        assert result == ("do something", "develop")
 
     def test_explicit_mode_is_parsed(self):
         text = "```delegate\nMODE: design\nTASK: formalize the cache design\n```"
@@ -69,7 +77,7 @@ class TestExtractDelegation:
     def test_mode_blank_defaults_to_code(self):
         text = "```delegate\nMODE:   \nTASK: finalize release checks\n```"
         result = _extract_delegation(text)
-        assert result == ("finalize release checks", "code")
+        assert result == ("finalize release checks", "develop")
 
     def test_no_delegate_block(self):
         text = "Just a normal response with no delegation."
@@ -79,7 +87,7 @@ class TestExtractDelegation:
     def test_delegate_block_without_task_line(self):
         text = "```delegate\nsome instructions to follow\n```"
         result = _extract_delegation(text)
-        assert result == ("some instructions to follow", "code")
+        assert result == ("some instructions to follow", "develop")
 
     def test_delegate_block_without_task_ignores_mode_metadata(self):
         text = "```delegate\nMODE: design\nsome instructions to follow\n```"
@@ -114,7 +122,7 @@ class TestExtractDelegation:
     def test_multiple_lines_in_block_returns_task(self):
         text = "```delegate\nCONTEXT: auth system\nTASK: add login endpoint\nPRIORITY: high\n```"
         result = _extract_delegation(text)
-        assert result == ("add login endpoint", "code")
+        assert result == ("add login endpoint", "develop")
 
     def test_mode_full_is_parsed(self):
         text = "```delegate\nMODE: full\nTASK: design and implement the auth module\n```"
@@ -131,7 +139,26 @@ class TestExtractDelegation:
         result = _extract_delegation(text)
         assert result is not None
         assert "no task prefix here" in result[0]
-        assert result[1] == "code"
+        assert result[1] == "develop"
+
+
+class TestWorkflowModes:
+    def test_normalize_delegation_aliases(self):
+        assert normalize_delegation_mode(None) == DEFAULT_DELEGATION_MODE
+        assert normalize_delegation_mode("") == DEFAULT_DELEGATION_MODE
+        assert normalize_delegation_mode("develop") == DEFAULT_DELEGATION_MODE
+
+    def test_delegation_specs_capture_public_to_engine_mapping(self):
+        assert DELEGATION_MODE_SPECS["full"].engine_mode == WorkMode.full
+        assert DELEGATION_MODE_SPECS["design"].engine_mode == WorkMode.architect_design
+        assert DELEGATION_MODE_SPECS["develop"].engine_mode == WorkMode.develop
+        assert DELEGATION_MODE_SPECS["testplan"].engine_mode == WorkMode.testplan_design
+
+    def test_internal_modes_are_not_user_facing(self):
+        assert WorkMode.architect_design in INTERNAL_WORK_MODES
+        assert WorkMode.testplan_design in INTERNAL_WORK_MODES
+        assert WorkMode.architect_design not in PUBLIC_WORK_MODES
+        assert WorkMode.testplan_design not in PUBLIC_WORK_MODES
 
 
 # ── _build_live_display ──

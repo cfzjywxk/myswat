@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from enum import StrEnum
 from typing import TYPE_CHECKING, Callable
 
 from rich.console import Console
@@ -35,6 +34,7 @@ from rich.panel import Panel
 
 from myswat.cli.progress import _collapse_text
 from myswat.models.work_item import ReviewVerdict
+from myswat.workflow.modes import WorkMode
 from myswat.workflow.prompts import (
     ARCH_ADDRESS_DESIGN_COMMENTS,
     ARCH_TECH_DESIGN,
@@ -73,17 +73,6 @@ console = Console()
 # Maximum bugs before aborting GA test phase
 MAX_GA_BUGS = 5
 
-
-# ── Data classes ──
-
-
-class WorkMode(StrEnum):
-    full = "full"
-    design = "design"
-    development = "development"
-    test = "test"
-    architect_design = "architect_design"
-    testplan_design = "testplan_design"
 
 @dataclass
 class PhaseResult:
@@ -348,8 +337,8 @@ class WorkflowEngine:
             return self._run_full(requirement, result)
         if self._mode == WorkMode.design:
             return self._run_design_mode(requirement, result)
-        if self._mode == WorkMode.development:
-            return self._run_development_mode(requirement, result)
+        if self._mode == WorkMode.develop:
+            return self._run_develop_mode(requirement, result)
         if self._mode == WorkMode.test:
             return self._run_test_mode(requirement, result)
         if self._mode == WorkMode.architect_design:
@@ -877,7 +866,7 @@ class WorkflowEngine:
         )
         return result
 
-    def _run_development_mode(self, requirement: str, result: WorkflowResult) -> WorkflowResult:
+    def _run_develop_mode(self, requirement: str, result: WorkflowResult) -> WorkflowResult:
         console.print(Panel("[bold]Stage 1: Development[/bold]", border_style="blue"))
         phases = self._parse_phases(requirement)
         console.print(f"[dim]Parsed {len(phases)} phase(s) from requirement.[/dim]")
@@ -1990,7 +1979,7 @@ class WorkflowEngine:
         ]
         return "\n".join(lines)
 
-    def _generate_development_report(self, result: WorkflowResult, completed_summaries: list[str]) -> str:
+    def _generate_develop_report(self, result: WorkflowResult, completed_summaries: list[str]) -> str:
         dev_report = ""
         if completed_summaries:
             prompt = DEV_FINAL_REPORT.format(
@@ -2078,8 +2067,8 @@ class WorkflowEngine:
             return self._generate_testplan_design_report(result)
         if self._mode == WorkMode.design:
             return self._generate_design_report(result)
-        if self._mode == WorkMode.development:
-            return self._generate_development_report(result, completed_summaries)
+        if self._mode == WorkMode.develop:
+            return self._generate_develop_report(result, completed_summaries)
         if self._mode == WorkMode.test:
             return self._generate_test_report(result)
 

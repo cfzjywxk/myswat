@@ -24,7 +24,7 @@ You have a codebase. You have AI agents that can write code and review it. But y
 - **Automated review loops** — developer proposes, QA reviews, iterate until LGTM. No manual copy-paste.
 - **Shared project memory** — every agent sees what others said and learned. Knowledge compounds across sessions, not just within one.
 - **Mix any AI backend** — Claude Opus for QA, GPT for dev, Kimi for a second opinion. Per-role configuration.
-- **Full workflow or pick stages** — run the whole pipeline (design → plan → dev → QA → report), or just `--dev` or `--test`.
+- **Full workflow or pick stages** — run the whole pipeline (architect-led design → plan → develop → test → report), or just `--develop`/`--dev` or `--test`.
 - **Learns your project** — build commands, test tiers, invariants, conventions. Agents stop guessing.
 
 ## Quick Start
@@ -37,7 +37,7 @@ You have a codebase. You have AI agents that can write code and review it. But y
 myswat init "my-project" --repo /path/to/repo
 myswat learn -p my-project
 
-# Run a task — full dev/QA loop
+# Run a task — full architect-led workflow
 myswat work -p my-project "Implement bloom filter for compaction"
 
 # Or just chat
@@ -54,13 +54,24 @@ myswat chat -p my-project
  MySwat ──────────────────────────────────────────────
   |                                                    |
   |  1. Loads project knowledge from TiDB              |
-  |  2. Sends to Developer agent (codex/claude/kimi)   |
-  |  3. Captures output, feeds to QA agent             |
-  |  4. QA reviews → issues found? loop back to Dev    |
-  |  5. LGTM → done. Knowledge compacted & persisted.  |
+  |  2. Architect leads design + planning              |
+  |  3. Developer implements in phases                 |
+  |  4. QA reviews, tests, loops fixes if needed       |
+  |  5. Final report + persisted team knowledge        |
   |                                                    |
  ──────────────────────────────────────────────────────
 ```
+
+## Workflow Modes
+
+| Goal | Chat delegation | CLI | Result |
+|------|-----------------|-----|--------|
+| Review design + plan | `MODE: design` | `myswat work --design` | Reviewed design package, no code |
+| Implement settled design | `MODE: develop` | `myswat work --develop` | Phased implementation with QA review |
+| Run end-to-end delivery | `MODE: full` | `myswat work` | Architect-led design, implementation, QA test, final report |
+| Formalize test plan | `MODE: testplan` | _chat-led only_ | Reviewed test plan, no execution |
+
+Internal engine-only modes: `architect_design` and `testplan_design`. They power chat-led orchestration flows and are not user-facing CLI/delegation values.
 
 MySwat does **not** run builds or tests — the agents do that themselves via their terminal access. MySwat handles routing, context, and persistence.
 

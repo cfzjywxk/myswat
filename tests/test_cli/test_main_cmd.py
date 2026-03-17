@@ -396,7 +396,7 @@ class TestTaskCommand:
             "title": "Implement feature",
             "description": "Detailed",
             "metadata_json": {
-                "work_mode": "development",
+                "work_mode": "develop",
                 "task_state": {
                     "current_stage": "phase_1",
                     "latest_summary": "working",
@@ -410,7 +410,7 @@ class TestTaskCommand:
         result = runner.invoke(app, ["task", "7", "--project", "proj"])
         assert result.exit_code == 0
         assert "Workflow mode:" in result.stdout
-        assert "development" in result.stdout
+        assert "develop" in result.stdout
         mock_teamwork.assert_called_once()
 
     @patch("myswat.config.settings.MySwatSettings")
@@ -530,8 +530,8 @@ class TestTaskCommand:
         mock_teamwork.assert_called_once()
 
     def test_status_prefers_work_mode_metadata(self):
-        item = {"metadata_json": {"work_mode": "development"}}
-        assert _display_mode(item, "[cyan]team[/cyan]") == "development"
+        item = {"metadata_json": {"work_mode": "develop"}}
+        assert _display_mode(item, "[cyan]team[/cyan]") == "develop"
 
     def test_status_falls_back_when_no_work_mode(self):
         item = {"metadata_json": {}}
@@ -710,6 +710,7 @@ class TestCommandRouting:
             workdir=None,
             background=False,
             mode=WorkMode.full,
+            auto_approve=False,
         )
 
     @patch("myswat.cli.work_cmd.run_work")
@@ -721,8 +722,8 @@ class TestCommandRouting:
         cases = [
             ("--design", WorkMode.design),
             ("--plan", WorkMode.design),
-            ("--development", WorkMode.development),
-            ("--dev", WorkMode.development),
+            ("--develop", WorkMode.develop),
+            ("--dev", WorkMode.develop),
             ("--test", WorkMode.test),
             ("--ga-test", WorkMode.test),
         ]
@@ -736,6 +737,7 @@ class TestCommandRouting:
                 workdir=None,
                 background=False,
                 mode=expected_mode,
+                auto_approve=False,
             )
 
     @patch("myswat.cli.work_cmd.run_work")
@@ -766,6 +768,7 @@ class TestCommandRouting:
             workdir=None,
             background=True,
             mode=WorkMode.full,
+            auto_approve=False,
         )
 
     @patch("myswat.cli.work_cmd.run_work")
@@ -791,7 +794,25 @@ class TestCommandRouting:
             "add feature",
             workdir=None,
             background=True,
-            mode=WorkMode.development,
+            mode=WorkMode.develop,
+            auto_approve=False,
+        )
+
+    @patch("myswat.cli.work_cmd.run_work")
+    def test_work_command_auto_approve(self, mock_run_work):
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["work", "add feature", "--project", "proj", "--auto-approve"])
+        assert result.exit_code == 0
+        mock_run_work.assert_called_once_with(
+            "proj",
+            "add feature",
+            workdir=None,
+            background=False,
+            mode=WorkMode.full,
+            auto_approve=True,
         )
 
     @patch("myswat.cli.work_cmd.run_background_work_item")
@@ -810,7 +831,7 @@ class TestCommandRouting:
                 "--work-item-id",
                 "42",
                 "--mode",
-                "development",
+                "develop",
             ],
         )
         assert result.exit_code == 0
@@ -819,7 +840,7 @@ class TestCommandRouting:
             "add feature",
             work_item_id=42,
             workdir=None,
-            mode=WorkMode.development,
+            mode=WorkMode.develop,
         )
 
     @patch("myswat.cli.work_cmd.stop_work_item")

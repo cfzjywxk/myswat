@@ -758,8 +758,8 @@ class TestRunTestplanDesignMode:
         assert result.final_report == "Testplan-design workflow cancelled during test plan review."
 
 
-class TestRunDevelopmentMode:
-    """Tests for development-mode orchestration added in phase 4."""
+class TestRunDevelopMode:
+    """Tests for develop-mode orchestration added in phase 4."""
 
     @patch.object(WorkflowEngine, "_generate_report", return_value="# Development Report")
     @patch.object(WorkflowEngine, "_run_phase")
@@ -768,7 +768,7 @@ class TestRunDevelopmentMode:
         m_run_phase.return_value = PhaseResult(
             name="phase-A", summary="done", review_iterations=1, review_passed=True, committed=True,
         )
-        engine, _, _ = _make_engine(mode=WorkMode.development)
+        engine, _, _ = _make_engine(mode=WorkMode.develop)
 
         result = engine.run("implement feature")
 
@@ -786,7 +786,7 @@ class TestRunDevelopmentMode:
         m_run_phase.return_value = PhaseResult(
             name="Full implementation", summary="done", review_iterations=1, review_passed=True, committed=True,
         )
-        engine, _, _ = _make_engine(mode=WorkMode.development)
+        engine, _, _ = _make_engine(mode=WorkMode.develop)
 
         result = engine.run("Just do everything at once, no structure here.")
 
@@ -800,7 +800,7 @@ class TestRunDevelopmentMode:
         m_run_phase.return_value = PhaseResult(
             name="phase-A", summary="failed commit", review_iterations=1, review_passed=True, committed=False,
         )
-        engine, _, _ = _make_engine(mode=WorkMode.development)
+        engine, _, _ = _make_engine(mode=WorkMode.develop)
 
         result = engine.run("implement feature")
 
@@ -2099,9 +2099,9 @@ class TestGenerateReport:
         assert "## Failure" in report
         assert "final plan text" in report
 
-    def test_development_mode_report_omits_design_and_ga_sections(self):
-        """Development-mode report only includes development content."""
-        engine, dev, _ = _make_engine(mode=WorkMode.development)
+    def test_develop_mode_report_omits_design_and_ga_sections(self):
+        """Develop-mode report only includes development content."""
+        engine, dev, _ = _make_engine(mode=WorkMode.develop)
         dev.send.return_value = _ok("narrative")
         result = WorkflowResult(
             requirement="req",

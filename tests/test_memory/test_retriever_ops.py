@@ -74,6 +74,23 @@ class TestLoadProjectOps:
         assert "Deploy Process" in result
         assert "Run deploy.sh" in result
 
+    def test_file_and_tidb_entries_are_merged(self, retriever, mock_store, tmp_path):
+        md_file = tmp_path / "myswat.md"
+        md_file.write_text(
+            "## Project Operations Knowledge\n\n"
+            "### Build\nUse make test\n",
+            encoding="utf-8",
+        )
+        mock_store.list_knowledge.return_value = [
+            {"title": "Build", "content": "Use make test"},
+            {"title": "Team Workflows", "content": "MODE: develop"},
+        ]
+
+        result = retriever._load_project_ops(1, str(tmp_path))
+
+        assert result.count("### Build") == 1
+        assert "### Team Workflows" in result
+
     def test_tidb_entries_formatted(self, retriever, mock_store, tmp_path):
         mock_store.list_knowledge.return_value = [
             {"title": "CI Pipeline", "content": "Use GitHub Actions"},
@@ -94,6 +111,21 @@ class TestLoadProjectOps:
         result = retriever._load_project_ops(1, None)
         mock_store.list_knowledge.assert_called_once()
         assert result == ""
+
+    def test_tidb_failure_logs_and_falls_back_to_file_cache(self, retriever, mock_store, tmp_path, caplog):
+        md_file = tmp_path / "myswat.md"
+        md_file.write_text(
+            "## Project Operations Knowledge\n\n"
+            "### Build\nUse make test\n",
+            encoding="utf-8",
+        )
+        mock_store.list_knowledge.side_effect = RuntimeError("tidb down")
+
+        with caplog.at_level("WARNING"):
+            result = retriever._load_project_ops(1, str(tmp_path))
+
+        assert "### Build" in result
+        assert "Failed to load project_ops from TiDB for project 1" in caplog.text
 
 
 # ===================================================================

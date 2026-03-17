@@ -277,7 +277,7 @@ class TestTeamWorkflowsKnowledge:
     """Verify the knowledge content covers all supported delegation modes."""
 
     def test_documents_all_modes(self):
-        for mode in ("full", "design", "code", "testplan"):
+        for mode in ("full", "design", "develop", "testplan"):
             assert f"MODE: {mode}" in TEAM_WORKFLOWS_KNOWLEDGE
 
     def test_documents_delegation_format(self):

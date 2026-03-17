@@ -14,6 +14,10 @@ from myswat.config.settings import MySwatSettings
 from myswat.db.connection import TiDBPool
 from myswat.db.schema import run_migrations
 from myswat.memory.store import MemoryStore
+from myswat.workflow.modes import (
+    ARCHITECT_DELEGATION_MODES,
+    QA_DELEGATION_MODES,
+)
 
 console = Console()
 
@@ -67,13 +71,13 @@ def run_init(name: str, repo_path: str | None, description: str | None) -> None:
     console.print(f"  Use: myswat status -p {slug}")
 
 
-ARCHITECT_SYSTEM_PROMPT = """\
+ARCHITECT_SYSTEM_PROMPT = f"""\
 You are the Architect / PM for this project. You can answer questions \
 directly (design discussions, architecture decisions, code review, planning) \
 or delegate work to your team.
 
 To delegate, end your response with a ```delegate block. Available modes: \
-full, design, code. See the Team Workflows section in the project knowledge \
+{", ".join(ARCHITECT_DELEGATION_MODES)}. See the Team Workflows section in the project knowledge \
 for details on when to use each mode.
 """
 
@@ -83,22 +87,22 @@ focus on implementability, API ergonomics, effort estimation, and
 potential technical debt. When implementing, write clean, tested code.
 """
 
-QA_MAIN_SYSTEM_PROMPT = """\
+QA_MAIN_SYSTEM_PROMPT = f"""\
 You are a senior QA engineer. Focus on testability, edge cases, failure \
 modes, and observability. When creating test plans, be thorough and systematic.
 
 To delegate a test plan for team review, end your response with a \
-```delegate block with MODE: testplan. See the Team Workflows section \
+```delegate block with MODE: {QA_DELEGATION_MODES[0]}. See the Team Workflows section \
 in the project knowledge for details.
 """
 
-QA_VICE_SYSTEM_PROMPT = """\
+QA_VICE_SYSTEM_PROMPT = f"""\
 You are a QA engineer providing a second review perspective. Focus on \
 testability, edge cases, failure modes, and observability. Bring a fresh \
 perspective independent of the primary QA reviewer.
 
 To delegate a test plan for team review, end your response with a \
-```delegate block with MODE: testplan. See the Team Workflows section \
+```delegate block with MODE: {QA_DELEGATION_MODES[0]}. See the Team Workflows section \
 in the project knowledge for details.
 """
 
@@ -202,15 +206,17 @@ Use when: the user wants a feature designed AND implemented AND tested — \
 e.g. "build this out", "finish the design and implementation", \
 "take it from here and deliver", "implement this end-to-end".
 
-#### MODE: design — Design review only
-The architect (or developer) produces a technical design. Developer + QA review \
-it in a loop until all reviewers approve (LGTM). No code is written.
+#### MODE: design — Design + implementation planning
+The architect produces a technical design. Developer + QA review it in a loop \
+until all reviewers approve (LGTM). Then the developer produces an \
+implementation plan, QA reviews it, and the user can give final feedback. No \
+code is written.
 
 Use when: the user wants a design formalized and reviewed by the team but \
 does NOT want implementation yet — e.g. "formalize this design", \
 "get the team's feedback on this architecture", "let's review this design together".
 
-#### MODE: code — Dev + QA code review loop (default)
+#### MODE: develop — Dev + QA implementation workflow (default)
 The developer implements the task. QA reviews the code in a loop until LGTM. \
 No design phase — assumes the design is already settled.
 
@@ -230,21 +236,21 @@ e.g. "write a test plan for this", "formalize our testing approach".
 To delegate, end your response with:
 
 ```delegate
-MODE: <full|design|code|testplan>
+MODE: <full|design|develop|testplan>
 TASK: <concise description of the work>
 ```
 
-- MODE is optional; defaults to "code" if omitted.
-- Only the architect role can delegate with MODE: full, design, or code.
+- MODE is optional; defaults to "develop" if omitted.
+- Only the architect role can delegate with MODE: full, design, or develop.
 - Only QA roles (qa_main, qa_vice) can delegate with MODE: testplan.
 - The developer role does not delegate — it receives delegated work.
 
 ### Decision Guide
 
 Ask yourself: what does the user want at the END of this?
-- A reviewed design document → MODE: design
+- A reviewed design package (design + implementation plan) → MODE: design
 - Working, tested, committed code → MODE: full
-- Code written (design already settled) → MODE: code (or omit MODE)
+- Code written (design already settled) → MODE: develop (or omit MODE)
 - A reviewed test plan → MODE: testplan
 - Just an answer or discussion → respond directly, no delegation
 """

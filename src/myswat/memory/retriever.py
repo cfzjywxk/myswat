@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from myswat.cli.progress import _describe_process_event, _preview_text
 from myswat.memory.search_engine import KnowledgeSearchEngine, SearchPlanBuilder
 from myswat.memory.store import MemoryStore
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryRetriever:
@@ -126,6 +129,9 @@ class MemoryRetriever:
         The canonical data always lives in TiDB; the file is just a cache
         written by ``myswat learn`` to avoid a round-trip on every context build.
         """
+        file_text = ""
+        file_titles: set[str] = set()
+
         # Try local file first
         if repo_path:
             md_file = Path(repo_path) / "myswat.md"
@@ -136,23 +142,54 @@ class MemoryRetriever:
                     marker = "## Project Operations Knowledge"
                     idx = text.find(marker)
                     if idx != -1:
-                        return text[idx:]
+                        file_text = text[idx:].strip()
+                    elif text.strip():
+                        file_text = text.strip()
                     # File exists but has unexpected format — use as-is
-                    if text.strip():
-                        return text
                 except OSError:
                     pass  # fall through to TiDB
 
-        # Fall back to TiDB
-        ops_entries = self._store.list_knowledge(
-            project_id, category="project_ops", limit=20,
-        )
-        if not ops_entries:
-            return ""
-        ops_lines = ["## Project Operations Knowledge\n"]
+        if file_text:
+            for line in file_text.splitlines():
+                if line.startswith("### "):
+                    title = line[4:].strip()
+                    if title:
+                        file_titles.add(title)
+
+        # Merge with TiDB so local cache doesn't hide newer project_ops entries
+        try:
+            ops_entries = self._store.list_knowledge(
+                project_id, category="project_ops", limit=20,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to load project_ops from TiDB for project %s; using local myswat.md cache only.",
+                project_id,
+                exc_info=True,
+            )
+            return file_text
+        extra_lines: list[str] = []
         for entry in ops_entries:
-            ops_lines.append(f"### {entry['title']}\n{entry['content']}\n")
-        return "\n".join(ops_lines)
+            title = entry.get("title")
+            if not isinstance(title, str) or not title.strip():
+                continue
+            if title in file_titles:
+                continue
+            extra_lines.append(f"### {title}\n{entry['content']}\n")
+
+        if file_text and not extra_lines:
+            return file_text
+
+        if not file_text and not extra_lines:
+            return ""
+
+        if not file_text:
+            return "\n".join(["## Project Operations Knowledge\n", *extra_lines])
+
+        if "## Project Operations Knowledge" in file_text:
+            return file_text.rstrip() + "\n\n" + "\n".join(extra_lines)
+
+        return file_text.rstrip() + "\n\n" + "\n".join(["## Project Operations Knowledge\n", *extra_lines])
 
     def _build_work_item_state_context(self, work_item_id: int, budget_tokens: int = 600) -> str:
         item = self._store.get_work_item(work_item_id)

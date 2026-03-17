@@ -24,7 +24,8 @@ from myswat.db.connection import TiDBPool
 from myswat.db.schema import run_migrations
 from myswat.memory.learn_triggers import submit_workflow_summary_learn_request
 from myswat.memory.store import MemoryStore
-from myswat.workflow.engine import WorkMode, WorkflowEngine
+from myswat.workflow.engine import WorkflowEngine
+from myswat.workflow.modes import WorkMode
 
 console = Console()
 
@@ -85,6 +86,10 @@ def _get_workflow_agents(store: MemoryStore, project_id: int) -> tuple[dict, lis
         raise typer.Exit(1)
 
     return dev_agent, qa_agents
+
+
+def _get_architect_agent(store: MemoryStore, project_id: int) -> dict | None:
+    return store.get_agent(project_id, "architect")
 
 
 def _load_item_metadata(store: MemoryStore, item_id: int) -> dict:
@@ -268,10 +273,25 @@ def _run_workflow(
     show_monitor: bool,
     background_worker: bool,
     mode: WorkMode = WorkMode.full,
+    auto_approve: bool = False,
 ) -> int:
     settings, store, proj, effective_workdir = _load_project_context(project_slug, workdir)
 
     dev_agent, qa_agents = _get_workflow_agents(store, proj["id"])
+    arch_agent = _get_architect_agent(store, proj["id"]) if mode == WorkMode.full else None
+    arch_sm: SessionManager | None = None
+    arch_runner: AgentRunner | None = None
+
+    if arch_agent:
+        arch_runner = make_runner_from_row(arch_agent, settings=settings)
+        arch_runner.workdir = effective_workdir
+        arch_sm = SessionManager(
+            store=store,
+            runner=arch_runner,
+            agent_row=arch_agent,
+            project_id=proj["id"],
+            settings=settings,
+        )
 
     dev_runner = make_runner_from_row(dev_agent, settings=settings)
     dev_runner.workdir = effective_workdir
@@ -303,8 +323,8 @@ def _run_workflow(
             project_id=proj["id"],
             title=requirement[:200],
             description=requirement,
-            item_type="code_change",
-            assigned_agent_id=dev_agent["id"],
+            item_type="design" if mode == WorkMode.design else "code_change",
+            assigned_agent_id=arch_agent["id"] if arch_agent else dev_agent["id"],
             metadata_json={"work_mode": mode.value},
         )
     else:
@@ -338,12 +358,21 @@ def _run_workflow(
             to_role="workflow",
         )
 
+    if arch_sm is not None:
+        arch_sm.create_or_resume(
+            purpose=f"Workflow architect: {requirement[:80]}",
+            work_item_id=work_item_id,
+        )
     dev_sm.create_or_resume(purpose=f"Workflow dev: {requirement[:80]}", work_item_id=work_item_id)
     workflow_session_id = getattr(getattr(dev_sm, "session", None), "id", None)
     for qa_sm in qa_sms:
         qa_sm.create_or_resume(purpose=f"Workflow QA: {requirement[:80]}", work_item_id=work_item_id)
 
     console.print(f"[bold]Requirement:[/bold] {requirement}")
+    if arch_agent:
+        console.print(
+            f"[dim]Architect: {arch_agent['display_name']} ({arch_agent['cli_backend']}/{arch_agent['model_name']})[/dim]"
+        )
     console.print(
         f"[dim]Dev: {dev_agent['display_name']} ({dev_agent['cli_backend']}/{dev_agent['model_name']})[/dim]"
     )
@@ -356,7 +385,10 @@ def _run_workflow(
     _print_tracking_commands(project_slug, work_item_id)
 
     cancel_event = threading.Event()
-    cancel_targets: list[AgentRunner] = [dev_runner] + [qa_sm._runner for qa_sm in qa_sms]
+    cancel_targets: list[AgentRunner] = []
+    if arch_runner is not None:
+        cancel_targets.append(arch_runner)
+    cancel_targets.extend([dev_runner] + [qa_sm._runner for qa_sm in qa_sms])
     restore_signal_handlers = (
         _install_cancel_signal_handlers(cancel_event, cancel_targets)
         if background_worker
@@ -366,11 +398,12 @@ def _run_workflow(
         store=store,
         dev_sm=dev_sm,
         qa_sms=qa_sms,
+        arch_sm=arch_sm,
         project_id=proj["id"],
         work_item_id=work_item_id,
         max_review_iterations=settings.workflow.max_review_iterations,
         mode=mode,
-        auto_approve=(mode != WorkMode.design),
+        auto_approve=(background_worker or auto_approve),
         should_cancel=cancel_event.is_set,
     )
 
@@ -432,7 +465,7 @@ def _run_workflow(
         if restore_signal_handlers is not None:
             restore_signal_handlers()
 
-        for sm in [dev_sm] + qa_sms:
+        for sm in ([arch_sm] if arch_sm is not None else []) + [dev_sm] + qa_sms:
             try:
                 sm.close()
             except Exception:
@@ -478,13 +511,14 @@ def _launch_background_work(
 
     settings, store, proj, effective_workdir = _load_project_context(project_slug, workdir)
     dev_agent, _qa_agents = _get_workflow_agents(store, proj["id"])
+    arch_agent = _get_architect_agent(store, proj["id"]) if mode == WorkMode.full else None
 
     work_item_id = store.create_work_item(
         project_id=proj["id"],
         title=requirement[:200],
         description=requirement,
-        item_type="code_change",
-        assigned_agent_id=dev_agent["id"],
+        item_type="design" if mode == WorkMode.design else "code_change",
+        assigned_agent_id=arch_agent["id"] if arch_agent else dev_agent["id"],
         metadata_json={"work_mode": mode.value},
     )
     log_path, pid_path = _background_runtime_paths(settings, project_slug, work_item_id)
@@ -607,6 +641,7 @@ def run_background_work_item(
         show_monitor=False,
         background_worker=True,
         mode=mode,
+        auto_approve=True,
     )
 
 
@@ -616,6 +651,7 @@ def run_work(
     workdir: str | None = None,
     background: bool = False,
     mode: WorkMode = WorkMode.full,
+    auto_approve: bool = False,
 ) -> None:
     """Run the full teamwork workflow."""
     if background:
@@ -631,6 +667,7 @@ def run_work(
         show_monitor=True,
         background_worker=False,
         mode=mode,
+        auto_approve=auto_approve,
     )
 
 

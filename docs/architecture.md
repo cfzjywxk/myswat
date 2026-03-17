@@ -6,7 +6,7 @@
 |-----------|------|
 | **CLI** (Typer) | `myswat init`, `learn`, `chat`, `run`, `work`, `gc` |
 | **SessionManager** | Agent lifecycle, subprocess launch (codex/claude/kimi) |
-| **WorkflowEngine** | Mode dispatch: full, design, development, test |
+| **WorkflowEngine** | Mode dispatch: full, design, develop, test |
 | **MemoryRetriever** | 5-tier context builder for agent prompts |
 | **KnowledgeSearchEngine** | Search planning, lexical/vector/graph fusion |
 | **MemoryStore** | TiDB CRUD, source-aware upsert, lexical index, graph metadata |

@@ -9,6 +9,7 @@ import typer
 from click.exceptions import Exit as ClickExit
 
 from myswat.agents.base import AgentResponse
+from myswat.workflow.engine import WorkMode
 from myswat.cli.chat_cmd import (
     _show_status,
     _run_inline_review,
@@ -197,6 +198,17 @@ class TestRunInlineReviewInteractive:
 # _run_design_review / _run_testplan_review
 # ---------------------------------------------------------------------------
 class TestRunDesignReview:
+    @patch("myswat.cli.chat_cmd.console.print")
+    @patch("myswat.workflow.engine.WorkflowEngine")
+    @patch("myswat.cli.chat_cmd.SessionManager")
+    def test_missing_architect_session(self, mock_sm_cls, mock_engine_cls, mock_console_print):
+        _run_design_review(MagicMock(), _proj(), None, "/tmp", MagicMock(), "do stuff")
+        mock_engine_cls.assert_not_called()
+        assert any(
+            "Missing architect session." in str(call)
+            for call in mock_console_print.call_args_list
+        )
+
     @patch("myswat.workflow.engine.WorkflowEngine")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_missing_developer_agent(self, mock_sm_cls, mock_engine_cls):
@@ -225,9 +237,9 @@ class TestRunDesignReview:
         store.get_agent.side_effect = get_agent_side
         store.create_work_item.return_value = 42
 
-        qa_sm = MagicMock()
         dev_sm = MagicMock()
-        mock_sm_cls.side_effect = [qa_sm, dev_sm]
+        qa_sm = MagicMock()
+        mock_sm_cls.side_effect = [dev_sm, qa_sm]
 
         arch_workflow_sm = MagicMock()
         proposer_sm = MagicMock()
@@ -267,9 +279,9 @@ class TestRunDesignReview:
         store.get_agent.side_effect = get_agent_side
         store.create_work_item.return_value = 42
 
-        qa_sm = MagicMock()
         dev_sm = MagicMock()
-        mock_sm_cls.side_effect = [qa_sm, dev_sm]
+        qa_sm = MagicMock()
+        mock_sm_cls.side_effect = [dev_sm, qa_sm]
 
         proposer_sm = MagicMock()
         proposer_sm.agent_id = 9
@@ -400,7 +412,7 @@ class TestRunDesignReviewInteractive:
         )
         mock_task_monitor.assert_called_once()
         kwargs = mock_task_monitor.call_args.kwargs
-        assert kwargs["label"] == "Running architect design workflow"
+        assert kwargs["label"] == "Running design workflow"
         assert kwargs["proj"] == _proj()
 
 
@@ -1114,7 +1126,7 @@ class TestRunChat:
         mock_send_timer.assert_called_once()
         mock_submit_learn.assert_called_once()
 
-    @patch("myswat.cli.chat_cmd._run_inline_review_interactive")
+    @patch("myswat.cli.chat_cmd._run_workflow_interactive")
     @patch("myswat.cli.chat_cmd._send_with_timer")
     @patch("myswat.cli.chat_cmd.PromptSession")
     @patch("myswat.cli.chat_cmd.preload_model")
@@ -1123,7 +1135,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    def test_architect_delegation_auto_starts_review_loop(
+    def test_architect_delegation_auto_starts_develop_workflow(
         self,
         mock_sm_cls,
         mock_store_cls,
@@ -1170,12 +1182,11 @@ class TestRunChat:
         review_args = mock_review.call_args.args
         review_kwargs = mock_review.call_args.kwargs
         assert review_args[4] == "update the design doc"
-        assert review_kwargs["initial_process_events"][0]["from_role"] == "architect"
-        assert review_kwargs["initial_process_events"][0]["to_role"] == "developer"
+        assert review_kwargs["mode"] == WorkMode.develop
 
 
     @patch("myswat.cli.chat_cmd._run_design_review_interactive")
-    @patch("myswat.cli.chat_cmd._run_inline_review_interactive")
+    @patch("myswat.cli.chat_cmd._run_workflow_interactive")
     @patch("myswat.cli.chat_cmd._send_with_timer")
     @patch("myswat.cli.chat_cmd.PromptSession")
     @patch("myswat.cli.chat_cmd.preload_model")
@@ -1233,7 +1244,7 @@ class TestRunChat:
         assert mock_design_review.call_args.args[2] is sm
 
     @patch("myswat.cli.chat_cmd._run_testplan_review_interactive")
-    @patch("myswat.cli.chat_cmd._run_inline_review_interactive")
+    @patch("myswat.cli.chat_cmd._run_workflow_interactive")
     @patch("myswat.cli.chat_cmd._send_with_timer")
     @patch("myswat.cli.chat_cmd.PromptSession")
     @patch("myswat.cli.chat_cmd.preload_model")
@@ -1291,7 +1302,7 @@ class TestRunChat:
         assert mock_testplan_review.call_args.args[2] is sm
 
     @patch("myswat.cli.chat_cmd._run_full_workflow_interactive")
-    @patch("myswat.cli.chat_cmd._run_inline_review_interactive")
+    @patch("myswat.cli.chat_cmd._run_workflow_interactive")
     @patch("myswat.cli.chat_cmd._send_with_timer")
     @patch("myswat.cli.chat_cmd.PromptSession")
     @patch("myswat.cli.chat_cmd.preload_model")
@@ -1352,7 +1363,7 @@ class TestRunChat:
         assert mock_full_workflow.call_args.args[5] == "design and implement the auth module"
 
     @patch("myswat.cli.chat_cmd.console.print")
-    @patch("myswat.cli.chat_cmd._run_inline_review_interactive")
+    @patch("myswat.cli.chat_cmd._run_workflow_interactive")
     @patch("myswat.cli.chat_cmd._send_with_timer")
     @patch("myswat.cli.chat_cmd.PromptSession")
     @patch("myswat.cli.chat_cmd.preload_model")
@@ -1361,7 +1372,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    def test_qa_code_delegation_warns_for_unsupported_role(
+    def test_qa_develop_delegation_warns_for_unsupported_role(
         self,
         mock_sm_cls,
         mock_store_cls,
@@ -1408,7 +1419,7 @@ class TestRunChat:
         mock_review.assert_not_called()
         sm.close.assert_called_once()
         assert any(
-            "not available for role 'qa_main' yet" in str(call)
+            "Delegation mode 'develop' is only available for role(s): architect. Current role: 'qa_main'." in str(call)
             for call in mock_console_print.call_args_list
         )
 

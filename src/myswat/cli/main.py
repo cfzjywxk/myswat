@@ -6,7 +6,7 @@ import typer
 
 from myswat.cli.progress import _describe_process_event
 from myswat.cli.memory_cmd import memory_app, search as run_search_command
-from myswat.workflow.engine import WorkMode
+from myswat.workflow.modes import WorkMode, resolve_cli_work_mode
 
 app = typer.Typer(
     name="myswat",
@@ -75,19 +75,17 @@ def run(
         run_with_review(project, task, developer_role=role, reviewer_role=reviewer, workdir=workdir)
 
 
-def _resolve_work_mode(*, design: bool, development: bool, test: bool) -> WorkMode:
-    selected = []
-    if design:
-        selected.append(WorkMode.design)
-    if development:
-        selected.append(WorkMode.development)
-    if test:
-        selected.append(WorkMode.test)
-    if len(selected) > 1:
-        raise typer.BadParameter(
-            "Choose only one of --design/--plan, --development/--dev, or --test/--ga-test."
+def _resolve_work_mode(*, design: bool, develop: bool, test: bool) -> WorkMode:
+    try:
+        return resolve_cli_work_mode(
+            design=design,
+            develop=develop,
+            test=test,
         )
-    return selected[0] if selected else WorkMode.full
+    except ValueError:
+        raise typer.BadParameter(
+            "Choose only one of --design/--plan, --develop/--dev, or --test/--ga-test."
+        )
 
 
 @app.command()
@@ -101,20 +99,28 @@ def work(
         help="Detach the workflow and keep it running after this terminal exits.",
     ),
     design_mode: bool = typer.Option(False, "--design", "--plan", help="Run design + planning only."),
-    development_mode: bool = typer.Option(False, "--development", "--dev", help="Run development only."),
+    develop_mode: bool = typer.Option(False, "--develop", "--dev", help="Run development only."),
     test_mode: bool = typer.Option(False, "--test", "--ga-test", help="Run GA testing only."),
+    auto_approve: bool = typer.Option(False, "--auto-approve", help="Skip user checkpoints in foreground workflows."),
 ):
     """Run the teamwork workflow in full or selected foreground mode."""
     from myswat.cli.work_cmd import run_work
 
     mode = _resolve_work_mode(
         design=design_mode,
-        development=development_mode,
+        develop=develop_mode,
         test=test_mode,
     )
     if background and mode == WorkMode.design:
         raise typer.BadParameter("Design mode cannot be combined with --background.")
-    run_work(project, requirement, workdir=workdir, background=background, mode=mode)
+    run_work(
+        project,
+        requirement,
+        workdir=workdir,
+        background=background,
+        mode=mode,
+        auto_approve=auto_approve,
+    )
 
 
 @app.command(name="work-background-worker", hidden=True)
@@ -570,8 +576,12 @@ def status(
     details: bool = typer.Option(False, "--details", help="Show detailed work-item flow and review data"),
 ):
     """Show project status: active work items, sessions, agents."""
+    import socket
+    from pathlib import Path
+
     from rich.console import Console
     from rich.table import Table
+    import pymysql.err
 
     from myswat.config.settings import MySwatSettings
     from myswat.db.connection import TiDBPool
@@ -582,7 +592,20 @@ def status(
     pool = TiDBPool(settings.tidb)
     store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
 
-    proj = store.get_project_by_slug(project)
+    try:
+        proj = store.get_project_by_slug(project)
+    except (pymysql.err.OperationalError, socket.gaierror, OSError) as exc:
+        console.print("[red]TiDB is unreachable from this environment.[/red]")
+        console.print(
+            f"[dim]Host: {settings.tidb.host}:{settings.tidb.port} | Error: {type(exc).__name__}: {exc}[/dim]"
+        )
+        repo_cache = Path.cwd() / "myswat.md"
+        if repo_cache.is_file():
+            console.print(
+                f"[dim]Local project-ops cache is still available at {repo_cache}. "
+                "Live status and work-item data require TiDB connectivity.[/dim]"
+            )
+        raise typer.Exit(1)
     if not proj:
         console.print(f"[red]Project '{project}' not found.[/red]")
         raise typer.Exit(1)

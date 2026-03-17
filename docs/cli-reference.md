@@ -8,7 +8,7 @@
 | `myswat learn -p <slug> [-w workdir]` | Learn project build/test/conventions |
 | `myswat chat -p <slug> [--role R]` | Interactive chat session |
 | `myswat run <task> -p <slug> [--single] [--role R] [--reviewer R]` | Run agent task |
-| `myswat work <req> -p <slug> [--background] [--design\|--dev\|--test]` | Full or selective teamwork workflow |
+| `myswat work <req> -p <slug> [--background] [--design\|--develop\|--dev\|--test] [--auto-approve]` | Full or selective teamwork workflow |
 | `myswat feed <path> -p <slug> [--glob pattern]` | Ingest documents into knowledge |
 | `myswat status -p <slug>` | Show project status |
 | `myswat task <id> -p <slug>` | Show detailed status for one work item |
@@ -24,10 +24,23 @@
 
 | Mode | Flags | Stages | Success criteria |
 |------|-------|--------|------------------|
-| `full` | _(default)_ | design, design review, plan, plan review, phased dev, GA test, report | all phases committed AND GA passed |
+| `full` | _(default)_ | architect-led design, design review, plan, plan review, phased development, GA test, report | all phases committed AND GA passed |
 | `design` | `--design`, `--plan` | design, design review, plan, plan review, report | both reviews passed |
-| `development` | `--development`, `--dev` | phased dev (with informational QA review), report | all phases committed |
+| `develop` | `--develop`, `--dev` | phased development with QA review, report | all phases committed |
 | `test` | `--test`, `--ga-test` | GA test plan/review, execute tests, bug fixes, report | GA passed |
+
+Foreground `myswat work` is interactive by default. Use `--auto-approve` to skip user checkpoints.
+
+## Delegation Mapping
+
+| User intent | Delegate block | Engine mode | Participants | User checkpoints |
+|-------------|----------------|-------------|--------------|------------------|
+| Review architecture before coding | `MODE: design` | `architect_design` | architect, developer, QA | design and plan |
+| Implement settled work | `MODE: develop` | `develop` | developer, QA | phase / report checkpoints |
+| Deliver end-to-end | `MODE: full` | `full` | architect, developer, QA | design, plan, test plan |
+| Formalize a test plan | `MODE: testplan` | `testplan_design` | QA, architect, developer | final test plan |
+
+Internal engine-only modes: `architect_design` and `testplan_design`. They are orchestration entry points used by chat-led workflows, not valid CLI flags or delegate block values.
 
 ## Chat Commands
 
