@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import typer
 
-from myswat.agents.factory import make_runner_from_row
+from myswat.agents.factory import make_memory_worker_runner, make_runner_from_row
 
 
 class TestMakeRunnerFromRow:
@@ -154,3 +154,43 @@ class TestMakeRunnerFromRow:
 
         with pytest.raises(typer.BadParameter, match="Unknown CLI backend"):
             make_runner_from_row(row)
+
+
+class TestMakeMemoryWorkerRunner:
+    @patch("myswat.agents.factory.CodexRunner")
+    def test_uses_memory_worker_backend_and_agent_path(self, MockCodex):
+        settings = MagicMock()
+        settings.memory_worker.backend = "codex"
+        settings.memory_worker.model = "gpt-5.4"
+        settings.agents.codex_path = "/usr/bin/codex"
+        settings.agents.codex_default_flags = ["--json"]
+
+        make_memory_worker_runner(settings, workdir="/tmp/project")
+
+        MockCodex.assert_called_once_with(
+            cli_path="/usr/bin/codex",
+            model="gpt-5.4",
+            workdir="/tmp/project",
+            extra_flags=["--json"],
+        )
+
+    @patch("myswat.agents.factory.ClaudeRunner")
+    def test_claude_worker_uses_claude_settings(self, MockClaude):
+        settings = MagicMock()
+        settings.memory_worker.backend = "claude"
+        settings.memory_worker.model = "claude-opus-4-6"
+        settings.agents.claude_path = "claude"
+        settings.agents.claude_default_flags = ["--print"]
+        settings.agents.claude_required_ip = "203.0.113.10"
+        settings.agents.claude_ip_check_timeout_seconds = 7
+
+        make_memory_worker_runner(settings)
+
+        MockClaude.assert_called_once_with(
+            cli_path="claude",
+            model="claude-opus-4-6",
+            workdir=None,
+            extra_flags=["--print"],
+            required_ip="203.0.113.10",
+            ip_check_timeout_seconds=7,
+        )

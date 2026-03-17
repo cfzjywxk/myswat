@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 from typing import Callable
 
@@ -29,8 +30,8 @@ from myswat.cli.progress import (
 from myswat.config.settings import MySwatSettings
 from myswat.db.connection import TiDBPool
 from myswat.db.schema import run_migrations
-from myswat.memory.compactor import KnowledgeCompactor
 from myswat.memory.embedder import preload_model
+from myswat.memory.learn_triggers import submit_chat_learn_request
 from myswat.memory.store import MemoryStore
 
 console = Console()
@@ -55,23 +56,6 @@ HELP_TEXT = """
   /new                  Start a new session (close current)
   /quit, /exit, Ctrl+D  Exit chat
 """
-
-
-def _make_compaction_runner(
-    store: MemoryStore, proj: dict, settings: MySwatSettings,
-) -> AgentRunner | None:
-    """Create a runner for knowledge compaction using the configured backend."""
-    # Try to find an agent matching the configured compaction backend.
-    agents = store.list_agents(proj["id"])
-    for a in agents:
-        if a["cli_backend"] == settings.compaction.compaction_backend:
-            return make_runner_from_row(a, settings=settings)
-    # Fallback: use any agent
-    if agents:
-        return make_runner_from_row(agents[0], settings=settings)
-    return None
-
-
 def _extract_delegation(text: str) -> tuple[str, str] | None:
     """Extract a delegation task and mode from an agent response.
 
@@ -133,19 +117,6 @@ def run_chat(
         raise typer.Exit(1)
 
     effective_workdir = workdir or proj.get("repo_path")
-
-    # Auto-learn if project hasn't been learned yet
-    from myswat.cli.learn_cmd import ensure_learned
-    ensure_learned(store, project_slug, proj["id"], effective_workdir)
-
-    # Create a lightweight runner for compaction (uses the configured backend)
-    compaction_runner = _make_compaction_runner(store, proj, settings)
-    compactor = KnowledgeCompactor(
-        store=store,
-        runner=compaction_runner,
-        threshold_turns=settings.compaction.threshold_turns,
-    )
-
     # State
     current_role = role
     sm: SessionManager | None = None
@@ -160,7 +131,7 @@ def run_chat(
         runner.workdir = effective_workdir
         new_sm = SessionManager(
             store=store, runner=runner, agent_row=agent_row,
-            project_id=proj["id"], compactor=compactor,
+            project_id=proj["id"], settings=runner_settings,
         )
         with console.status("[dim]Loading session from TiDB...[/dim]", spinner="dots"):
             new_sm.create_or_resume(purpose=f"Interactive chat ({new_role})")
@@ -309,7 +280,7 @@ def run_chat(
                     with console.status("[dim]Saving session to TiDB...[/dim]", spinner="dots"):
                         sm.close()
                 _run_workflow_interactive(
-                    store, proj, compactor, effective_workdir, settings, arg, prompt_session,
+                    store, proj, effective_workdir, settings, arg, prompt_session,
                 )
                 sm = _switch_agent(current_role, settings)
 
@@ -321,7 +292,7 @@ def run_chat(
                     with console.status("[dim]Saving session to TiDB...[/dim]", spinner="dots"):
                         sm.close()
                 _run_inline_review_interactive(
-                    store, proj, compactor, effective_workdir, settings, arg,
+                    store, proj, effective_workdir, settings, arg,
                 )
                 # Reopen chat session after review
                 sm = _switch_agent(current_role, settings)
@@ -346,6 +317,19 @@ def run_chat(
             console.print(Markdown(response.content))
             console.print(f"\n[dim]({_fmt_duration(elapsed)})[/dim]")
 
+            try:
+                submit_chat_learn_request(
+                    store=store,
+                    settings=settings,
+                    project_id=proj["id"],
+                    user_message=user_input,
+                    assistant_response=response.content,
+                    workdir=effective_workdir,
+                    source_session_id=getattr(getattr(sm, "session", None), "id", None),
+                )
+            except Exception as exc:
+                print(f"[chat learn] Failed: {exc}", file=sys.stderr)
+
             # Check for agent delegation signal
             delegation = _extract_delegation(response.content)
             if delegation:
@@ -361,7 +345,6 @@ def run_chat(
                     _run_inline_review_interactive(
                         store,
                         proj,
-                        compactor,
                         effective_workdir,
                         settings,
                         delegation_task,
@@ -385,7 +368,6 @@ def run_chat(
                         store,
                         proj,
                         sm,
-                        compactor,
                         effective_workdir,
                         settings,
                         delegation_task,
@@ -400,7 +382,6 @@ def run_chat(
                         store,
                         proj,
                         sm,
-                        compactor,
                         effective_workdir,
                         settings,
                         delegation_task,
@@ -415,7 +396,6 @@ def run_chat(
                         store,
                         proj,
                         sm,
-                        compactor,
                         effective_workdir,
                         settings,
                         delegation_task,
@@ -540,7 +520,7 @@ def _show_task_details(store: MemoryStore, proj: dict, work_item_id: int | None 
 
 
 def _run_inline_review(
-    store: MemoryStore, proj: dict, compactor: KnowledgeCompactor,
+    store: MemoryStore, proj: dict,
     workdir: str | None, settings: MySwatSettings, task: str,
     should_cancel: Callable[[], bool] | None = None,
     on_work_item_created: Callable[[int], None] | None = None,
@@ -567,11 +547,11 @@ def _run_inline_review(
 
     dev_sm = SessionManager(
         store=store, runner=dev_runner, agent_row=dev_agent,
-        project_id=proj["id"], compactor=compactor,
+        project_id=proj["id"], settings=settings,
     )
     reviewer_sm = SessionManager(
         store=store, runner=reviewer_runner, agent_row=reviewer_agent,
-        project_id=proj["id"], compactor=compactor,
+        project_id=proj["id"], settings=settings,
     )
 
     work_item_id = store.create_work_item(
@@ -648,7 +628,6 @@ def _run_design_review(
     store: MemoryStore,
     proj: dict,
     proposer_sm: SessionManager,
-    compactor: KnowledgeCompactor,
     workdir: str | None,
     settings: MySwatSettings,
     task: str,
@@ -678,7 +657,7 @@ def _run_design_review(
                 register_cancel_target(qa_runner)
             qa_sms.append(SessionManager(
                 store=store, runner=qa_runner, agent_row=qa_agent,
-                project_id=proj["id"], compactor=compactor,
+                project_id=proj["id"], settings=settings,
             ))
 
     if not qa_sms:
@@ -695,7 +674,7 @@ def _run_design_review(
 
     dev_sm = SessionManager(
         store=store, runner=dev_runner, agent_row=dev_agent,
-        project_id=proj["id"], compactor=compactor,
+        project_id=proj["id"], settings=settings,
     )
 
     work_item_id = store.create_work_item(
@@ -756,7 +735,6 @@ def _run_testplan_review(
     store: MemoryStore,
     proj: dict,
     proposer_sm: SessionManager,
-    compactor: KnowledgeCompactor,
     workdir: str | None,
     settings: MySwatSettings,
     task: str,
@@ -791,11 +769,11 @@ def _run_testplan_review(
 
     arch_sm = SessionManager(
         store=store, runner=arch_runner, agent_row=arch_agent,
-        project_id=proj["id"], compactor=compactor,
+        project_id=proj["id"], settings=settings,
     )
     dev_sm = SessionManager(
         store=store, runner=dev_runner, agent_row=dev_agent,
-        project_id=proj["id"], compactor=compactor,
+        project_id=proj["id"], settings=settings,
     )
 
     work_item_id = store.create_work_item(
@@ -851,7 +829,7 @@ def _run_testplan_review(
 
 
 def _run_workflow(
-    store: MemoryStore, proj: dict, compactor: KnowledgeCompactor,
+    store: MemoryStore, proj: dict,
     workdir: str | None, settings: MySwatSettings, requirement: str,
     prompt_session: PromptSession | None = None,
     should_cancel: Callable[[], bool] | None = None,
@@ -873,7 +851,7 @@ def _run_workflow(
         register_cancel_target(dev_runner)
     dev_sm = SessionManager(
         store=store, runner=dev_runner, agent_row=dev_agent,
-        project_id=proj["id"], compactor=compactor,
+        project_id=proj["id"], settings=settings,
     )
 
     # Set up QA(s)
@@ -887,7 +865,7 @@ def _run_workflow(
                 register_cancel_target(qa_runner)
             qa_sm = SessionManager(
                 store=store, runner=qa_runner, agent_row=qa_agent,
-                project_id=proj["id"], compactor=compactor,
+                project_id=proj["id"], settings=settings,
             )
             qa_sms.append(qa_sm)
 
@@ -964,7 +942,6 @@ def _run_workflow(
 def _run_inline_review_interactive(
     store: MemoryStore,
     proj: dict,
-    compactor: KnowledgeCompactor,
     workdir: str | None,
     settings: MySwatSettings,
     task: str,
@@ -978,7 +955,6 @@ def _run_inline_review_interactive(
         return _run_inline_review(
             store=store,
             proj=proj,
-            compactor=compactor,
             workdir=workdir,
             settings=settings,
             task=task,
@@ -1004,7 +980,6 @@ def _run_design_review_interactive(
     store: MemoryStore,
     proj: dict,
     proposer_sm: SessionManager,
-    compactor: KnowledgeCompactor,
     workdir: str | None,
     settings: MySwatSettings,
     task: str,
@@ -1019,7 +994,6 @@ def _run_design_review_interactive(
             store=store,
             proj=proj,
             proposer_sm=proposer_sm,
-            compactor=compactor,
             workdir=workdir,
             settings=settings,
             task=task,
@@ -1045,7 +1019,6 @@ def _run_testplan_review_interactive(
     store: MemoryStore,
     proj: dict,
     proposer_sm: SessionManager,
-    compactor: KnowledgeCompactor,
     workdir: str | None,
     settings: MySwatSettings,
     task: str,
@@ -1060,7 +1033,6 @@ def _run_testplan_review_interactive(
             store=store,
             proj=proj,
             proposer_sm=proposer_sm,
-            compactor=compactor,
             workdir=workdir,
             settings=settings,
             task=task,
@@ -1085,7 +1057,6 @@ def _run_testplan_review_interactive(
 def _run_workflow_interactive(
     store: MemoryStore,
     proj: dict,
-    compactor: KnowledgeCompactor,
     workdir: str | None,
     settings: MySwatSettings,
     requirement: str,
@@ -1099,7 +1070,6 @@ def _run_workflow_interactive(
         return _run_workflow(
             store=store,
             proj=proj,
-            compactor=compactor,
             workdir=workdir,
             settings=settings,
             requirement=requirement,
@@ -1125,7 +1095,6 @@ def _run_full_workflow(
     store: MemoryStore,
     proj: dict,
     proposer_sm: SessionManager,
-    compactor: KnowledgeCompactor,
     workdir: str | None,
     settings: MySwatSettings,
     requirement: str,
@@ -1156,7 +1125,7 @@ def _run_full_workflow(
                 register_cancel_target(qa_runner)
             qa_sms.append(SessionManager(
                 store=store, runner=qa_runner, agent_row=qa_agent,
-                project_id=proj["id"], compactor=compactor,
+                project_id=proj["id"], settings=settings,
             ))
 
     if not qa_sms:
@@ -1173,7 +1142,7 @@ def _run_full_workflow(
 
     dev_sm = SessionManager(
         store=store, runner=dev_runner, agent_row=dev_agent,
-        project_id=proj["id"], compactor=compactor,
+        project_id=proj["id"], settings=settings,
     )
 
     work_item_id = store.create_work_item(
@@ -1234,7 +1203,6 @@ def _run_full_workflow_interactive(
     store: MemoryStore,
     proj: dict,
     proposer_sm: SessionManager,
-    compactor: KnowledgeCompactor,
     workdir: str | None,
     settings: MySwatSettings,
     requirement: str,
@@ -1249,7 +1217,6 @@ def _run_full_workflow_interactive(
             store=store,
             proj=proj,
             proposer_sm=proposer_sm,
-            compactor=compactor,
             workdir=workdir,
             settings=settings,
             requirement=requirement,

@@ -831,23 +831,23 @@ class TestCommandRouting:
         result = runner.invoke(app, ["stop", "42", "--project", "proj"])
         mock_stop_work_item.assert_called_once_with("proj", 42)
 
-    @patch("myswat.cli.feed_cmd.run_feed")
-    def test_feed_command(self, mock_run_feed):
+    def test_feed_command_removed(self):
         from typer.testing import CliRunner
         from myswat.cli.main import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["feed", "/tmp/doc.md", "--project", "proj"])
-        mock_run_feed.assert_called_once()
+        assert result.exit_code != 0
+        assert "No such command 'feed'" in result.output
 
-    @patch("myswat.cli.learn_cmd.run_learn")
-    def test_learn_command(self, mock_run_learn):
+    def test_learn_command_removed(self):
         from typer.testing import CliRunner
         from myswat.cli.main import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["learn", "--project", "proj"])
-        mock_run_learn.assert_called_once()
+        assert result.exit_code != 0
+        assert "No such command 'learn'" in result.output
 
     @patch("myswat.cli.init_cmd.run_init")
     def test_init_command(self, mock_run_init):

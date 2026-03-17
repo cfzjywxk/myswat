@@ -10,6 +10,7 @@ from myswat.db.migrations import v010_knowledge_terms
 from myswat.db.migrations import v011_document_sources_and_session_revision
 from myswat.db.migrations import v012_knowledge_graph
 from myswat.db.migrations import v013_drop_redundant_document_sources_index
+from myswat.db.migrations import v014_learn_requests_and_runs
 
 
 def test_review_cycle_unique_key_migration_registered() -> None:
@@ -120,11 +121,31 @@ def test_graph_migration_defines_expected_schema() -> None:
     assert "CREATE TABLE IF NOT EXISTS knowledge_relations" in sql
 
 
-def test_drop_redundant_document_sources_index_migration_registered_last() -> None:
-    assert MIGRATION_MODULES[-1] == "myswat.db.migrations.v013_drop_redundant_document_sources_index"
+def test_drop_redundant_document_sources_index_migration_registered_before_v014() -> None:
+    idx_v013 = MIGRATION_MODULES.index(
+        "myswat.db.migrations.v013_drop_redundant_document_sources_index"
+    )
+    idx_v014 = MIGRATION_MODULES.index("myswat.db.migrations.v014_learn_requests_and_runs")
+    assert idx_v013 < idx_v014
     assert v013_drop_redundant_document_sources_index.VERSION == 13
 
 
 def test_drop_redundant_document_sources_index_migration_defines_expected_sql() -> None:
     sql = "\n".join(v013_drop_redundant_document_sources_index.STATEMENTS)
     assert "DROP INDEX idx_project_source_file ON document_sources" in sql
+
+
+def test_learn_request_run_migration_registered_last() -> None:
+    assert MIGRATION_MODULES[-1] == "myswat.db.migrations.v014_learn_requests_and_runs"
+    assert v014_learn_requests_and_runs.VERSION == 14
+
+
+def test_learn_request_run_migration_defines_expected_schema() -> None:
+    sql = "\n".join(v014_learn_requests_and_runs.STATEMENTS)
+    assert "CREATE TABLE IF NOT EXISTS learn_requests" in sql
+    assert "project_id BIGINT NOT NULL" in sql
+    assert "trigger_kind VARCHAR(64) NOT NULL" in sql
+    assert "payload_json JSON NOT NULL" in sql
+    assert "CREATE TABLE IF NOT EXISTS learn_runs" in sql
+    assert "learn_request_id BIGINT NOT NULL" in sql
+    assert "output_envelope_json JSON NULL" in sql

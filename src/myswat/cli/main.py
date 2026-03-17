@@ -148,28 +148,6 @@ def stop(
     stop_work_item(project, work_item_id)
 
 
-@app.command()
-def feed(
-    path: str = typer.Argument(..., help="Path to file or directory to ingest"),
-    project: str = typer.Option(..., "--project", "-p", help="Project slug"),
-    glob_pattern: str = typer.Option("**/*.md", "--glob", "-g", help="Glob pattern (for directories)"),
-    no_ai: bool = typer.Option(False, "--no-ai", help="Skip AI distillation, store raw chunks"),
-):
-    """Feed documents into the project knowledge base."""
-    from myswat.cli.feed_cmd import run_feed
-    run_feed(path, project, glob_pattern, no_ai)
-
-
-@app.command()
-def learn(
-    project: str = typer.Option(..., "--project", "-p", help="Project slug"),
-    workdir: str = typer.Option(None, "--workdir", "-w", help="Working directory override"),
-):
-    """Learn a project's build system, test tiers, conventions, and invariants."""
-    from myswat.cli.learn_cmd import run_learn
-    run_learn(project, workdir=workdir)
-
-
 def _format_history_timestamp(value) -> str:
     if hasattr(value, "isoformat"):
         try:

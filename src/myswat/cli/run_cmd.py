@@ -15,23 +15,10 @@ from myswat.cli.progress import _fmt_duration, _run_with_task_monitor, _send_wit
 from myswat.config.settings import MySwatSettings
 from myswat.db.connection import TiDBPool
 from myswat.db.schema import run_migrations
-from myswat.memory.compactor import KnowledgeCompactor
+from myswat.memory.learn_triggers import submit_workflow_summary_learn_request
 from myswat.memory.store import MemoryStore
 
 console = Console()
-
-
-def _find_compaction_runner(
-    store: MemoryStore, proj: dict, settings: MySwatSettings,
-) -> AgentRunner | None:
-    """Find a runner suitable for knowledge compaction."""
-    agents = store.list_agents(proj["id"])
-    for a in agents:
-        if a["cli_backend"] == settings.compaction.compaction_backend:
-            return make_runner_from_row(a, settings=settings)
-    if agents:
-        return make_runner_from_row(agents[0], settings=settings)
-    return None
 
 
 def run_single(
@@ -54,10 +41,6 @@ def run_single(
 
     effective_workdir = workdir or proj.get("repo_path")
 
-    # Auto-learn if project hasn't been learned yet
-    from myswat.cli.learn_cmd import ensure_learned
-    ensure_learned(store, project_slug, proj["id"], effective_workdir)
-
     # Resolve agent
     agent_row = store.get_agent(proj["id"], role)
     if not agent_row:
@@ -71,19 +54,12 @@ def run_single(
     elif proj.get("repo_path"):
         runner.workdir = proj["repo_path"]
 
-    # Create session manager with compactor
-    compaction_runner = _find_compaction_runner(store, proj, settings)
-    compactor = KnowledgeCompactor(
-        store=store,
-        runner=compaction_runner,
-        threshold_turns=settings.compaction.threshold_turns,
-    )
     sm = SessionManager(
         store=store,
         runner=runner,
         agent_row=agent_row,
         project_id=proj["id"],
-        compactor=compactor,
+        settings=settings,
     )
 
     # Create session and send task
@@ -154,10 +130,6 @@ def run_with_review(
 
     effective_workdir = workdir or proj.get("repo_path")
 
-    # Auto-learn if project hasn't been learned yet
-    from myswat.cli.learn_cmd import ensure_learned
-    ensure_learned(store, project_slug, proj["id"], effective_workdir)
-
     # Resolve agents
     dev_agent = store.get_agent(proj["id"], developer_role)
     reviewer_agent = store.get_agent(proj["id"], reviewer_role)
@@ -174,21 +146,13 @@ def run_with_review(
     reviewer_runner = make_runner_from_row(reviewer_agent, settings=settings)
     reviewer_runner.workdir = effective_workdir
 
-    # Create session managers with compactor
-    compaction_runner = _find_compaction_runner(store, proj, settings)
-    compactor = KnowledgeCompactor(
-        store=store,
-        runner=compaction_runner,
-        threshold_turns=settings.compaction.threshold_turns,
-    )
-
     dev_sm = SessionManager(
         store=store, runner=dev_runner, agent_row=dev_agent,
-        project_id=proj["id"], compactor=compactor,
+        project_id=proj["id"], settings=settings,
     )
     reviewer_sm = SessionManager(
         store=store, runner=reviewer_runner, agent_row=reviewer_agent,
-        project_id=proj["id"], compactor=compactor,
+        project_id=proj["id"], settings=settings,
     )
 
     # Create work item
@@ -226,6 +190,9 @@ def run_with_review(
     )
     console.print(f"[dim]Work item: {work_item_id}[/dim]\n")
 
+    final_status = "blocked"
+    final_summary = "Review loop blocked."
+
     try:
         work_item_ref: dict[str, int | None] = {"id": work_item_id}
         cancel_targets: list[AgentRunner] = [dev_runner, reviewer_runner]
@@ -258,10 +225,16 @@ def run_with_review(
         # Update work item status
         if cancel_event.is_set():
             store.update_work_item_status(work_item_id, "blocked")
+            final_status = "blocked"
+            final_summary = "Review loop cancelled."
         elif verdict.verdict == "lgtm":
             store.update_work_item_status(work_item_id, "approved")
+            final_status = "approved"
+            final_summary = verdict.summary or "Review loop approved."
         else:
             store.update_work_item_status(work_item_id, "review")
+            final_status = "review"
+            final_summary = verdict.summary or verdict.verdict
     except Exception as e:
         from myswat.workflow.error_handler import WorkflowError, handle_workflow_error
 
@@ -280,11 +253,28 @@ def run_with_review(
             store.update_work_item_status(work_item_id, "blocked")
         except Exception:
             pass
+        final_status = "blocked"
+        final_summary = f"Review loop crashed: {type(e).__name__}"
     finally:
         for sm in [dev_sm, reviewer_sm]:
             try:
                 sm.close()
             except Exception:
                 pass
+        try:
+            submit_workflow_summary_learn_request(
+                store=store,
+                settings=settings,
+                project_id=proj["id"],
+                source_work_item_id=work_item_id,
+                source_session_id=getattr(getattr(dev_sm, "session", None), "id", None),
+                requirement=task,
+                final_status=final_status,
+                final_summary=final_summary,
+                mode="review_loop",
+                workdir=effective_workdir,
+            )
+        except Exception:
+            pass
 
     console.print(f"\n[dim]Sessions closed. All turns persisted to TiDB.[/dim]")

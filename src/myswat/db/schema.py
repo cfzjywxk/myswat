@@ -22,6 +22,7 @@ MIGRATION_MODULES = [
     "myswat.db.migrations.v011_document_sources_and_session_revision",
     "myswat.db.migrations.v012_knowledge_graph",
     "myswat.db.migrations.v013_drop_redundant_document_sources_index",
+    "myswat.db.migrations.v014_learn_requests_and_runs",
 ]
 
 

@@ -12,7 +12,7 @@ from myswat.agents.session_manager import SessionManager
 from myswat.models.session import Session, SessionTurn
 
 
-def _make_sm(store=None, runner=None, agent_row=None, compactor=None):
+def _make_sm(store=None, runner=None, agent_row=None):
     store = store or MagicMock()
     runner = runner or MagicMock()
     agent_row = agent_row or {
@@ -25,7 +25,7 @@ def _make_sm(store=None, runner=None, agent_row=None, compactor=None):
 
     sm = SessionManager(
         store=store, runner=runner, agent_row=agent_row,
-        project_id=1, compactor=compactor,
+        project_id=1,
     )
     return sm, store, runner
 
@@ -89,7 +89,7 @@ class TestCreateOrResume:
 
 class TestForkForWorkItem:
     def test_fork_creates_new_work_item_session_with_parent(self):
-        sm, store, runner = _make_sm(compactor=MagicMock())
+        sm, store, runner = _make_sm()
         sm._session = Session(id=5, agent_id=1, session_uuid="parent-uuid")
         store.create_session.return_value = Session(
             id=11,
@@ -109,7 +109,6 @@ class TestForkForWorkItem:
         assert forked.agent_id == sm.agent_id
         assert forked.agent_role == sm.agent_role
         assert forked._runner is runner
-        assert forked._compactor is sm._compactor
         assert sm.session is not None
         assert sm.session.id == 5
         store.create_session.assert_called_once_with(
@@ -208,9 +207,7 @@ class TestForkForWorkItem:
 
 
     def test_closing_fork_does_not_close_original_session(self):
-        compactor = MagicMock()
-        compactor.compact_session.return_value = []
-        sm, store, _ = _make_sm(compactor=compactor)
+        sm, store, _ = _make_sm()
         sm._session = Session(id=5, agent_id=1, session_uuid="parent-uuid")
         store.create_session.return_value = Session(
             id=13,
@@ -219,19 +216,16 @@ class TestForkForWorkItem:
             work_item_id=7,
             parent_session_id=5,
         )
+        store.count_session_turns.return_value = 2
 
-        forked = sm.fork_for_work_item(7, purpose="child")
-        forked.close()
+        with patch("myswat.agents.session_manager.submit_session_summary_learn_request") as mock_submit:
+            forked = sm.fork_for_work_item(7, purpose="child")
+            forked.close()
 
         store.close_session.assert_called_once_with(13)
         assert sm.session is not None
         assert sm.session.id == 5
-        compactor.compact_session.assert_called_once_with(
-            session_id=13,
-            project_id=1,
-            agent_id=1,
-            mark_compacted=True,
-        )
+        mock_submit.assert_called_once()
 
 
 class TestSend:
@@ -315,14 +309,16 @@ class TestSend:
 
 
 class TestClose:
-    def test_close_marks_completed(self):
+    @patch("myswat.agents.session_manager.submit_session_summary_learn_request")
+    def test_close_marks_completed(self, mock_submit):
         sm, store, _ = _make_sm()
         sm._session = Session(id=5, agent_id=1, session_uuid="uuid")
-        store.get_session.return_value = None
+        store.count_session_turns.return_value = 1
 
         sm.close()
 
         store.close_session.assert_called_once_with(5)
+        mock_submit.assert_not_called()
 
     def test_close_without_session(self):
         sm, store, _ = _make_sm()
@@ -332,6 +328,35 @@ class TestClose:
 
         store.close_session.assert_not_called()
 
+    @patch("myswat.agents.session_manager.submit_session_summary_learn_request")
+    def test_close_submits_session_summary_when_session_has_turns(self, mock_submit):
+        sm, store, runner = _make_sm()
+        sm._session = Session(
+            id=5,
+            agent_id=1,
+            session_uuid="uuid",
+            work_item_id=22,
+            purpose="debug bug",
+        )
+        runner.workdir = "/tmp/project"
+        store.count_session_turns.return_value = 4
+
+        sm.close()
+
+        store.close_session.assert_called_once_with(5)
+        mock_submit.assert_called_once_with(
+            store=store,
+            settings=sm._settings,
+            project_id=1,
+            source_session_id=5,
+            source_work_item_id=22,
+            agent_role="developer",
+            purpose="debug bug",
+            workdir="/tmp/project",
+            payload_json={"turn_count": 4},
+            asynchronous=False,
+        )
+
 
 class TestResetSession:
     def test_reset_clears_cli_session(self):
@@ -339,47 +364,6 @@ class TestResetSession:
         sm.reset_ai_session()
 
         runner.reset_session.assert_called_once()
-
-
-class TestMidSessionCompaction:
-    def test_compaction_triggered_when_threshold_exceeded(self):
-        compactor = MagicMock()
-        compactor.should_compact.return_value = True
-        compactor.compact_session.return_value = [1, 2]
-
-        sm, store, runner = _make_sm(compactor=compactor)
-        store.get_active_session.return_value = None
-        store.create_session.return_value = Session(
-            id=1, agent_id=1, session_uuid="uuid-1",
-        )
-        type(runner).is_session_started = PropertyMock(return_value=True)
-        runner.invoke.return_value = AgentResponse(content="ok", exit_code=0)
-        store.count_session_turns.return_value = 2
-
-        sm.send("test")
-
-        compactor.should_compact.assert_called()
-        compactor.compact_session.assert_called_once()
-        store.delete_compacted_turns.assert_not_called()
-        store.reset_session_token_count.assert_called_once_with(1)
-
-    def test_compaction_failure_does_not_crash(self):
-        compactor = MagicMock()
-        compactor.should_compact.return_value = True
-        compactor.compact_session.side_effect = Exception("compaction failed")
-
-        sm, store, runner = _make_sm(compactor=compactor)
-        store.get_active_session.return_value = None
-        store.create_session.return_value = Session(
-            id=1, agent_id=1, session_uuid="uuid-1",
-        )
-        type(runner).is_session_started = PropertyMock(return_value=True)
-        runner.invoke.return_value = AgentResponse(content="ok", exit_code=0)
-        store.count_session_turns.return_value = 2
-
-        # Should not raise — compaction failure is non-fatal
-        resp = sm.send("test")
-        assert resp.content == "ok"
 
 
 class TestProperties:

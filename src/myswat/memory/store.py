@@ -777,6 +777,107 @@ class MemoryStore:
             return 0
         return int(row.get("memory_revision") or 0)
 
+    # ──────────────────────────── Learn History ────────────────────────────
+
+    def create_learn_request(
+        self,
+        *,
+        project_id: int,
+        source_kind: str,
+        trigger_kind: str,
+        payload_json: dict[str, Any] | None = None,
+        source_session_id: int | None = None,
+        source_work_item_id: int | None = None,
+        status: str = "pending",
+    ) -> int:
+        return self._pool.insert_returning_id(
+            "INSERT INTO learn_requests "
+            "(project_id, source_kind, trigger_kind, source_session_id, source_work_item_id, "
+            "payload_json, status) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (
+                project_id,
+                source_kind,
+                trigger_kind,
+                source_session_id,
+                source_work_item_id,
+                json.dumps(payload_json or {}),
+                status,
+            ),
+        )
+
+    def get_learn_request(self, request_id: int) -> dict | None:
+        row = self._pool.fetch_one(
+            "SELECT * FROM learn_requests WHERE id = %s",
+            (request_id,),
+        )
+        if not row:
+            return None
+        parsed = dict(row)
+        parsed["payload_json"] = self._parse_json_field(parsed.get("payload_json")) or {}
+        return parsed
+
+    def update_learn_request_status(self, request_id: int, status: str) -> None:
+        self._pool.execute(
+            "UPDATE learn_requests SET status = %s WHERE id = %s",
+            (status, request_id),
+        )
+
+    def create_learn_run(
+        self,
+        *,
+        learn_request_id: int,
+        worker_backend: str,
+        worker_model: str,
+        input_context_json: dict[str, Any],
+        status: str = "started",
+    ) -> int:
+        return self._pool.insert_returning_id(
+            "INSERT INTO learn_runs "
+            "(learn_request_id, worker_backend, worker_model, input_context_json, status) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (
+                learn_request_id,
+                worker_backend,
+                worker_model,
+                json.dumps(input_context_json),
+                status,
+            ),
+        )
+
+    def get_learn_run(self, run_id: int) -> dict | None:
+        row = self._pool.fetch_one(
+            "SELECT * FROM learn_runs WHERE id = %s",
+            (run_id,),
+        )
+        if not row:
+            return None
+        parsed = dict(row)
+        parsed["input_context_json"] = (
+            self._parse_json_field(parsed.get("input_context_json")) or {}
+        )
+        parsed["output_envelope_json"] = self._parse_json_field(
+            parsed.get("output_envelope_json"),
+        )
+        return parsed
+
+    def complete_learn_run(
+        self,
+        run_id: int,
+        *,
+        output_envelope_json: dict[str, Any],
+    ) -> None:
+        self._pool.execute(
+            "UPDATE learn_runs SET status = 'completed', output_envelope_json = %s, error_text = NULL "
+            "WHERE id = %s",
+            (json.dumps(output_envelope_json), run_id),
+        )
+
+    def fail_learn_run(self, run_id: int, *, error_text: str) -> None:
+        self._pool.execute(
+            "UPDATE learn_runs SET status = 'failed', error_text = %s WHERE id = %s",
+            (error_text[:65535], run_id),
+        )
+
     # ──────────────────────────── Agents ────────────────────────────
 
     def create_agent(
@@ -1243,6 +1344,280 @@ class MemoryStore:
 
     # ──────────────────────────── Knowledge ────────────────────────────
 
+    def get_knowledge(self, knowledge_id: int) -> dict | None:
+        return self._parse_knowledge_row(
+            self._pool.fetch_one("SELECT * FROM knowledge WHERE id = %s", (knowledge_id,)),
+        )
+
+    def find_active_knowledge(
+        self,
+        *,
+        project_id: int,
+        category: str,
+        title: str,
+        source_type: str | None = None,
+        source_file: str | None = None,
+    ) -> dict | None:
+        sql = (
+            "SELECT * FROM knowledge WHERE project_id = %s AND category = %s AND title = %s "
+            "AND (expires_at IS NULL OR expires_at > NOW())"
+        )
+        args: list[Any] = [project_id, category, title]
+        if source_type is not None:
+            sql += " AND source_type = %s"
+            args.append(source_type)
+        if source_file is not None:
+            sql += " AND source_file = %s"
+            args.append(source_file)
+        sql += " ORDER BY updated_at DESC, id DESC LIMIT 1"
+        return self._parse_knowledge_row(self._pool.fetch_one(sql, tuple(args)))
+
+    def add_knowledge_relation(
+        self,
+        *,
+        project_id: int,
+        knowledge_id: int,
+        source_entity: str,
+        relation: str,
+        target_entity: str,
+        confidence: float,
+    ) -> None:
+        self._pool.execute(
+            "INSERT INTO knowledge_relations "
+            "(project_id, knowledge_id, source_entity, relation, target_entity, confidence) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (
+                project_id,
+                knowledge_id,
+                source_entity,
+                relation,
+                target_entity,
+                confidence,
+            ),
+        )
+
+    def delete_knowledge_relation(
+        self,
+        *,
+        knowledge_id: int,
+        source_entity: str,
+        relation: str,
+        target_entity: str,
+    ) -> None:
+        self._pool.execute(
+            "DELETE FROM knowledge_relations WHERE knowledge_id = %s AND source_entity = %s "
+            "AND relation = %s AND target_entity = %s",
+            (
+                knowledge_id,
+                source_entity,
+                relation,
+                target_entity,
+            ),
+        )
+
+    def replace_knowledge_index_hints(
+        self,
+        *,
+        project_id: int,
+        knowledge_id: int,
+        terms: list[dict[str, Any]],
+        entities: list[dict[str, Any]],
+    ) -> None:
+        if terms:
+            self._pool.execute(
+                "DELETE FROM knowledge_terms WHERE knowledge_id = %s",
+                (knowledge_id,),
+            )
+            placeholders = ", ".join(["(%s, %s, %s, %s, %s)"] * len(terms))
+            args: list[Any] = []
+            for term in terms:
+                args.extend(
+                    [
+                        project_id,
+                        knowledge_id,
+                        term["term"],
+                        term["field"],
+                        term["weight"],
+                    ]
+                )
+            self._pool.execute(
+                "INSERT INTO knowledge_terms "
+                "(project_id, knowledge_id, term, field, weight) "
+                f"VALUES {placeholders}",
+                tuple(args),
+            )
+
+        if entities:
+            self._pool.execute(
+                "DELETE FROM knowledge_entities WHERE knowledge_id = %s",
+                (knowledge_id,),
+            )
+            placeholders = ", ".join(["(%s, %s, %s, %s)"] * len(entities))
+            args: list[Any] = []
+            for entity in entities:
+                args.extend(
+                    [
+                        project_id,
+                        knowledge_id,
+                        entity["entity_name"],
+                        entity["confidence"],
+                    ]
+                )
+            self._pool.execute(
+                "INSERT INTO knowledge_entities "
+                "(project_id, knowledge_id, entity_name, confidence) "
+                f"VALUES {placeholders}",
+                tuple(args),
+            )
+
+    def replace_knowledge(
+        self,
+        *,
+        knowledge_id: int,
+        project_id: int,
+        category: str | None = None,
+        title: str | None = None,
+        content: str | None = None,
+        agent_id: int | None = None,
+        source_session_id: int | None = None,
+        source_turn_ids: list[int] | None = None,
+        source_file: str | None = None,
+        source_type: str | None = None,
+        tags: list[str] | None = None,
+        relevance_score: float | None = None,
+        confidence: float | None = None,
+        ttl_days: int | None = None,
+        compute_embedding: bool = True,
+        search_metadata_json: dict[str, Any] | None = None,
+        content_hash: str | None = None,
+        bump_revision: bool = False,
+        refresh_derived_indexes: bool = True,
+    ) -> None:
+        previous = self.get_knowledge(knowledge_id)
+        if not previous:
+            raise ValueError(f"Knowledge entry {knowledge_id} not found")
+
+        effective_category = category or str(previous.get("category") or "")
+        effective_title = title or str(previous.get("title") or "")
+        effective_content = content if content is not None else str(previous.get("content") or "")
+        effective_source_file = (
+            source_file if source_file is not None else previous.get("source_file")
+        )
+        effective_source_type = self._infer_source_type(
+            source_type=source_type or str(previous.get("source_type") or "") or None,
+            category=effective_category,
+            source_file=effective_source_file,
+        )
+        effective_tags = tags
+        if effective_tags is None:
+            parsed_tags = previous.get("tags")
+            effective_tags = parsed_tags if isinstance(parsed_tags, list) else None
+        else:
+            effective_tags = [str(tag).strip() for tag in effective_tags if str(tag).strip()] or None
+
+        effective_agent_id = agent_id if agent_id is not None else previous.get("agent_id")
+        effective_source_session_id = (
+            source_session_id
+            if source_session_id is not None
+            else previous.get("source_session_id")
+        )
+        effective_source_turn_ids = (
+            source_turn_ids if source_turn_ids is not None else previous.get("source_turn_ids")
+        )
+        effective_relevance = (
+            relevance_score if relevance_score is not None else float(previous.get("relevance_score") or 1.0)
+        )
+        effective_confidence = (
+            confidence if confidence is not None else float(previous.get("confidence") or 1.0)
+        )
+        effective_ttl_days = ttl_days if ttl_days is not None else previous.get("ttl_days")
+        effective_expires_at = previous.get("expires_at")
+        if ttl_days is not None:
+            effective_expires_at = datetime.now() + timedelta(days=ttl_days)
+
+        previous_metadata = self._ensure_dict(previous.get("search_metadata_json")) or {}
+        effective_metadata = dict(previous_metadata)
+        if search_metadata_json:
+            effective_metadata.update(search_metadata_json)
+        effective_metadata = self._build_default_search_metadata(
+            source_type=effective_source_type,
+            source_file=effective_source_file,
+            tags=effective_tags,
+            search_metadata_json=effective_metadata,
+        )
+        effective_content_hash = content_hash or self._compute_content_hash(effective_content)
+
+        vec_sql = "NULL"
+        embed_args: list[Any] = []
+        if compute_embedding:
+            vec_sql, embed_args = embedder.resolve_embed_sql(
+                f"{effective_title}\n{effective_content}", self._tidb_embedding_model,
+            )
+        previous_version = int(previous.get("version") or 1)
+
+        sql = (
+            "UPDATE knowledge SET "
+            "agent_id = %s, source_session_id = %s, source_turn_ids = %s, "
+            "source_file = %s, source_type = %s, category = %s, title = %s, content = %s, "
+            f"embedding = {vec_sql}, tags = %s, relevance_score = %s, confidence = %s, "
+            "ttl_days = %s, expires_at = %s, content_hash = %s, version = %s, "
+            "search_metadata_json = %s "
+            "WHERE id = %s AND version = %s"
+        )
+        args: list[Any] = [
+            effective_agent_id,
+            effective_source_session_id,
+            json.dumps(effective_source_turn_ids) if effective_source_turn_ids else None,
+            effective_source_file,
+            effective_source_type,
+            effective_category,
+            effective_title,
+            effective_content,
+        ]
+        args.extend(embed_args)
+        args.extend(
+            [
+                json.dumps(effective_tags) if effective_tags else None,
+                effective_relevance,
+                effective_confidence,
+                effective_ttl_days,
+                effective_expires_at,
+                effective_content_hash,
+                previous_version + 1,
+                json.dumps(effective_metadata) if effective_metadata else None,
+                knowledge_id,
+                previous_version,
+            ]
+        )
+        updated = self._pool.execute(sql, tuple(args))
+        if updated != 1:
+            raise RuntimeError(
+                f"Knowledge entry {knowledge_id} was modified concurrently",
+            )
+        if refresh_derived_indexes:
+            entities = self._replace_knowledge_graph(
+                project_id=project_id,
+                knowledge_id=knowledge_id,
+                title=effective_title,
+                content=effective_content,
+                tags=effective_tags,
+                source_file=effective_source_file,
+            )
+            self._replace_knowledge_terms(
+                project_id=project_id,
+                knowledge_id=knowledge_id,
+                title=effective_title,
+                content=effective_content,
+                tags=effective_tags,
+                source_file=effective_source_file,
+                entities=entities,
+            )
+        if bump_revision:
+            self._bump_project_memory_revision(project_id)
+
+    def expire_knowledge(self, knowledge_id: int, *, project_id: int) -> None:
+        self._supersede_knowledge(knowledge_id=knowledge_id, project_id=project_id)
+
     def store_knowledge(
         self, project_id: int, category: str, title: str, content: str,
         agent_id: int | None = None, source_session_id: int | None = None,
@@ -1255,6 +1630,7 @@ class MemoryStore:
         content_hash: str | None = None,
         version: int = 1,
         bump_revision: bool = False,
+        refresh_derived_indexes: bool = True,
     ) -> int:
         effective_source_type = self._infer_source_type(
             source_type=source_type,
@@ -1284,7 +1660,7 @@ class MemoryStore:
             "source_turn_ids, source_file, source_type, category, title, content, embedding, "
             "tags, relevance_score, confidence, ttl_days, expires_at, content_hash, "
             "version, search_metadata_json, merged_from) "
-            f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, {vec_sql}, %s, %s, %s, %s, %s, %s, %s, %s)"
+            f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, {vec_sql}, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
         )
         args: list[Any] = [
             project_id, agent_id, source_session_id,
@@ -1302,23 +1678,24 @@ class MemoryStore:
         ])
 
         knowledge_id = self._pool.insert_returning_id(sql, tuple(args))
-        entities = self._replace_knowledge_graph(
-            project_id=project_id,
-            knowledge_id=knowledge_id,
-            title=title,
-            content=content,
-            tags=tags,
-            source_file=source_file,
-        )
-        self._replace_knowledge_terms(
-            project_id=project_id,
-            knowledge_id=knowledge_id,
-            title=title,
-            content=content,
-            tags=tags,
-            source_file=source_file,
-            entities=entities,
-        )
+        if refresh_derived_indexes:
+            entities = self._replace_knowledge_graph(
+                project_id=project_id,
+                knowledge_id=knowledge_id,
+                title=title,
+                content=content,
+                tags=tags,
+                source_file=source_file,
+            )
+            self._replace_knowledge_terms(
+                project_id=project_id,
+                knowledge_id=knowledge_id,
+                title=title,
+                content=content,
+                tags=tags,
+                source_file=source_file,
+                entities=entities,
+            )
         if bump_revision:
             self._bump_project_memory_revision(project_id)
         return knowledge_id

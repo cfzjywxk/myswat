@@ -10,6 +10,7 @@ from myswat.config.settings import (
     AgentSettings,
     CompactionSettings,
     EmbeddingSettings,
+    MemoryWorkerSettings,
     MySwatSettings,
     TiDBSettings,
     WorkflowSettings,
@@ -255,6 +256,32 @@ class TestEmbeddingSettings:
 
 
 # ---------------------------------------------------------------------------
+# MemoryWorkerSettings
+# ---------------------------------------------------------------------------
+
+class TestMemoryWorkerSettings:
+    """Tests for MemoryWorkerSettings defaults and env-var overrides."""
+
+    def test_defaults(self):
+        settings = MemoryWorkerSettings()
+        assert settings.backend == "codex"
+        assert settings.model == "gpt-5.4"
+        assert settings.role_name == "_memory_worker"
+        assert settings.async_enabled is True
+        assert settings.trigger_mode == "events_only"
+
+    def test_env_override_backend(self, monkeypatch):
+        monkeypatch.setenv("MYSWAT_MEMORY_WORKER_BACKEND", "kimi")
+        settings = MemoryWorkerSettings()
+        assert settings.backend == "kimi"
+
+    def test_env_override_async_enabled(self, monkeypatch):
+        monkeypatch.setenv("MYSWAT_MEMORY_WORKER_ASYNC_ENABLED", "false")
+        settings = MemoryWorkerSettings()
+        assert settings.async_enabled is False
+
+
+# ---------------------------------------------------------------------------
 # MySwatSettings
 # ---------------------------------------------------------------------------
 
@@ -272,6 +299,7 @@ class TestMySwatSettings:
         assert isinstance(settings.agents, AgentSettings)
         assert isinstance(settings.workflow, WorkflowSettings)
         assert isinstance(settings.compaction, CompactionSettings)
+        assert isinstance(settings.memory_worker, MemoryWorkerSettings)
         assert isinstance(settings.embedding, EmbeddingSettings)
 
         # Spot-check a few nested defaults
@@ -307,6 +335,11 @@ max_review_iterations = 8
 [compaction]
 threshold_turns = 300
 compaction_backend = "kimi"
+
+[memory_worker]
+backend = "claude"
+model = "claude-opus-4-6"
+async_enabled = false
 """
         config_file = tmp_path / "config.toml"
         config_file.write_text(toml_content)
@@ -323,6 +356,9 @@ compaction_backend = "kimi"
         assert settings.workflow.max_review_iterations == 8
         assert settings.compaction.threshold_turns == 300
         assert settings.compaction.compaction_backend == "kimi"
+        assert settings.memory_worker.backend == "claude"
+        assert settings.memory_worker.model == "claude-opus-4-6"
+        assert settings.memory_worker.async_enabled is False
 
     def test_toml_values_present_when_loaded(self, tmp_path):
         """TOML values are loaded for nested settings sections."""

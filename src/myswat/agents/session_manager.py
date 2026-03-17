@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from typing import TYPE_CHECKING
 
 from myswat.agents.base import AgentResponse
+from myswat.config.settings import MySwatSettings
+from myswat.memory.learn_triggers import submit_session_summary_learn_request
 from myswat.memory.retriever import MemoryRetriever
 
 if TYPE_CHECKING:
     from myswat.agents.base import AgentRunner
-    from myswat.memory.compactor import KnowledgeCompactor
     from myswat.memory.store import MemoryStore
     from myswat.models.session import Session
 
@@ -36,13 +38,13 @@ class SessionManager:
         runner: AgentRunner,
         agent_row: dict,
         project_id: int,
-        compactor: KnowledgeCompactor | None = None,
+        settings: MySwatSettings | None = None,
     ) -> None:
         self._store = store
         self._runner = runner
         self._agent_row = agent_row
         self._project_id = project_id
-        self._compactor = compactor
+        self._settings = settings or MySwatSettings()
         self._retriever = MemoryRetriever(store)
         self._session: Session | None = None
         self._memory_revision_warned = False
@@ -100,7 +102,7 @@ class SessionManager:
             runner=self._runner,
             agent_row=self._agent_row,
             project_id=self._project_id,
-            compactor=self._compactor,
+            settings=self._settings,
         )
         parent_session_id = self._session.id if self._session is not None else None
         forked._session = self._store.create_session(
@@ -169,13 +171,9 @@ class SessionManager:
         Always:
             - Save user + assistant turns to TiDB
             - Update progress note
-            - Check mid-session compaction
         """
         if self._session is None:
             self.create_or_resume(purpose=task_description)
-
-        # Mid-session compaction: distill old turns into knowledge
-        self._check_mid_session_compaction()
 
         # Build system context ONLY for the first turn of an AI session.
         # Once the AI session is started, it remembers everything — no need
@@ -286,60 +284,37 @@ class SessionManager:
         except Exception:
             pass  # progress update is best-effort
 
-    def _check_mid_session_compaction(self) -> None:
-        """Compact the current session mid-flight if it exceeds thresholds."""
-        if self._session is None or self._compactor is None:
+    def _submit_session_summary(self) -> None:
+        if self._session is None:
             return
-        if not self._compactor.should_compact(self._session.id):
+        try:
+            turn_count = self._store.count_session_turns(self._session.id)
+        except Exception as exc:
+            print(f"[session learn] Failed: {exc}", file=sys.stderr)
+            return
+        if turn_count < 2:
             return
 
         try:
-            ids = self._compactor.compact_session(
-                session_id=self._session.id,
+            submit_session_summary_learn_request(
+                store=self._store,
+                settings=self._settings,
                 project_id=self._project_id,
-                agent_id=self._agent_row["id"],
-                mark_compacted=False,
+                source_session_id=self._session.id,
+                source_work_item_id=getattr(self._session, "work_item_id", None),
+                agent_role=self.agent_role,
+                purpose=getattr(self._session, "purpose", None),
+                workdir=self._runner.workdir,
+                payload_json={"turn_count": turn_count},
+                asynchronous=False,
             )
-            self._store.reset_session_token_count(self._session.id)
-
-            if ids:
-                import sys
-                print(
-                    f"[mid-session compaction] {len(ids)} knowledge entries created "
-                    f"(session {self._session.session_uuid[:8]})",
-                    file=sys.stderr,
-                )
         except Exception as e:
-            import sys
-            print(f"[mid-session compaction] Failed: {e}", file=sys.stderr)
+            print(f"[session learn] Failed: {e}", file=sys.stderr)
 
     def close(self) -> None:
-        """Close the session and run final compaction without deleting raw turns."""
+        """Close the session and submit a best-effort unified learn summary."""
         if self._session is None:
             return
 
         self._store.close_session(self._session.id)
-
-        if self._compactor:
-            self._compact_final()
-
-    def _compact_final(self) -> None:
-        """Run final knowledge compaction on a closed session without deletion."""
-        if self._session is None or self._compactor is None:
-            return
-        try:
-            ids = self._compactor.compact_session(
-                session_id=self._session.id,
-                project_id=self._project_id,
-                agent_id=self._agent_row["id"],
-                mark_compacted=True,
-            )
-            if ids:
-                import sys
-                print(
-                    f"[compaction] Created {len(ids)} knowledge entries, session preserved",
-                    file=sys.stderr,
-                )
-        except Exception as e:
-            import sys
-            print(f"[compaction] Failed: {e}", file=sys.stderr)
+        self._submit_session_summary()

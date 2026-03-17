@@ -140,41 +140,6 @@ def search(
         )
     console.print(table)
 
-
-@memory_app.command("add")
-def add(
-    title: str = typer.Argument(..., help="Knowledge title"),
-    content: str = typer.Argument(..., help="Knowledge content"),
-    project: str = typer.Option(..., "--project", "-p", help="Project slug"),
-    category: str = typer.Option("decision", "--category", "-c", help="Category"),
-    tags: str = typer.Option(None, "--tags", "-t", help="Comma-separated tags"),
-):
-    """Manually add a knowledge entry."""
-    settings = MySwatSettings()
-    pool = TiDBPool(settings.tidb)
-    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
-
-    proj = store.get_project_by_slug(project)
-    if not proj:
-        console.print(f"[red]Project '{project}' not found.[/red]")
-        raise typer.Exit(1)
-
-    tag_list = [t.strip() for t in tags.split(",")] if tags else None
-
-    kid, action = store.upsert_knowledge(
-        project_id=proj["id"],
-        source_type="manual",
-        category=category,
-        title=title,
-        content=content,
-        tags=tag_list,
-    )
-    if action == "skipped":
-        console.print(f"[yellow]Knowledge already exists (id={kid})[/yellow]")
-    else:
-        console.print(f"[green]Knowledge entry {action} (id={kid})[/green]")
-
-
 @memory_app.command("list")
 def list_knowledge(
     project: str = typer.Option(..., "--project", "-p", help="Project slug"),
@@ -225,51 +190,3 @@ def list_knowledge(
             tags_str[:30],
         )
     console.print(table)
-
-
-@memory_app.command("compact")
-def compact(
-    project: str = typer.Option(..., "--project", "-p", help="Project slug"),
-):
-    """Compact all completed sessions into knowledge entries."""
-    from myswat.agents.factory import make_runner_from_row
-    from myswat.memory.compactor import KnowledgeCompactor
-
-    settings = MySwatSettings()
-    pool = TiDBPool(settings.tidb)
-    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
-
-    proj = store.get_project_by_slug(project)
-    if not proj:
-        console.print(f"[red]Project '{project}' not found.[/red]")
-        raise typer.Exit(1)
-
-    # Find a runner for compaction
-    agents = store.list_agents(proj["id"])
-    runner = None
-    for a in agents:
-        if a["cli_backend"] == settings.compaction.compaction_backend:
-            runner = make_runner_from_row(a, settings=settings)
-            break
-    if runner is None and agents:
-        runner = make_runner_from_row(agents[0], settings=settings)
-
-    if runner is None:
-        console.print("[red]No agents available for compaction.[/red]")
-        raise typer.Exit(1)
-
-    compactor = KnowledgeCompactor(
-        store=store,
-        runner=runner,
-        threshold_turns=settings.compaction.threshold_turns,
-    )
-
-    console.print(f"[bold]Compacting sessions for project '{proj['name']}'...[/bold]")
-    result = compactor.compact_all_pending(project_id=proj["id"])
-
-    console.print(
-        f"[green]Done.[/green] "
-        f"Compacted: {result['compacted']}, "
-        f"Knowledge created: {result['knowledge_created']}, "
-        f"Skipped: {result['skipped']}"
-    )

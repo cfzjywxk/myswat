@@ -70,14 +70,12 @@ class TestRunWork:
 
         with pytest.raises(ClickExit):
             run_work("missing", "do stuff")
-
-    @patch("myswat.cli.learn_cmd.ensure_learned")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.run_migrations")
     @patch("myswat.cli.work_cmd.MemoryStore")
     def test_dev_not_found(self, mock_store_cls, mock_mig, mock_pool_cls,
-                            mock_settings_cls, mock_learn):
+                            mock_settings_cls):
         mock_store = MagicMock()
         mock_store.get_project_by_slug.return_value = {
             "id": 1, "repo_path": "/tmp",
@@ -87,14 +85,12 @@ class TestRunWork:
 
         with pytest.raises(ClickExit):
             run_work("proj", "do stuff")
-
-    @patch("myswat.cli.learn_cmd.ensure_learned")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.run_migrations")
     @patch("myswat.cli.work_cmd.MemoryStore")
     def test_no_qa_agents(self, mock_store_cls, mock_mig, mock_pool_cls,
-                           mock_settings_cls, mock_learn):
+                           mock_settings_cls):
         settings = MagicMock()
         settings.compaction.threshold_turns = 200
         mock_settings_cls.return_value = settings
@@ -115,15 +111,14 @@ class TestRunWork:
             run_work("proj", "do stuff")
 
     @patch("myswat.cli.work_cmd.WorkflowEngine")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
+    @patch("myswat.cli.work_cmd.submit_workflow_summary_learn_request")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.run_migrations")
     @patch("myswat.cli.work_cmd.MemoryStore")
     @patch("myswat.cli.work_cmd.SessionManager")
-    @patch("myswat.cli.work_cmd.KnowledgeCompactor")
-    def test_success(self, mock_comp, mock_sm_cls, mock_store_cls, mock_mig,
-                      mock_pool_cls, mock_settings_cls, mock_learn,
+    def test_success(self, mock_sm_cls, mock_store_cls, mock_mig,
+                      mock_pool_cls, mock_settings_cls, mock_submit_learn,
                       mock_engine_cls):
         settings = MagicMock()
         settings.compaction.threshold_turns = 200
@@ -161,27 +156,21 @@ class TestRunWork:
         assert mock_store.create_work_item.call_args.kwargs["metadata_json"] == {"work_mode": "full"}
         assert mock_engine_cls.call_args.kwargs["mode"] == WorkMode.full
         assert mock_engine_cls.call_args.kwargs["auto_approve"] is True
-        kwargs = mock_comp.call_args.kwargs
-        assert kwargs["threshold_turns"] == 200
-        assert "threshold_tokens" not in kwargs
+        mock_submit_learn.assert_called_once()
 
     @patch("myswat.cli.work_cmd.WorkflowEngine")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.run_migrations")
     @patch("myswat.cli.work_cmd.MemoryStore")
     @patch("myswat.cli.work_cmd.SessionManager")
-    @patch("myswat.cli.work_cmd.KnowledgeCompactor")
     def test_foreground_run_prints_tracking_commands(
         self,
-        mock_comp,
         mock_sm_cls,
         mock_store_cls,
         mock_mig,
         mock_pool_cls,
         mock_settings_cls,
-        mock_learn,
         mock_engine_cls,
     ):
         settings = MagicMock()
@@ -226,22 +215,18 @@ class TestRunWork:
 
     @patch("myswat.cli.work_cmd._run_with_task_monitor")
     @patch("myswat.cli.work_cmd.WorkflowEngine")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.run_migrations")
     @patch("myswat.cli.work_cmd.MemoryStore")
     @patch("myswat.cli.work_cmd.SessionManager")
-    @patch("myswat.cli.work_cmd.KnowledgeCompactor")
     def test_foreground_run_uses_task_monitor(
         self,
-        mock_comp,
         mock_sm_cls,
         mock_store_cls,
         mock_mig,
         mock_pool_cls,
         mock_settings_cls,
-        mock_learn,
         mock_engine_cls,
         mock_task_monitor,
     ):
@@ -284,16 +269,13 @@ class TestRunWork:
         assert kwargs["proj"]["id"] == 1
 
     @patch("myswat.cli.work_cmd.WorkflowEngine")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.run_migrations")
     @patch("myswat.cli.work_cmd.MemoryStore")
     @patch("myswat.cli.work_cmd.SessionManager")
-    @patch("myswat.cli.work_cmd.KnowledgeCompactor")
-    def test_failure(self, mock_comp, mock_sm_cls, mock_store_cls, mock_mig,
-                      mock_pool_cls, mock_settings_cls, mock_learn,
-                      mock_engine_cls):
+    def test_failure(self, mock_sm_cls, mock_store_cls, mock_mig,
+                      mock_pool_cls, mock_settings_cls, mock_engine_cls):
         settings = MagicMock()
         settings.compaction.threshold_turns = 200
         settings.workflow.max_review_iterations = 5
@@ -329,16 +311,13 @@ class TestRunWork:
         mock_store.update_work_item_status.assert_any_call(42, "review")
 
     @patch("myswat.cli.work_cmd.WorkflowEngine")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.run_migrations")
     @patch("myswat.cli.work_cmd.MemoryStore")
     @patch("myswat.cli.work_cmd.SessionManager")
-    @patch("myswat.cli.work_cmd.KnowledgeCompactor")
-    def test_exception(self, mock_comp, mock_sm_cls, mock_store_cls, mock_mig,
-                        mock_pool_cls, mock_settings_cls, mock_learn,
-                        mock_engine_cls):
+    def test_exception(self, mock_sm_cls, mock_store_cls, mock_mig,
+                        mock_pool_cls, mock_settings_cls, mock_engine_cls):
         settings = MagicMock()
         settings.compaction.threshold_turns = 200
         settings.workflow.max_review_iterations = 5
@@ -374,17 +353,15 @@ class TestRunWork:
         mock_store.update_work_item_status.assert_any_call(42, "blocked")
 
     @patch("myswat.cli.work_cmd.WorkflowEngine")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.run_migrations")
     @patch("myswat.cli.work_cmd.MemoryStore")
     @patch("myswat.cli.work_cmd.SessionManager")
-    @patch("myswat.cli.work_cmd.KnowledgeCompactor")
-    def test_migrations_applied_printed(self, mock_comp, mock_sm_cls,
+    def test_migrations_applied_printed(self, mock_sm_cls,
                                          mock_store_cls, mock_mig,
                                          mock_pool_cls, mock_settings_cls,
-                                         mock_learn, mock_engine_cls):
+                                         mock_engine_cls):
         settings = MagicMock()
         settings.compaction.threshold_turns = 200
         settings.workflow.max_review_iterations = 5
@@ -420,16 +397,14 @@ class TestRunWork:
         run_work("proj", "do stuff")
 
     @patch("myswat.cli.work_cmd.WorkflowEngine")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.run_migrations")
     @patch("myswat.cli.work_cmd.MemoryStore")
     @patch("myswat.cli.work_cmd.SessionManager")
-    @patch("myswat.cli.work_cmd.KnowledgeCompactor")
     def test_design_mode_threads_to_engine_and_persists_metadata(
-        self, mock_comp, mock_sm_cls, mock_store_cls, mock_mig,
-        mock_pool_cls, mock_settings_cls, mock_learn, mock_engine_cls,
+        self, mock_sm_cls, mock_store_cls, mock_mig,
+        mock_pool_cls, mock_settings_cls, mock_engine_cls,
     ):
         settings = MagicMock()
         settings.compaction.threshold_turns = 200
@@ -547,22 +522,18 @@ class TestRunWork:
         assert any("myswat status -p proj" in line for line in rendered)
 
     @patch("myswat.cli.work_cmd.WorkflowEngine")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.run_migrations")
     @patch("myswat.cli.work_cmd.MemoryStore")
     @patch("myswat.cli.work_cmd.SessionManager")
-    @patch("myswat.cli.work_cmd.KnowledgeCompactor")
     def test_background_worker_reuses_existing_work_item(
         self,
-        mock_comp,
         mock_sm_cls,
         mock_store_cls,
         mock_mig,
         mock_pool_cls,
         mock_settings_cls,
-        mock_learn,
         mock_engine_cls,
         tmp_path,
     ):

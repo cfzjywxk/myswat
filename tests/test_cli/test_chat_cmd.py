@@ -10,7 +10,6 @@ from click.exceptions import Exit as ClickExit
 
 from myswat.agents.base import AgentResponse
 from myswat.cli.chat_cmd import (
-    _make_compaction_runner,
     _show_status,
     _run_inline_review,
     _run_inline_review_interactive,
@@ -37,38 +36,6 @@ def _agent_row(role="developer", backend="codex"):
 
 def _proj():
     return {"id": 1, "slug": "proj", "name": "Proj", "repo_path": "/tmp"}
-
-
-# ---------------------------------------------------------------------------
-# _make_compaction_runner
-# ---------------------------------------------------------------------------
-class TestMakeCompactionRunner:
-    def test_matching_backend(self):
-        store = MagicMock()
-        store.list_agents.return_value = [_agent_row("dev", "codex")]
-        settings = MagicMock()
-        settings.compaction.compaction_backend = "codex"
-
-        r = _make_compaction_runner(store, _proj(), settings)
-        assert r is not None
-
-    def test_fallback(self):
-        store = MagicMock()
-        store.list_agents.return_value = [_agent_row("dev", "kimi")]
-        settings = MagicMock()
-        settings.compaction.compaction_backend = "codex"
-
-        r = _make_compaction_runner(store, _proj(), settings)
-        assert r is not None
-
-    def test_no_agents(self):
-        store = MagicMock()
-        store.list_agents.return_value = []
-        settings = MagicMock()
-        settings.compaction.compaction_backend = "codex"
-
-        r = _make_compaction_runner(store, _proj(), settings)
-        assert r is None
 
 
 # ---------------------------------------------------------------------------
@@ -143,9 +110,7 @@ class TestRunInlineReview:
     def test_missing_agents(self, mock_sm_cls, mock_review):
         store = MagicMock()
         store.get_agent.return_value = None
-        compactor = MagicMock()
-
-        _run_inline_review(store, _proj(), compactor, "/tmp", MagicMock(), "do stuff")
+        _run_inline_review(store, _proj(), "/tmp", MagicMock(), "do stuff")
         mock_review.assert_not_called()
 
     @patch("myswat.workflow.review_loop.run_review_loop")
@@ -176,9 +141,7 @@ class TestRunInlineReview:
         mock_review.return_value = ReviewVerdict(
             verdict="lgtm", issues=[], summary="ok",
         )
-        compactor = MagicMock()
-
-        _run_inline_review(store, _proj(), compactor, "/tmp", settings, "do stuff")
+        _run_inline_review(store, _proj(), "/tmp", settings, "do stuff")
         store.update_work_item_status.assert_any_call(42, "approved")
 
     @patch("myswat.workflow.review_loop.run_review_loop")
@@ -209,9 +172,7 @@ class TestRunInlineReview:
         mock_review.return_value = ReviewVerdict(
             verdict="changes_requested", issues=["fix x"], summary="needs work",
         )
-        compactor = MagicMock()
-
-        _run_inline_review(store, _proj(), compactor, "/tmp", settings, "do stuff")
+        _run_inline_review(store, _proj(), "/tmp", settings, "do stuff")
         store.update_work_item_status.assert_any_call(42, "review")
 
 
@@ -221,7 +182,6 @@ class TestRunInlineReviewInteractive:
         _run_inline_review_interactive(
             store=MagicMock(),
             proj=_proj(),
-            compactor=MagicMock(),
             workdir="/tmp",
             settings=MagicMock(),
             task="do stuff",
@@ -284,7 +244,7 @@ class TestRunDesignReview:
         mock_engine_cls.return_value = engine
 
         with pytest.raises(RuntimeError, match="boom"):
-            _run_design_review(store, _proj(), proposer_sm, MagicMock(), "/tmp", settings, "do stuff")
+            _run_design_review(store, _proj(), proposer_sm, "/tmp", settings, "do stuff")
 
         store.update_work_item_status.assert_any_call(42, "blocked")
         arch_workflow_sm.close.assert_called_once()
@@ -324,7 +284,7 @@ class TestRunDesignReview:
         engine.run.return_value = SimpleNamespace(success=True, blocked=False)
         mock_engine_cls.return_value = engine
 
-        _run_design_review(store, _proj(), proposer_sm, MagicMock(), "/tmp", settings, "do stuff")
+        _run_design_review(store, _proj(), proposer_sm, "/tmp", settings, "do stuff")
         assert store.create_work_item.call_args.kwargs["item_type"] == "design"
         assert store.create_work_item.call_args.kwargs["metadata_json"]["work_mode"] == "architect_design"
         proposer_sm.fork_for_work_item.assert_called_once_with(42, purpose="Arch design: do stuff")
@@ -341,7 +301,7 @@ class TestRunTestplanReview:
         proposer_sm.agent_id = 9
         proposer_sm.agent_role = "qa_main"
 
-        _run_testplan_review(store, _proj(), proposer_sm, MagicMock(), "/tmp", MagicMock(), "do stuff")
+        _run_testplan_review(store, _proj(), proposer_sm, "/tmp", MagicMock(), "do stuff")
         mock_engine_cls.assert_not_called()
 
     @patch("myswat.workflow.engine.WorkflowEngine")
@@ -379,7 +339,7 @@ class TestRunTestplanReview:
         mock_engine_cls.return_value = engine
 
         with pytest.raises(RuntimeError, match="boom"):
-            _run_testplan_review(store, _proj(), proposer_sm, MagicMock(), "/tmp", settings, "plan tests")
+            _run_testplan_review(store, _proj(), proposer_sm, "/tmp", settings, "plan tests")
 
         store.update_work_item_status.assert_any_call(43, "blocked")
         qa_workflow_sm.close.assert_called_once()
@@ -419,7 +379,7 @@ class TestRunTestplanReview:
         engine.run.return_value = SimpleNamespace(success=False, blocked=True)
         mock_engine_cls.return_value = engine
 
-        _run_testplan_review(store, _proj(), proposer_sm, MagicMock(), "/tmp", settings, "plan tests")
+        _run_testplan_review(store, _proj(), proposer_sm, "/tmp", settings, "plan tests")
         assert store.create_work_item.call_args.kwargs["item_type"] == "review"
         assert store.create_work_item.call_args.kwargs["metadata_json"]["work_mode"] == "testplan_design"
         proposer_sm.fork_for_work_item.assert_called_once_with(43, purpose="QA test plan: plan tests")
@@ -433,7 +393,6 @@ class TestRunDesignReviewInteractive:
             store=MagicMock(),
             proj=_proj(),
             proposer_sm=MagicMock(),
-            compactor=MagicMock(),
             workdir="/tmp",
             settings=MagicMock(),
             task="design thing",
@@ -452,7 +411,6 @@ class TestRunTestplanReviewInteractive:
             store=MagicMock(),
             proj=_proj(),
             proposer_sm=MagicMock(),
-            compactor=MagicMock(),
             workdir="/tmp",
             settings=MagicMock(),
             task="plan tests",
@@ -473,9 +431,7 @@ class TestRunWorkflow:
     def test_missing_dev_agent(self, mock_sm_cls, mock_engine_cls):
         store = MagicMock()
         store.get_agent.return_value = None
-        compactor = MagicMock()
-
-        _run_workflow(store, _proj(), compactor, "/tmp", MagicMock(), "do stuff")
+        _run_workflow(store, _proj(), "/tmp", MagicMock(), "do stuff")
         mock_engine_cls.assert_not_called()
 
     @patch("myswat.workflow.engine.WorkflowEngine")
@@ -489,9 +445,7 @@ class TestRunWorkflow:
                 return dev_agent
             return None
         store.get_agent.side_effect = get_agent_side
-        compactor = MagicMock()
-
-        _run_workflow(store, _proj(), compactor, "/tmp", MagicMock(), "do stuff")
+        _run_workflow(store, _proj(), "/tmp", MagicMock(), "do stuff")
         mock_engine_cls.assert_not_called()
 
     @patch("myswat.workflow.engine.WorkflowEngine")
@@ -522,9 +476,7 @@ class TestRunWorkflow:
         engine.run.return_value = SimpleNamespace(success=True)
         mock_engine_cls.return_value = engine
 
-        compactor = MagicMock()
-
-        _run_workflow(store, _proj(), compactor, "/tmp", settings, "do stuff")
+        _run_workflow(store, _proj(), "/tmp", settings, "do stuff")
         store.update_work_item_status.assert_any_call(42, "completed")
 
     @patch("myswat.workflow.engine.WorkflowEngine")
@@ -555,9 +507,7 @@ class TestRunWorkflow:
         engine.run.return_value = SimpleNamespace(success=False)
         mock_engine_cls.return_value = engine
 
-        compactor = MagicMock()
-
-        _run_workflow(store, _proj(), compactor, "/tmp", settings, "do stuff")
+        _run_workflow(store, _proj(), "/tmp", settings, "do stuff")
         store.update_work_item_status.assert_any_call(42, "review")
 
     @patch("myswat.workflow.engine.WorkflowEngine")
@@ -588,11 +538,10 @@ class TestRunWorkflow:
         engine.run.return_value = SimpleNamespace(success=True)
         mock_engine_cls.return_value = engine
 
-        compactor = MagicMock()
         prompt_session = MagicMock()
 
         _run_workflow(
-            store, _proj(), compactor, "/tmp", settings, "do stuff",
+            store, _proj(), "/tmp", settings, "do stuff",
             prompt_session=prompt_session,
         )
 
@@ -605,7 +554,6 @@ class TestRunWorkflowInteractive:
         _run_workflow_interactive(
             store=MagicMock(),
             proj=_proj(),
-            compactor=MagicMock(),
             workdir="/tmp",
             settings=MagicMock(),
             requirement="ship feature",
@@ -634,8 +582,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.TiDBPool")
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_project_not_found(self, mock_learn, mock_store_cls, mock_mig,
+    def test_project_not_found(self, mock_store_cls, mock_mig,
                                 mock_pool_cls, mock_settings_cls,
                                 mock_preload):
         mock_store = MagicMock()
@@ -653,9 +600,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_quit_command(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_quit_command(self, mock_sm_cls,
                           mock_store_cls, mock_mig, mock_pool_cls,
                           mock_settings_cls, mock_preload,
                           mock_prompt_session_cls):
@@ -681,9 +626,6 @@ class TestRunChat:
 
         run_chat("proj")
         sm.close.assert_called()
-        kwargs = mock_comp.call_args.kwargs
-        assert kwargs["threshold_turns"] == 200
-        assert "threshold_tokens" not in kwargs
 
     @patch("myswat.cli.chat_cmd.PromptSession")
     @patch("myswat.cli.chat_cmd.preload_model")
@@ -692,9 +634,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_help_command(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_help_command(self, mock_sm_cls,
                           mock_store_cls, mock_mig, mock_pool_cls,
                           mock_settings_cls, mock_preload,
                           mock_prompt_session_cls):
@@ -727,9 +667,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_status_command(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_status_command(self, mock_sm_cls,
                             mock_store_cls, mock_mig, mock_pool_cls,
                             mock_settings_cls, mock_preload,
                             mock_prompt_session_cls):
@@ -763,9 +701,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_role_switch(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_role_switch(self, mock_sm_cls,
                          mock_store_cls, mock_mig, mock_pool_cls,
                          mock_settings_cls, mock_preload,
                          mock_prompt_session_cls):
@@ -798,9 +734,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_role_no_arg(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_role_no_arg(self, mock_sm_cls,
                           mock_store_cls, mock_mig, mock_pool_cls,
                           mock_settings_cls, mock_preload,
                           mock_prompt_session_cls):
@@ -833,9 +767,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_agents_command(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_agents_command(self, mock_sm_cls,
                             mock_store_cls, mock_mig, mock_pool_cls,
                             mock_settings_cls, mock_preload,
                             mock_prompt_session_cls):
@@ -868,9 +800,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_sessions_command(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_sessions_command(self, mock_sm_cls,
                               mock_store_cls, mock_mig, mock_pool_cls,
                               mock_settings_cls, mock_preload,
                               mock_prompt_session_cls):
@@ -912,9 +842,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_history_command(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_history_command(self, mock_sm_cls,
                              mock_store_cls, mock_mig, mock_pool_cls,
                              mock_settings_cls, mock_preload,
                              mock_prompt_session_cls):
@@ -951,9 +879,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_reset_command(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_reset_command(self, mock_sm_cls,
                            mock_store_cls, mock_mig, mock_pool_cls,
                            mock_settings_cls, mock_preload,
                            mock_prompt_session_cls):
@@ -987,9 +913,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_new_command(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_new_command(self, mock_sm_cls,
                          mock_store_cls, mock_mig, mock_pool_cls,
                          mock_settings_cls, mock_preload,
                          mock_prompt_session_cls):
@@ -1022,9 +946,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_unknown_command(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_unknown_command(self, mock_sm_cls,
                              mock_store_cls, mock_mig, mock_pool_cls,
                              mock_settings_cls, mock_preload,
                              mock_prompt_session_cls):
@@ -1057,9 +979,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_eof_exits(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_eof_exits(self, mock_sm_cls,
                        mock_store_cls, mock_mig, mock_pool_cls,
                        mock_settings_cls, mock_preload,
                        mock_prompt_session_cls):
@@ -1092,9 +1012,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_keyboard_interrupt(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_keyboard_interrupt(self, mock_sm_cls,
                                 mock_store_cls, mock_mig, mock_pool_cls,
                                 mock_settings_cls, mock_preload,
                                 mock_prompt_session_cls):
@@ -1127,9 +1045,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_empty_input_skipped(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_empty_input_skipped(self, mock_sm_cls,
                                   mock_store_cls, mock_mig, mock_pool_cls,
                                   mock_settings_cls, mock_preload,
                                   mock_prompt_session_cls):
@@ -1159,16 +1075,15 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd._send_with_timer")
     @patch("myswat.cli.chat_cmd.PromptSession")
     @patch("myswat.cli.chat_cmd.preload_model")
+    @patch("myswat.cli.chat_cmd.submit_chat_learn_request")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_regular_message_success(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_regular_message_success(self, mock_sm_cls,
                                       mock_store_cls, mock_mig, mock_pool_cls,
-                                      mock_settings_cls, mock_preload,
+                                      mock_settings_cls, mock_submit_learn, mock_preload,
                                       mock_prompt_session_cls,
                                       mock_send_timer):
         from myswat.cli.chat_cmd import run_chat
@@ -1197,6 +1112,7 @@ class TestRunChat:
 
         run_chat("proj")
         mock_send_timer.assert_called_once()
+        mock_submit_learn.assert_called_once()
 
     @patch("myswat.cli.chat_cmd._run_inline_review_interactive")
     @patch("myswat.cli.chat_cmd._send_with_timer")
@@ -1207,12 +1123,8 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
     def test_architect_delegation_auto_starts_review_loop(
         self,
-        mock_learn,
-        mock_comp,
         mock_sm_cls,
         mock_store_cls,
         mock_mig,
@@ -1257,7 +1169,7 @@ class TestRunChat:
         mock_review.assert_called_once()
         review_args = mock_review.call_args.args
         review_kwargs = mock_review.call_args.kwargs
-        assert review_args[5] == "update the design doc"
+        assert review_args[4] == "update the design doc"
         assert review_kwargs["initial_process_events"][0]["from_role"] == "architect"
         assert review_kwargs["initial_process_events"][0]["to_role"] == "developer"
 
@@ -1272,12 +1184,8 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
     def test_architect_design_delegation_starts_design_workflow(
         self,
-        mock_learn,
-        mock_comp,
         mock_sm_cls,
         mock_store_cls,
         mock_mig,
@@ -1334,12 +1242,8 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
     def test_qa_testplan_delegation_starts_testplan_workflow(
         self,
-        mock_learn,
-        mock_comp,
         mock_sm_cls,
         mock_store_cls,
         mock_mig,
@@ -1396,12 +1300,8 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
     def test_architect_full_delegation_starts_full_workflow(
         self,
-        mock_learn,
-        mock_comp,
         mock_sm_cls,
         mock_store_cls,
         mock_mig,
@@ -1449,7 +1349,7 @@ class TestRunChat:
         # The proposer_sm (3rd positional arg) should be the architect session
         assert mock_full_workflow.call_args.args[2] is sm
         # The requirement (7th positional arg) should be the task
-        assert mock_full_workflow.call_args.args[6] == "design and implement the auth module"
+        assert mock_full_workflow.call_args.args[5] == "design and implement the auth module"
 
     @patch("myswat.cli.chat_cmd.console.print")
     @patch("myswat.cli.chat_cmd._run_inline_review_interactive")
@@ -1461,12 +1361,8 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
     def test_qa_code_delegation_warns_for_unsupported_role(
         self,
-        mock_learn,
-        mock_comp,
         mock_sm_cls,
         mock_store_cls,
         mock_mig,
@@ -1526,12 +1422,8 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
     def test_unknown_delegation_mode_warns_as_unsupported(
         self,
-        mock_learn,
-        mock_comp,
         mock_sm_cls,
         mock_store_cls,
         mock_mig,
@@ -1588,9 +1480,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_regular_message_cancelled(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_regular_message_cancelled(self, mock_sm_cls,
                                         mock_store_cls, mock_mig, mock_pool_cls,
                                         mock_settings_cls, mock_preload,
                                         mock_prompt_session_cls,
@@ -1629,9 +1519,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_regular_message_error(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_regular_message_error(self, mock_sm_cls,
                                     mock_store_cls, mock_mig, mock_pool_cls,
                                     mock_settings_cls, mock_preload,
                                     mock_prompt_session_cls,
@@ -1670,9 +1558,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_review_command(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_review_command(self, mock_sm_cls,
                             mock_store_cls, mock_mig, mock_pool_cls,
                             mock_settings_cls, mock_preload,
                             mock_prompt_session_cls, mock_review):
@@ -1706,9 +1592,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_review_no_arg(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_review_no_arg(self, mock_sm_cls,
                            mock_store_cls, mock_mig, mock_pool_cls,
                            mock_settings_cls, mock_preload,
                            mock_prompt_session_cls):
@@ -1742,9 +1626,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_work_command(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_work_command(self, mock_sm_cls,
                           mock_store_cls, mock_mig, mock_pool_cls,
                           mock_settings_cls, mock_preload,
                           mock_prompt_session_cls, mock_workflow):
@@ -1779,9 +1661,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_task_command(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_task_command(self, mock_sm_cls,
                           mock_store_cls, mock_mig, mock_pool_cls,
                           mock_settings_cls, mock_preload,
                           mock_prompt_session_cls, mock_show_task):
@@ -1815,9 +1695,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_work_no_arg(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_work_no_arg(self, mock_sm_cls,
                           mock_store_cls, mock_mig, mock_pool_cls,
                           mock_settings_cls, mock_preload,
                           mock_prompt_session_cls):
@@ -1850,9 +1728,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_history_no_session(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_history_no_session(self, mock_sm_cls,
                                 mock_store_cls, mock_mig, mock_pool_cls,
                                 mock_settings_cls, mock_preload,
                                 mock_prompt_session_cls):
@@ -1886,9 +1762,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_sessions_no_active(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_sessions_no_active(self, mock_sm_cls,
                                  mock_store_cls, mock_mig, mock_pool_cls,
                                  mock_settings_cls, mock_preload,
                                  mock_prompt_session_cls):
@@ -1925,9 +1799,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_reset_no_session(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_reset_no_session(self, mock_sm_cls,
                                mock_store_cls, mock_mig, mock_pool_cls,
                                mock_settings_cls, mock_preload,
                                mock_prompt_session_cls):
@@ -1964,9 +1836,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    @patch("myswat.cli.chat_cmd.KnowledgeCompactor")
-    @patch("myswat.cli.learn_cmd.ensure_learned")
-    def test_history_with_n_param(self, mock_learn, mock_comp, mock_sm_cls,
+    def test_history_with_n_param(self, mock_sm_cls,
                                    mock_store_cls, mock_mig, mock_pool_cls,
                                    mock_settings_cls, mock_preload,
                                    mock_prompt_session_cls):

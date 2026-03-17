@@ -22,7 +22,7 @@ from myswat.cli.progress import _run_with_task_monitor
 from myswat.config.settings import MySwatSettings
 from myswat.db.connection import TiDBPool
 from myswat.db.schema import run_migrations
-from myswat.memory.compactor import KnowledgeCompactor
+from myswat.memory.learn_triggers import submit_workflow_summary_learn_request
 from myswat.memory.store import MemoryStore
 from myswat.workflow.engine import WorkMode, WorkflowEngine
 
@@ -271,29 +271,17 @@ def _run_workflow(
 ) -> int:
     settings, store, proj, effective_workdir = _load_project_context(project_slug, workdir)
 
-    # Auto-learn if project hasn't been learned yet.
-    from myswat.cli.learn_cmd import ensure_learned
-
-    ensure_learned(store, project_slug, proj["id"], effective_workdir)
-
     dev_agent, qa_agents = _get_workflow_agents(store, proj["id"])
 
     dev_runner = make_runner_from_row(dev_agent, settings=settings)
     dev_runner.workdir = effective_workdir
-
-    compaction_runner = make_runner_from_row(dev_agent, settings=settings)
-    compactor = KnowledgeCompactor(
-        store=store,
-        runner=compaction_runner,
-        threshold_turns=settings.compaction.threshold_turns,
-    )
 
     dev_sm = SessionManager(
         store=store,
         runner=dev_runner,
         agent_row=dev_agent,
         project_id=proj["id"],
-        compactor=compactor,
+        settings=settings,
     )
 
     qa_sms: list[SessionManager] = []
@@ -306,7 +294,7 @@ def _run_workflow(
                 runner=qa_runner,
                 agent_row=qa_agent,
                 project_id=proj["id"],
-                compactor=compactor,
+                settings=settings,
             )
         )
 
@@ -351,6 +339,7 @@ def _run_workflow(
         )
 
     dev_sm.create_or_resume(purpose=f"Workflow dev: {requirement[:80]}", work_item_id=work_item_id)
+    workflow_session_id = getattr(getattr(dev_sm, "session", None), "id", None)
     for qa_sm in qa_sms:
         qa_sm.create_or_resume(purpose=f"Workflow QA: {requirement[:80]}", work_item_id=work_item_id)
 
@@ -456,6 +445,22 @@ def _run_workflow(
                 state=final_status,
                 summary=final_summary,
             )
+
+        try:
+            submit_workflow_summary_learn_request(
+                store=store,
+                settings=settings,
+                project_id=proj["id"],
+                source_work_item_id=work_item_id,
+                source_session_id=workflow_session_id,
+                requirement=requirement,
+                final_status=final_status,
+                final_summary=final_summary,
+                mode=mode.value,
+                workdir=effective_workdir,
+            )
+        except Exception:
+            pass
 
     console.print("\n[dim]Sessions closed. All turns persisted to TiDB.[/dim]")
     return work_item_id

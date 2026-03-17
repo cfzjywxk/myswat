@@ -76,11 +76,22 @@ class CompactionSettings(BaseSettings):
     model_config = {"env_prefix": "MYSWAT_COMPACTION_", "extra": "ignore"}
 
 
+class MemoryWorkerSettings(BaseSettings):
+    backend: str = "codex"
+    model: str = "gpt-5.4"
+    role_name: str = "_memory_worker"
+    async_enabled: bool = True
+    trigger_mode: str = "events_only"
+
+    model_config = {"env_prefix": "MYSWAT_MEMORY_WORKER_", "extra": "ignore"}
+
+
 class MySwatSettings(BaseSettings):
     tidb: TiDBSettings = Field(default_factory=TiDBSettings)
     agents: AgentSettings = Field(default_factory=AgentSettings)
     workflow: WorkflowSettings = Field(default_factory=WorkflowSettings)
     compaction: CompactionSettings = Field(default_factory=CompactionSettings)
+    memory_worker: MemoryWorkerSettings = Field(default_factory=MemoryWorkerSettings)
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     config_path: Path = Path("~/.myswat/config.toml").expanduser()
 
