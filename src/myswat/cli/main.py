@@ -247,6 +247,64 @@ def init(
     run_init(name, repo_path, description)
 
 
+@app.command()
+def reset(
+    project: str = typer.Option(None, "--project", "-p", help="Project slug (re-init after reset)"),
+    repo_path: str = typer.Option(None, "--repo", "-r", help="Repo path for re-init"),
+    description: str = typer.Option(None, "--desc", "-d", help="Project description for re-init"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+):
+    """Drop the TiDB database and re-create from scratch.
+
+    WARNING: This destroys ALL data — projects, agents, sessions, knowledge,
+    work items, review cycles. Use only when you want a clean slate.
+    """
+    from rich.console import Console
+
+    from myswat.config.settings import MySwatSettings
+    from myswat.db.connection import TiDBPool
+    from myswat.db.schema import run_migrations
+
+    console = Console()
+    settings = MySwatSettings()
+    db_name = settings.tidb.database
+
+    if not yes:
+        console.print(
+            f"\n[bold red]WARNING: This will DROP the entire '{db_name}' database.[/bold red]"
+        )
+        console.print(
+            "[red]All projects, agents, sessions, knowledge, work items, and "
+            "review cycles will be permanently deleted.[/red]\n"
+        )
+        confirm = typer.prompt(f"Type '{db_name}' to confirm", default="")
+        if confirm != db_name:
+            console.print("[dim]Aborted.[/dim]")
+            raise typer.Exit(0)
+
+    pool = TiDBPool(settings.tidb)
+    if not pool.health_check():
+        console.print("[red]Cannot connect to TiDB. Check your config.[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[yellow]Dropping database '{db_name}'...[/yellow]")
+    pool.execute(f"DROP DATABASE IF EXISTS `{db_name}`")
+    console.print(f"[green]Database '{db_name}' dropped.[/green]")
+
+    # Re-create with fresh connection and run all migrations
+    pool2 = TiDBPool(settings.tidb)
+    applied = run_migrations(pool2)
+    console.print(f"[green]Re-created database with {len(applied)} migrations.[/green]")
+
+    if project:
+        from myswat.cli.init_cmd import run_init
+        run_init(project, repo_path, description)
+    else:
+        console.print(
+            "\n[dim]Database is empty. Run 'myswat init <name>' to create a project.[/dim]"
+        )
+
+
 def _parse_verdict_payload(value) -> dict:
     if isinstance(value, dict):
         return value
