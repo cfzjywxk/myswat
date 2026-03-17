@@ -84,7 +84,7 @@ Ask yourself: what does the user want at the END of this?
 
 STATEMENTS = [
     (
-        "UPDATE agents SET system_prompt = %s WHERE role = 'architect' AND (system_prompt IS NULL OR system_prompt LIKE 'You are the Architect / PM for this project.%')",
+        "UPDATE agents SET system_prompt = %s WHERE role = 'architect' AND (system_prompt IS NULL OR system_prompt LIKE 'You are the Architect / PM for this project.%%')",
         (_ARCHITECT_PROMPT,),
     ),
     (
