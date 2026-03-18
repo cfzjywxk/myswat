@@ -23,6 +23,8 @@ class TestRunSingle:
         settings = MagicMock()
         settings.compaction.compaction_backend = "codex"
         settings.compaction.threshold_turns = 200
+        settings.embedding.tidb_model = "built-in"
+        settings.embedding.backend = "local"
 
         pool = MagicMock()
         store = MagicMock()
@@ -35,6 +37,7 @@ class TestRunSingle:
             "cli_path": "codex", "cli_extra_args": None,
         }
         return settings, pool, store, proj, agent_row
+
     @patch("myswat.cli.run_cmd.MySwatSettings")
     @patch("myswat.cli.run_cmd.TiDBPool")
     @patch("myswat.cli.run_cmd.run_migrations")
@@ -49,6 +52,33 @@ class TestRunSingle:
 
         with pytest.raises(ClickExit):
             run_single("missing", "do stuff")
+
+    @patch("myswat.cli.run_cmd.MySwatSettings")
+    @patch("myswat.cli.run_cmd.TiDBPool")
+    @patch("myswat.cli.run_cmd.run_migrations")
+    @patch("myswat.cli.run_cmd.MemoryStore")
+    def test_memory_store_receives_embedding_backend(
+        self,
+        mock_store_cls,
+        mock_mig,
+        mock_pool_cls,
+        mock_settings_cls,
+    ):
+        settings, pool, store, _proj, _agent = self._setup_mocks()
+        mock_settings_cls.return_value = settings
+        mock_pool_cls.return_value = pool
+        store.get_project_by_slug.return_value = None
+        mock_store_cls.return_value = store
+
+        with pytest.raises(ClickExit):
+            run_single("missing", "do stuff")
+
+        mock_store_cls.assert_called_once_with(
+            pool,
+            tidb_embedding_model="built-in",
+            embedding_backend="local",
+        )
+
     @patch("myswat.cli.run_cmd.MySwatSettings")
     @patch("myswat.cli.run_cmd.TiDBPool")
     @patch("myswat.cli.run_cmd.run_migrations")

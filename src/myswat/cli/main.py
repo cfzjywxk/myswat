@@ -200,7 +200,11 @@ def gc(
     console = Console()
     settings = MySwatSettings()
     pool = TiDBPool(settings.tidb)
-    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
+    store = MemoryStore(
+        pool,
+        tidb_embedding_model=settings.embedding.tidb_model,
+        embedding_backend=settings.embedding.backend,
+    )
 
     proj = store.get_project_by_slug(project)
     if not proj:
@@ -235,7 +239,11 @@ def history(
     console = Console()
     settings = MySwatSettings()
     pool = TiDBPool(settings.tidb)
-    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
+    store = MemoryStore(
+        pool,
+        tidb_embedding_model=settings.embedding.tidb_model,
+        embedding_backend=settings.embedding.backend,
+    )
 
     proj = store.get_project_by_slug(project)
     if not proj:
@@ -668,7 +676,11 @@ def status(
     console = Console()
     settings = MySwatSettings()
     pool = TiDBPool(settings.tidb)
-    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
+    store = MemoryStore(
+        pool,
+        tidb_embedding_model=settings.embedding.tidb_model,
+        embedding_backend=settings.embedding.backend,
+    )
 
     try:
         proj = store.get_project_by_slug(project)
@@ -907,7 +919,11 @@ def task(
     console = Console()
     settings = MySwatSettings()
     pool = TiDBPool(settings.tidb)
-    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
+    store = MemoryStore(
+        pool,
+        tidb_embedding_model=settings.embedding.tidb_model,
+        embedding_backend=settings.embedding.backend,
+    )
 
     proj = store.get_project_by_slug(project)
     if not proj:

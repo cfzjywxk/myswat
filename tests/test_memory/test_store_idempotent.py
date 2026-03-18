@@ -438,6 +438,61 @@ class TestStoreReadOperations:
         assert "VEC_COSINE_DISTANCE" not in sql
         assert "EMBEDDING" not in sql
 
+    @patch("myswat.memory.embedder.embed", return_value=None)
+    def test_search_knowledge_local_backend_disables_tidb_fallback(self, mock_embed, mock_pool):
+        """Local backend should never issue EMBEDDING() when local embedding is unavailable."""
+        mock_pool.fetch_all.return_value = []
+
+        store = MemoryStore(
+            mock_pool,
+            tidb_embedding_model="built-in",
+            embedding_backend="local",
+        )
+        store.search_knowledge(project_id=1, query="test query")
+
+        sql = mock_pool.fetch_all.call_args[0][0]
+        assert "VEC_COSINE_DISTANCE" not in sql
+        assert "EMBEDDING" not in sql
+
+    @patch("myswat.memory.embedder.embed", return_value=[0.1, 0.2, 0.3])
+    def test_search_knowledge_tidb_backend_skips_local_embedding(self, mock_embed, mock_pool):
+        """TiDB backend should use EMBEDDING() even when a local model is available."""
+        mock_pool.fetch_all.return_value = []
+
+        store = MemoryStore(
+            mock_pool,
+            tidb_embedding_model="built-in",
+            embedding_backend="tidb",
+        )
+        store.search_knowledge(project_id=1, query="test query")
+
+        sql = mock_pool.fetch_all.call_args[0][0]
+        assert "EMBEDDING('built-in', %s)" in sql
+        mock_embed.assert_not_called()
+
+    @patch("myswat.memory.embedder.embed", return_value=None)
+    def test_search_knowledge_retries_without_vector_when_embedding_function_missing(
+        self,
+        mock_embed,
+        mock_pool,
+    ):
+        """Missing TiDB EMBEDDING() should degrade to lexical search instead of failing."""
+        mock_pool.fetch_all.side_effect = [
+            pymysql.err.OperationalError(1305, "FUNCTION myswat.embedding does not exist"),
+            [],
+        ]
+
+        store = MemoryStore(mock_pool, tidb_embedding_model="built-in")
+        result = store.search_knowledge(project_id=1, query="test query")
+
+        assert result == []
+        assert mock_pool.fetch_all.call_count == 2
+        first_sql = mock_pool.fetch_all.call_args_list[0][0][0]
+        second_sql = mock_pool.fetch_all.call_args_list[1][0][0]
+        assert "EMBEDDING('built-in', %s)" in first_sql
+        assert "VEC_COSINE_DISTANCE" not in second_sql
+        assert "EMBEDDING" not in second_sql
+
     def test_create_session(self, mock_pool):
         mock_pool.insert_returning_id.return_value = 10
 

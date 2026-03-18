@@ -46,7 +46,11 @@ def search(
 
     settings = MySwatSettings()
     pool = TiDBPool(settings.tidb)
-    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
+    store = MemoryStore(
+        pool,
+        tidb_embedding_model=settings.embedding.tidb_model,
+        embedding_backend=settings.embedding.backend,
+    )
 
     proj = store.get_project_by_slug(project)
     if not proj:
@@ -149,7 +153,11 @@ def list_knowledge(
     """List knowledge entries for a project."""
     settings = MySwatSettings()
     pool = TiDBPool(settings.tidb)
-    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
+    store = MemoryStore(
+        pool,
+        tidb_embedding_model=settings.embedding.tidb_model,
+        embedding_backend=settings.embedding.backend,
+    )
 
     proj = store.get_project_by_slug(project)
     if not proj:

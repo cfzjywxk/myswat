@@ -17,7 +17,11 @@ def store(mock_pool):
 
 @pytest.fixture(autouse=True)
 def disable_embedding_resolution(monkeypatch):
-    monkeypatch.setattr(store_module.embedder, "resolve_embed_sql", lambda text, tidb_model="": ("NULL", []))
+    monkeypatch.setattr(
+        store_module.embedder,
+        "resolve_embed_sql",
+        lambda text, tidb_model="", backend="auto": ("NULL", []),
+    )
 
 
 # ── 1. get_session_turns ────────────────────────────────────────────────

@@ -75,7 +75,11 @@ def _load_project_context(
     applied = run_migrations(pool)
     if applied:
         console.print(f"[dim]Applied schema migrations: {applied}[/dim]")
-    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
+    store = MemoryStore(
+        pool,
+        tidb_embedding_model=settings.embedding.tidb_model,
+        embedding_backend=settings.embedding.backend,
+    )
 
     proj = store.get_project_by_slug(project_slug)
     if not proj:
@@ -757,7 +761,11 @@ def stop_work_item(project_slug: str, work_item_id: int) -> None:
     """Request cancellation of a detached work item."""
     settings = MySwatSettings()
     pool = TiDBPool(settings.tidb)
-    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
+    store = MemoryStore(
+        pool,
+        tidb_embedding_model=settings.embedding.tidb_model,
+        embedding_backend=settings.embedding.backend,
+    )
 
     proj = store.get_project_by_slug(project_slug)
     if not proj:

@@ -31,7 +31,11 @@ def run_single(
     settings = MySwatSettings()
     pool = TiDBPool(settings.tidb)
     run_migrations(pool)
-    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
+    store = MemoryStore(
+        pool,
+        tidb_embedding_model=settings.embedding.tidb_model,
+        embedding_backend=settings.embedding.backend,
+    )
 
     # Resolve project
     proj = store.get_project_by_slug(project_slug)
@@ -120,7 +124,11 @@ def run_with_review(
     settings = MySwatSettings()
     pool = TiDBPool(settings.tidb)
     run_migrations(pool)
-    store = MemoryStore(pool, tidb_embedding_model=settings.embedding.tidb_model)
+    store = MemoryStore(
+        pool,
+        tidb_embedding_model=settings.embedding.tidb_model,
+        embedding_backend=settings.embedding.backend,
+    )
 
     # Resolve project
     proj = store.get_project_by_slug(project_slug)

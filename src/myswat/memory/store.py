@@ -66,9 +66,15 @@ class MemoryStore:
 
     _PROCESS_LOG_LIMIT = 50
 
-    def __init__(self, pool: TiDBPool, tidb_embedding_model: str = "") -> None:
+    def __init__(
+        self,
+        pool: TiDBPool,
+        tidb_embedding_model: str = "",
+        embedding_backend: str = "auto",
+    ) -> None:
         self._pool = pool
         self._tidb_embedding_model = tidb_embedding_model
+        self._embedding_backend = (embedding_backend or "auto").strip().lower()
 
     @staticmethod
     def _parse_json_field(value: Any) -> dict[str, Any] | list[Any] | None:
@@ -78,6 +84,14 @@ class MemoryStore:
             except json.JSONDecodeError:
                 return None
         return value
+
+    @staticmethod
+    def _is_missing_embedding_function(exc: Exception) -> bool:
+        if not isinstance(exc, pymysql.err.OperationalError):
+            return False
+        code = exc.args[0] if exc.args else None
+        message = str(exc).lower()
+        return code == 1305 and "embedding" in message
 
     @staticmethod
     def _normalize_text(value: str) -> str:
@@ -659,7 +673,9 @@ class MemoryStore:
         embed_args: list[Any] = []
         if compute_embedding:
             vec_sql, embed_args = embedder.resolve_embed_sql(
-                f"{title}\n{content}", self._tidb_embedding_model,
+                f"{title}\n{content}",
+                self._tidb_embedding_model,
+                backend=self._embedding_backend,
             )
 
         merged_from = self._ensure_list_of_dicts(previous_row.get("merged_from")) or []
@@ -1551,7 +1567,9 @@ class MemoryStore:
         embed_args: list[Any] = []
         if compute_embedding:
             vec_sql, embed_args = embedder.resolve_embed_sql(
-                f"{effective_title}\n{effective_content}", self._tidb_embedding_model,
+                f"{effective_title}\n{effective_content}",
+                self._tidb_embedding_model,
+                backend=self._embedding_backend,
             )
         previous_version = int(previous.get("version") or 1)
 
@@ -1648,7 +1666,9 @@ class MemoryStore:
         embed_args: list[Any] = []
         if compute_embedding:
             vec_sql, embed_args = embedder.resolve_embed_sql(
-                f"{title}\n{content}", self._tidb_embedding_model,
+                f"{title}\n{content}",
+                self._tidb_embedding_model,
+                backend=self._embedding_backend,
             )
 
         expires_at = None
@@ -1978,7 +1998,9 @@ class MemoryStore:
 
         if use_vector and query:
             vec_sql, vec_args = embedder.resolve_embed_sql(
-                query, self._tidb_embedding_model,
+                query,
+                self._tidb_embedding_model,
+                backend=self._embedding_backend,
             )
             if vec_sql != "NULL":
                 score_parts.append(
@@ -2000,7 +2022,22 @@ class MemoryStore:
         # Combine args in SQL order: score args, where args, limit
         args = score_args + where_args + [limit]
 
-        return self._pool.fetch_all(sql, tuple(args))
+        try:
+            return self._pool.fetch_all(sql, tuple(args))
+        except pymysql.err.OperationalError as exc:
+            if use_vector and self._is_missing_embedding_function(exc):
+                return self.search_knowledge(
+                    project_id=project_id,
+                    query=query,
+                    agent_id=agent_id,
+                    category=category,
+                    tags=tags,
+                    source_type=source_type,
+                    limit=limit,
+                    use_vector=False,
+                    use_fulltext=use_fulltext,
+                )
+            raise
 
     def search_knowledge_fulltext_only(
         self, project_id: int, query: str, limit: int = 10, source_type: str | None = None,

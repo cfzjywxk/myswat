@@ -379,6 +379,17 @@ class TestResolveEmbedSql:
         assert sql == "EMBEDDING('built-in', %s)"
         assert params == ["hello"]
 
+    def test_local_mode_disables_tidb_fallback(self):
+        """Local-only mode must not fall back to TiDB when local embed is unavailable."""
+        with patch.object(embedder, "embed", return_value=None):
+            sql, params = embedder.resolve_embed_sql(
+                "hello",
+                tidb_model="built-in",
+                backend="local",
+            )
+        assert sql == "NULL"
+        assert params == []
+
     def test_local_unavailable_no_tidb_returns_null(self):
         """When local embed returns None and no tidb_model, return NULL."""
         with patch.object(embedder, "embed", return_value=None):
@@ -400,3 +411,15 @@ class TestResolveEmbedSql:
             sql, params = embedder.resolve_embed_sql("hello", tidb_model="built-in")
         assert sql == "VEC_FROM_TEXT(%s)"
         assert json.loads(params[0]) == fake_vec
+
+    def test_tidb_mode_skips_local_embed(self):
+        """TiDB-only mode should bypass local embedding entirely."""
+        with patch.object(embedder, "embed", return_value=[1.0, 2.0]) as mock_embed:
+            sql, params = embedder.resolve_embed_sql(
+                "hello",
+                tidb_model="built-in",
+                backend="tidb",
+            )
+        assert sql == "EMBEDDING('built-in', %s)"
+        assert params == ["hello"]
+        mock_embed.assert_not_called()

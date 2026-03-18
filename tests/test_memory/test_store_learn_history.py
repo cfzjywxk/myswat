@@ -79,7 +79,11 @@ def test_find_active_knowledge_filters_exact_scope(mock_pool) -> None:
 
 
 def test_replace_knowledge_updates_row_and_rebuilds_indexes(mock_pool, monkeypatch) -> None:
-    monkeypatch.setattr(store_module.embedder, "resolve_embed_sql", lambda text, tidb_model="": ("NULL", []))
+    monkeypatch.setattr(
+        store_module.embedder,
+        "resolve_embed_sql",
+        lambda text, tidb_model="", backend="auto": ("NULL", []),
+    )
     store = MemoryStore(mock_pool)
     mock_pool.fetch_one.return_value = {
         "id": 5,
@@ -125,7 +129,11 @@ def test_replace_knowledge_updates_row_and_rebuilds_indexes(mock_pool, monkeypat
 
 
 def test_replace_knowledge_raises_on_version_conflict(mock_pool, monkeypatch) -> None:
-    monkeypatch.setattr(store_module.embedder, "resolve_embed_sql", lambda text, tidb_model="": ("NULL", []))
+    monkeypatch.setattr(
+        store_module.embedder,
+        "resolve_embed_sql",
+        lambda text, tidb_model="", backend="auto": ("NULL", []),
+    )
     store = MemoryStore(mock_pool)
     mock_pool.fetch_one.return_value = {
         "id": 5,

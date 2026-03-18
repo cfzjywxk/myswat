@@ -95,7 +95,11 @@ def tidb_embed_expr(model: str) -> str:
     return f"EMBEDDING('{model}', %s)"
 
 
-def resolve_embed_sql(text: str, tidb_model: str = "") -> tuple[str, list]:
+def resolve_embed_sql(
+    text: str,
+    tidb_model: str = "",
+    backend: str = "auto",
+) -> tuple[str, list]:
     """Decide how to embed *text* and return (sql_fragment, params).
 
     Returns one of:
@@ -106,12 +110,19 @@ def resolve_embed_sql(text: str, tidb_model: str = "") -> tuple[str, list]:
     The caller splices the sql_fragment into the INSERT/SELECT and appends
     params to its argument list.
     """
-    # Try local first
-    vec = embed(text)
-    if vec is not None:
-        return "VEC_FROM_TEXT(%s)", [embedding_to_sql(vec)]
+    mode = (backend or "auto").strip().lower()
+    if mode not in {"auto", "local", "tidb"}:
+        mode = "auto"
 
-    # Fall back to TiDB built-in
+    # Try local first unless TiDB-only mode was requested.
+    if mode != "tidb":
+        vec = embed(text)
+        if vec is not None:
+            return "VEC_FROM_TEXT(%s)", [embedding_to_sql(vec)]
+        if mode == "local":
+            return "NULL", []
+
+    # Fall back to TiDB built-in when allowed.
     if tidb_model:
         return tidb_embed_expr(tidb_model), [text]
 
