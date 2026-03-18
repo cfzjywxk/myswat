@@ -135,8 +135,10 @@ def test_drop_redundant_document_sources_index_migration_defines_expected_sql() 
     assert "DROP INDEX idx_project_source_file ON document_sources" in sql
 
 
-def test_learn_request_run_migration_registered_last() -> None:
-    assert MIGRATION_MODULES[-1] == "myswat.db.migrations.v014_learn_requests_and_runs"
+def test_learn_request_run_migration_registered_before_v015() -> None:
+    idx_v014 = MIGRATION_MODULES.index("myswat.db.migrations.v014_learn_requests_and_runs")
+    idx_v015 = MIGRATION_MODULES.index("myswat.db.migrations.v015_workflow_mode_alignment")
+    assert idx_v014 < idx_v015
     assert v014_learn_requests_and_runs.VERSION == 14
 
 

@@ -2387,6 +2387,19 @@ class MemoryStore:
             (work_item_id,),
         )
 
+    def get_latest_artifact_by_type(self, work_item_id: int, artifact_type: str) -> dict | None:
+        """Return the most recently modified artifact of a given type, or None.
+
+        Orders by updated_at (not id or iteration) so that in-place upserts
+        are correctly ranked above older rows with higher ids.
+        """
+        rows = self._pool.fetch_all(
+            "SELECT * FROM artifacts WHERE work_item_id = %s AND artifact_type = %s "
+            "ORDER BY updated_at DESC, id DESC LIMIT 1",
+            (work_item_id, artifact_type),
+        )
+        return rows[0] if rows else None
+
     # ──────────────────────────── Review Cycles ────────────────────────────
 
     def create_review_cycle(

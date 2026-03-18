@@ -59,6 +59,8 @@ def _make_engine(
     max_review: int = 5,
     store=None,
     mode: WorkMode = WorkMode.full,
+    resume_stage: str | None = None,
+    arch_sm=None,
 ):
     """Build a WorkflowEngine with fake session managers."""
     dev_sm = make_fake_session_manager(
@@ -87,6 +89,8 @@ def _make_engine(
         max_review_iterations=max_review,
         mode=mode,
         ask_user=ask,
+        resume_stage=resume_stage,
+        arch_sm=arch_sm,
     )
     return engine, dev_sm, qa_sms
 
@@ -1484,6 +1488,52 @@ class TestRunBugFixArchChange:
         assert len(result.phases) == 2
         assert "2" in result.final_report  # "Phases: 2"
 
+    def test_review_loops_disable_artifact_persistence(self):
+        """Bug-fix review loops should not overwrite top-level review artifacts."""
+        engine, _, _ = _make_engine()
+        phase_result = PhaseResult(name="fix-phase", summary="done", review_iterations=1, committed=True)
+        with patch.object(engine, "_run_design", return_value="new design"):
+            with patch.object(engine, "_run_review_loop", side_effect=[
+                ("reviewed design", 1, True), ("reviewed plan", 1, True),
+            ]) as m_review:
+                with patch.object(engine, "_user_checkpoint", side_effect=[
+                    "approved design", "approved plan",
+                ]):
+                    with patch.object(engine, "_run_planning", return_value="new plan"):
+                        with patch.object(engine, "_parse_phases", return_value=["fix-phase"]):
+                            with patch.object(engine, "_run_phase", return_value=phase_result):
+                                engine._run_bug_fix_arch_change(
+                                    {"title": "critical bug", "description": "desc"},
+                                    "req", "design",
+                                )
+
+        assert m_review.call_count == 2
+        for call in m_review.call_args_list:
+            assert call.kwargs["persist_artifacts"] is False
+
+    def test_checkpoints_disable_artifact_persistence(self):
+        """Bug-fix checkpoints should not overwrite top-level checkpoint artifacts."""
+        engine, _, _ = _make_engine()
+        phase_result = PhaseResult(name="fix-phase", summary="done", review_iterations=1, committed=True)
+        with patch.object(engine, "_run_design", return_value="new design"):
+            with patch.object(engine, "_run_review_loop", side_effect=[
+                ("reviewed design", 1, True), ("reviewed plan", 1, True),
+            ]):
+                with patch.object(engine, "_user_checkpoint", side_effect=[
+                    "approved design", "approved plan",
+                ]) as m_checkpoint:
+                    with patch.object(engine, "_run_planning", return_value="new plan"):
+                        with patch.object(engine, "_parse_phases", return_value=["fix-phase"]):
+                            with patch.object(engine, "_run_phase", return_value=phase_result):
+                                engine._run_bug_fix_arch_change(
+                                    {"title": "critical bug", "description": "desc"},
+                                    "req", "design",
+                                )
+
+        assert m_checkpoint.call_count == 2
+        for call in m_checkpoint.call_args_list:
+            assert call.kwargs["persist_artifact"] is False
+
 
 # ===================================================================
 # 9. _run_review_loop edge cases  (lines 746-747, 759-760, 771,
@@ -1696,6 +1746,28 @@ class TestRunReviewLoopEdgeCases:
         assert passed is False
         assert result == "revised"
 
+    def test_persist_artifacts_false_skips_all_persistence(self):
+        """Opting out skips both per-iteration and final draft artifact writes."""
+        store = MagicMock()
+        store.create_artifact.return_value = 42
+        store.create_review_cycle.return_value = 99
+        engine, dev, qas = _make_engine(store=store, max_review=1)
+        qas[0].send.return_value = _ok(_changes_json(["issue"]))
+        dev.send.return_value = _ok("revised")
+
+        result, iters, passed = engine._run_review_loop(
+            artifact="original",
+            artifact_type="design",
+            context="ctx",
+            persist_artifacts=False,
+        )
+
+        assert result == "revised"
+        assert iters == 1
+        assert passed is False
+        store.create_artifact.assert_not_called()
+        store.create_review_cycle.assert_not_called()
+
     def test_review_cycle_persistence_error(self):
         """Exception during create_review_cycle is caught."""
         store = MagicMock()
@@ -1893,6 +1965,287 @@ class TestUserCheckpoint:
         result = engine._user_checkpoint("v1", "code", "Approve?")
         assert result == "v3"
         assert dev.send.call_count == 2
+
+    def test_feedback_persists_revised_artifact(self):
+        """Post-feedback revision is persisted so resume loads the right version."""
+        store = MagicMock()
+        store.create_artifact.return_value = 42
+        store.create_review_cycle.return_value = 99
+        ask_mock = MagicMock(side_effect=["make it better", "y"])
+        engine, dev, _ = _make_engine(store=store, ask_return=ask_mock)
+        dev.send.return_value = _ok("improved design")
+
+        result = engine._user_checkpoint("original", "design", "Approve?")
+
+        assert result == "improved design"
+        store.create_artifact.assert_called_once()
+        call_kwargs = store.create_artifact.call_args[1]
+        assert call_kwargs["artifact_type"] == "design_doc"
+        assert call_kwargs["content"] == "improved design"
+        assert call_kwargs["metadata_json"]["source"] == "user_checkpoint"
+
+    def test_feedback_persists_plan_as_proposal(self):
+        """Plan revisions are persisted with artifact_type 'proposal'."""
+        store = MagicMock()
+        store.create_artifact.return_value = 42
+        store.create_review_cycle.return_value = 99
+        ask_mock = MagicMock(side_effect=["add phase 3", "y"])
+        engine, dev, _ = _make_engine(store=store, ask_return=ask_mock)
+        dev.send.return_value = _ok("revised plan")
+
+        result = engine._user_checkpoint("original plan", "plan", "Approve?")
+
+        assert result == "revised plan"
+        call_kwargs = store.create_artifact.call_args[1]
+        assert call_kwargs["artifact_type"] == "proposal"
+
+    def test_feedback_each_round_persisted(self):
+        """Multiple feedback rounds each persist the revised artifact."""
+        store = MagicMock()
+        store.create_artifact.return_value = 42
+        store.create_review_cycle.return_value = 99
+        ask_mock = MagicMock(side_effect=["fix A", "fix B", "y"])
+        engine, dev, _ = _make_engine(store=store, ask_return=ask_mock)
+        dev.send.side_effect = [_ok("v2"), _ok("v3")]
+
+        result = engine._user_checkpoint("v1", "design", "Approve?")
+
+        assert result == "v3"
+        assert store.create_artifact.call_count == 2
+        # Last persisted version should be v3
+        last_call_kwargs = store.create_artifact.call_args_list[-1][1]
+        assert last_call_kwargs["content"] == "v3"
+
+    def test_feedback_persist_failure_does_not_crash(self):
+        """If artifact persistence fails, checkpoint still returns the revision."""
+        store = MagicMock()
+        store.create_artifact.side_effect = RuntimeError("DB down")
+        store.create_review_cycle.return_value = 99
+        ask_mock = MagicMock(side_effect=["feedback", "y"])
+        engine, dev, _ = _make_engine(store=store, ask_return=ask_mock)
+        dev.send.return_value = _ok("revised")
+
+        result = engine._user_checkpoint("original", "design", "Approve?")
+
+        assert result == "revised"
+
+    def test_no_persist_when_no_work_item(self):
+        """Without a work_item_id, skip artifact persistence."""
+        store = MagicMock()
+        store.create_artifact.return_value = 42
+        store.create_review_cycle.return_value = 99
+        ask_mock = MagicMock(side_effect=["feedback", "y"])
+        engine, dev, _ = _make_engine(store=store, work_item_id=0, ask_return=ask_mock)
+        dev.send.return_value = _ok("revised")
+
+        result = engine._user_checkpoint("original", "design", "Approve?")
+
+        assert result == "revised"
+        store.create_artifact.assert_not_called()
+
+    def test_persist_artifact_false_skips_persist(self):
+        """Callers can opt out of checkpoint artifact persistence."""
+        store = MagicMock()
+        store.create_artifact.return_value = 42
+        store.create_review_cycle.return_value = 99
+        ask_mock = MagicMock(side_effect=["feedback", "y"])
+        engine, dev, _ = _make_engine(store=store, ask_return=ask_mock)
+        dev.send.return_value = _ok("revised")
+
+        result = engine._user_checkpoint(
+            "original", "design", "Approve?", persist_artifact=False,
+        )
+
+        assert result == "revised"
+        store.create_artifact.assert_not_called()
+
+    def test_resume_loads_post_feedback_version(self):
+        """End-to-end: review-loop artifact at iteration 3, checkpoint at iteration 0.
+
+        Simulates the DB with updated_at tracking to confirm _load_latest_artifact
+        returns the checkpoint revision (latest updated_at) not the review-loop
+        version (higher iteration or id).
+        """
+        artifacts_db, store = _make_fake_artifact_store()
+
+        # 1) Simulate review loop persisting at iterations 1-3
+        for i in range(1, 4):
+            store.create_artifact(
+                work_item_id=1, agent_id=10, iteration=i,
+                artifact_type="design_doc", title=f"review v{i}",
+                content=f"review version {i}", metadata_json={},
+            )
+
+        # 2) Now user gives feedback at checkpoint
+        ask_mock = MagicMock(side_effect=["please revise", "y"])
+        engine, dev, _ = _make_engine(store=store, ask_return=ask_mock)
+        dev.send.return_value = _ok("user-approved final design")
+        engine._user_checkpoint("review version 3", "design", "Approve?")
+
+        # 3) Verify resume would load the post-feedback version
+        loaded = engine._load_latest_artifact("design_doc")
+        assert loaded is not None
+        assert loaded["content"] == "user-approved final design"
+
+    def test_resume_after_upsert_loads_updated_row(self):
+        """Upsert scenario: review-loop updates an older row in place.
+
+        Run 1: review loop creates iter 1-3, user gives feedback → checkpoint iter 0.
+        Run 2 (resume design_review): review loop upserts iter 1-3. User approves
+        with no feedback (no new checkpoint row).
+        Resume from plan: must load the upserted iter 3 (latest updated_at),
+        NOT the stale checkpoint at iter 0 (higher id but older updated_at).
+        """
+        artifacts_db, store = _make_fake_artifact_store()
+
+        # Run 1: review loop creates iterations 1-3
+        for i in range(1, 4):
+            store.create_artifact(
+                work_item_id=1, agent_id=10, iteration=i,
+                artifact_type="design_doc", title=f"review v{i}",
+                content=f"run1 review {i}", metadata_json={},
+            )
+        # Run 1: user checkpoint creates iteration 0 (gets highest id so far)
+        store.create_artifact(
+            work_item_id=1, agent_id=10, iteration=0,
+            artifact_type="design_doc", title="checkpoint",
+            content="run1 user-approved", metadata_json={},
+        )
+
+        # Run 2: review loop upserts iterations 1-3 (updates existing rows)
+        for i in range(1, 4):
+            store.create_artifact(
+                work_item_id=1, agent_id=10, iteration=i,
+                artifact_type="design_doc", title=f"review v{i} run2",
+                content=f"run2 review {i}", metadata_json={},
+            )
+        # Run 2: user approves with "y" — NO checkpoint write
+
+        # Resume from plan: must load the latest-modified artifact
+        engine, _, _ = _make_engine(store=store)
+        loaded = engine._load_latest_artifact("design_doc")
+        assert loaded is not None
+        # Must be the upserted run2 content, not the stale run1 checkpoint
+        assert loaded["content"] == "run2 review 3"
+
+    @pytest.mark.parametrize(
+        ("workflow_artifact_type", "db_artifact_type", "main_content", "sub_content"),
+        [
+            ("design", "design_doc", "main approved design", "bug-fix reviewed design"),
+            ("plan", "proposal", "main approved plan", "bug-fix reviewed plan"),
+        ],
+    )
+    def test_subworkflow_review_loop_does_not_clobber_main_artifacts(
+        self,
+        workflow_artifact_type,
+        db_artifact_type,
+        main_content,
+        sub_content,
+    ):
+        """Bug-fix review loops and checkpoints leave the main artifact as latest."""
+        artifacts_db, store = _make_fake_artifact_store()
+
+        for i in range(1, 4):
+            store.create_artifact(
+                work_item_id=1,
+                agent_id=10,
+                iteration=i,
+                artifact_type=db_artifact_type,
+                title=f"main review v{i}",
+                content=f"main review {i}",
+                metadata_json={"source": "review_loop"},
+            )
+        store.create_artifact(
+            work_item_id=1,
+            agent_id=10,
+            iteration=0,
+            artifact_type=db_artifact_type,
+            title="main checkpoint",
+            content=main_content,
+            metadata_json={"source": "user_checkpoint"},
+        )
+
+        engine, _, qas = _make_engine(store=store, ask_return="y", max_review=1)
+        qas[0].send.return_value = _ok(_lgtm_json())
+
+        reviewed, iters, passed = engine._run_review_loop(
+            artifact=sub_content,
+            artifact_type=workflow_artifact_type,
+            context="Bug fix context",
+            persist_artifacts=False,
+        )
+        approved = engine._user_checkpoint(
+            reviewed,
+            workflow_artifact_type,
+            "Approve?",
+            persist_artifact=False,
+        )
+
+        assert approved == sub_content
+        assert iters == 1
+        assert passed is True
+        loaded = engine._load_latest_artifact(db_artifact_type)
+        assert loaded is not None
+        assert loaded["content"] == main_content
+        assert len(artifacts_db) == 4
+
+
+def _make_fake_artifact_store():
+    """Build a fake store that simulates real DB upsert + updated_at ordering.
+
+    Returns (artifacts_db list, configured MagicMock store).
+    """
+    from datetime import datetime, timedelta
+
+    artifacts_db: list[dict] = []
+    next_id = [0]
+    clock = [datetime(2026, 1, 1)]
+
+    def _tick():
+        clock[0] += timedelta(seconds=1)
+        return clock[0]
+
+    def fake_create_artifact(**kwargs):
+        wi = kwargs.get("work_item_id")
+        ai = kwargs.get("agent_id")
+        it = kwargs.get("iteration")
+        at = kwargs.get("artifact_type")
+        # Upsert: match on (work_item_id, agent_id, iteration, artifact_type)
+        for row in artifacts_db:
+            if (row.get("work_item_id") == wi and row.get("agent_id") == ai
+                    and row.get("iteration") == it and row.get("artifact_type") == at):
+                row["content"] = kwargs.get("content")
+                row["title"] = kwargs.get("title")
+                row["metadata_json"] = kwargs.get("metadata_json")
+                row["updated_at"] = _tick()
+                return row["id"]
+        next_id[0] += 1
+        now = _tick()
+        artifacts_db.append({
+            "id": next_id[0],
+            **kwargs,
+            "created_at": now,
+            "updated_at": now,
+        })
+        return next_id[0]
+
+    def fake_get_latest(work_item_id, artifact_type):
+        matches = [
+            a for a in artifacts_db
+            if a.get("work_item_id") == work_item_id
+            and a.get("artifact_type") == artifact_type
+        ]
+        if not matches:
+            return None
+        # Mirrors the fixed store: ORDER BY updated_at DESC, id DESC LIMIT 1
+        return max(matches, key=lambda a: (a["updated_at"], a["id"]))
+
+    store = MagicMock()
+    store.create_artifact.side_effect = fake_create_artifact
+    store.create_review_cycle.return_value = 99
+    store.get_latest_artifact_by_type.side_effect = fake_get_latest
+    store.list_artifacts.return_value = []
+    return artifacts_db, store
 
 
 # ===================================================================
@@ -2355,3 +2708,383 @@ class TestReviewLoopPlanReviewPrompt:
         # Verify the QA reviewer was called with a prompt containing the plan
         call_args = qas[0].send.call_args[0][0]
         assert "plan content" in call_args
+
+
+# ===================================================================
+# Resume tests
+# ===================================================================
+
+
+class TestResumeCompletedWorkflow:
+    """Issue 1: resuming a completed workflow must not downgrade status."""
+
+    @pytest.mark.parametrize("mode", [WorkMode.full, WorkMode.design, WorkMode.develop, WorkMode.test])
+    def test_resume_completed_returns_success(self, mode):
+        engine, dev, qas = _make_engine(
+            mode=mode, resume_stage="workflow_completed",
+        )
+        result = engine.run("some req")
+        assert result.success is True
+        assert "already completed" in result.final_report.lower()
+
+    def test_resume_finished_with_issues_reruns_from_start(self):
+        """workflow_finished_with_issues is NOT treated as done — it re-runs."""
+        engine, dev, qas = _make_engine(
+            mode=WorkMode.full,
+            resume_stage="workflow_finished_with_issues",
+            dev_responses=[
+                "design",           # Stage 1: _run_design
+                "plan",             # Stage 3: _run_planning
+                "impl",             # Stage 5: _run_phase implement
+                "summary",          # Stage 5: _run_phase summarize
+                "committed",        # Stage 5: _run_phase commit
+                _lgtm_json(),       # Stage 6: test plan review (dev is reviewer)
+                "report",           # Stage 7: _generate_report
+            ],
+            qa_responses=[
+                _ok(_lgtm_json()),  # Stage 2: design review
+                _ok(_lgtm_json()),  # Stage 4: plan review
+                _ok(_lgtm_json()),  # Stage 5: code review
+                _ok("test plan"),   # Stage 6: GA test plan generation
+                _ok("PASS"),        # Stage 6: GA test execute
+            ],
+        )
+        result = engine.run("some req")
+        # Should have actually run the workflow, not returned early
+        assert result.design is not None
+        assert dev.send.call_count > 0
+
+
+class TestResumeDoesNotClobberStage:
+    """Issue 1: run() must not overwrite current_stage to workflow_started on resume."""
+
+    def test_resume_skips_startup_persist(self):
+        store = MagicMock()
+        store.create_artifact.return_value = 42
+        store.create_review_cycle.return_value = 99
+        engine, dev, qas = _make_engine(
+            store=store,
+            mode=WorkMode.full,
+            resume_stage="workflow_completed",
+        )
+        engine.run("req")
+
+        # _persist_task_state should NOT have been called with "workflow_started"
+        for c in store.update_work_item.call_args_list:
+            args, kwargs = c
+            if len(args) > 1 and isinstance(args[1], dict):
+                meta = args[1]
+            elif kwargs:
+                meta = kwargs
+            else:
+                continue
+            task_state = meta.get("metadata_json", {})
+            if isinstance(task_state, str):
+                task_state = json.loads(task_state)
+            task_state = task_state.get("task_state", {})
+            assert task_state.get("current_stage") != "workflow_started"
+
+
+class TestResumeDesignModeSkipsCompletedStages:
+    """Issue 2: design mode must respect resume_stage."""
+
+    def test_resume_from_plan_approved_skips_review(self):
+        """resume_stage=plan_approved should skip design + plan and finalize."""
+        store = MagicMock()
+        store.create_artifact.return_value = 42
+        store.create_review_cycle.return_value = 99
+        store.get_latest_artifact_by_type.side_effect = lambda wi, at: (
+            {"content": "loaded design"} if at == "design_doc"
+            else {"content": "loaded plan"} if at == "proposal"
+            else None
+        )
+        engine, dev, qas = _make_engine(
+            store=store,
+            mode=WorkMode.design,
+            resume_stage="plan_approved",
+        )
+        result = engine.run("req")
+
+        # Dev and QA should NOT have been called (all stages skipped)
+        dev.send.assert_not_called()
+        qas[0].send.assert_not_called()
+        # Result should show success with both reviews marked passed
+        assert result.success is True
+        assert result.design_review_passed is True
+        assert result.plan_review_passed is True
+
+    def test_resume_from_plan_draft_skips_design(self):
+        """resume_stage=plan_draft should skip design, re-run planning + plan review."""
+        store = MagicMock()
+        store.create_artifact.return_value = 42
+        store.create_review_cycle.return_value = 99
+        store.get_latest_artifact_by_type.return_value = {"content": "loaded design"}
+
+        engine, dev, qas = _make_engine(
+            store=store,
+            mode=WorkMode.design,
+            resume_stage="plan_draft",
+            dev_responses=["new plan"],
+            qa_responses=[_ok(_lgtm_json())],
+        )
+        result = engine.run("req")
+
+        # Dev should produce the plan (not design)
+        assert dev.send.call_count == 1
+        assert result.plan is not None
+        assert result.design_review_passed is True  # skipped = assumed passed
+
+
+class TestResumeDevelopMode:
+    """Issue 2: develop mode must respect resume_stage for phase skipping."""
+
+    def test_resume_from_phase_2_skips_phase_1(self):
+        store = MagicMock()
+        store.create_artifact.return_value = 42
+        store.create_review_cycle.return_value = 99
+        # Phase 1 artifact for reconstruction
+        store.list_artifacts.return_value = [
+            {
+                "artifact_type": "phase_result",
+                "iteration": 1,
+                "content": "Phase 1 done",
+                "metadata_json": json.dumps({
+                    "name": "Phase 1",
+                    "review_iterations": 1,
+                    "review_passed": True,
+                    "committed": True,
+                }),
+            },
+        ]
+
+        # Dev: implement phase 2, summarize, commit, final report
+        engine, dev, qas = _make_engine(
+            store=store,
+            mode=WorkMode.develop,
+            resume_stage="phase_1_committed",
+            # The requirement is the plan in develop mode — two phases
+            dev_responses=["implemented", "summary: done", "committed", "final report"],
+            qa_responses=[_ok(_lgtm_json())],
+        )
+        result = engine.run("Phase 1: setup\nPhase 2: implement")
+
+        # Phase 1 was loaded from artifacts, phase 2 was run
+        assert len(result.phases) == 2
+        assert result.phases[0].name == "Phase 1"  # loaded
+        assert result.phases[0].committed is True
+
+
+class TestResumeTestMode:
+    """Issue 2: test mode must respect resume_stage for done state."""
+
+    def test_resume_completed_test_returns_success(self):
+        engine, dev, qas = _make_engine(
+            mode=WorkMode.test,
+            resume_stage="workflow_completed",
+        )
+        result = engine.run("test req")
+        assert result.success is True
+        dev.send.assert_not_called()
+        qas[0].send.assert_not_called()
+
+
+class TestResumePhaseCodeReviewPreservesIndex:
+    """Phase code review stages must include the phase index."""
+
+    def test_phase_code_review_stage_includes_phase_index(self):
+        """_run_phase should persist phase_N_code_review, not code_review."""
+        store = MagicMock()
+        store.create_artifact.return_value = 42
+        store.create_review_cycle.return_value = 99
+
+        engine, dev, qas = _make_engine(
+            store=store,
+            mode=WorkMode.develop,
+            dev_responses=["implemented", "summary: done", "committed"],
+            qa_responses=[_ok(_lgtm_json())],
+        )
+        # Run just one phase
+        engine._run_phase(
+            phase_name="setup",
+            phase_index=3,
+            total_phases=5,
+            requirement="req",
+            design="design",
+            plan="plan",
+            completed_summaries=[],
+        )
+
+        # Check that _persist_task_state was called with phase_3_code_approved
+        stage_names = []
+        for c in store.update_work_item.call_args_list:
+            args = c[0] if c[0] else ()
+            kwargs = c[1] if len(c) > 1 else c.kwargs
+            meta = kwargs.get("metadata_json") or (args[1] if len(args) > 1 else {})
+            if isinstance(meta, str):
+                meta = json.loads(meta)
+            ts = meta.get("task_state", {})
+            if ts.get("current_stage"):
+                stage_names.append(ts["current_stage"])
+
+        # Should contain phase_3_code_approved, not code_approved
+        code_stages = [s for s in stage_names if "code" in s]
+        for s in code_stages:
+            assert "phase_3" in s, f"Stage {s!r} should include phase index"
+
+    def test_resume_phase_index_parses_code_review_stage(self):
+        """_resume_phase_index should return N for phase_N_code_review."""
+        engine, _, _ = _make_engine(
+            mode=WorkMode.develop,
+            resume_stage="phase_3_code_review",
+        )
+        assert engine._resume_phase_index() == 3
+
+    def test_resume_phase_index_parses_code_approved_stage(self):
+        """phase_N_code_approved means phase N is done → return N+1."""
+        engine, _, _ = _make_engine(
+            mode=WorkMode.develop,
+            resume_stage="phase_2_code_approved",
+        )
+        # code_approved != "committed", so returns N (re-run commit step)
+        assert engine._resume_phase_index() == 2
+
+
+class TestResumeStubPhases:
+    """Pre-migration items without phase_result artifacts get stub phases."""
+
+    def test_stub_phases_filled_when_artifacts_missing(self):
+        store = MagicMock()
+        store.create_artifact.return_value = 42
+        store.create_review_cycle.return_value = 99
+        store.list_artifacts.return_value = []  # no phase_result artifacts
+
+        engine, _, _ = _make_engine(store=store, mode=WorkMode.develop)
+        phases = engine._load_completed_phases(before_phase=4)
+
+        assert len(phases) == 3  # stubs for phases 1, 2, 3
+        for p in phases:
+            assert p.committed is True
+            assert "prior run" in p.summary
+
+    def test_partial_artifacts_filled_with_stubs(self):
+        store = MagicMock()
+        store.create_artifact.return_value = 42
+        store.create_review_cycle.return_value = 99
+        store.list_artifacts.return_value = [
+            {
+                "artifact_type": "phase_result",
+                "iteration": 1,
+                "content": "Phase 1 done",
+                "metadata_json": json.dumps({
+                    "name": "Setup",
+                    "review_iterations": 1,
+                    "review_passed": True,
+                    "committed": True,
+                }),
+            },
+        ]
+
+        engine, _, _ = _make_engine(store=store, mode=WorkMode.develop)
+        phases = engine._load_completed_phases(before_phase=4)
+
+        assert len(phases) == 3
+        assert phases[0].name == "Setup"  # real artifact
+        assert "prior run" in phases[1].summary  # stub
+        assert "prior run" in phases[2].summary  # stub
+
+    def test_no_before_phase_uses_expected_count(self):
+        """Resuming from ga_test (no before_phase) with expected_count fills stubs."""
+        store = MagicMock()
+        store.create_artifact.return_value = 42
+        store.create_review_cycle.return_value = 99
+        store.list_artifacts.return_value = []  # pre-migration, no artifacts
+
+        engine, _, _ = _make_engine(store=store, mode=WorkMode.develop)
+        phases = engine._load_completed_phases(expected_count=3)
+
+        assert len(phases) == 3
+        for i, p in enumerate(phases, 1):
+            assert p.name == f"Phase {i}"
+            assert p.committed is True
+            assert "prior run" in p.summary
+
+    def test_no_before_phase_uses_max_artifact_index(self):
+        """Without before_phase or expected_count, max artifact index determines count."""
+        store = MagicMock()
+        store.create_artifact.return_value = 42
+        store.create_review_cycle.return_value = 99
+        store.list_artifacts.return_value = [
+            {
+                "artifact_type": "phase_result",
+                "iteration": 3,
+                "content": "Phase 3 done",
+                "metadata_json": json.dumps({
+                    "name": "Final",
+                    "review_iterations": 1,
+                    "review_passed": True,
+                    "committed": True,
+                }),
+            },
+        ]
+
+        engine, _, _ = _make_engine(store=store, mode=WorkMode.develop)
+        phases = engine._load_completed_phases()  # no before_phase, no expected_count
+
+        assert len(phases) == 3
+        assert "prior run" in phases[0].summary  # stub for phase 1
+        assert "prior run" in phases[1].summary  # stub for phase 2
+        assert phases[2].name == "Final"  # real artifact at phase 3
+
+    def test_non_contiguous_artifacts_slotted_correctly(self):
+        """Phase 2 artifact with before_phase=4 puts it at position 2, not 1."""
+        store = MagicMock()
+        store.create_artifact.return_value = 42
+        store.create_review_cycle.return_value = 99
+        store.list_artifacts.return_value = [
+            {
+                "artifact_type": "phase_result",
+                "iteration": 2,
+                "content": "Phase 2 done",
+                "metadata_json": json.dumps({
+                    "name": "Two",
+                    "review_iterations": 1,
+                    "review_passed": True,
+                    "committed": True,
+                }),
+            },
+        ]
+
+        engine, _, _ = _make_engine(store=store, mode=WorkMode.develop)
+        phases = engine._load_completed_phases(before_phase=4)
+
+        assert len(phases) == 3
+        assert "prior run" in phases[0].summary  # stub for missing phase 1
+        assert phases[1].name == "Two"  # real artifact at correct slot
+        assert "prior run" in phases[2].summary  # stub for missing phase 3
+
+    def test_summaries_non_contiguous_numbered_correctly(self):
+        """Phase summaries use correct numbering even with non-contiguous artifacts."""
+        store = MagicMock()
+        store.create_artifact.return_value = 42
+        store.create_review_cycle.return_value = 99
+        store.list_artifacts.return_value = [
+            {
+                "artifact_type": "phase_result",
+                "iteration": 2,
+                "content": "Phase 2 done",
+                "metadata_json": json.dumps({
+                    "name": "Two",
+                    "review_iterations": 1,
+                    "review_passed": True,
+                    "committed": True,
+                }),
+            },
+        ]
+
+        engine, _, _ = _make_engine(store=store, mode=WorkMode.develop)
+        summaries = engine._load_completed_phase_summaries(before_phase=4)
+
+        assert len(summaries) == 3
+        assert summaries[0].startswith("Phase 1 (Phase 1)")  # stub
+        assert summaries[1].startswith("Phase 2 (Two)")  # real, correct number
+        assert summaries[2].startswith("Phase 3 (Phase 3)")  # stub
