@@ -18,6 +18,7 @@ from rich.table import Table
 from myswat.agents.base import AgentRunner
 from myswat.agents.factory import make_runner_from_row
 from myswat.agents.session_manager import SessionManager
+from myswat.cli.prompting import create_prompt_session, make_prompt_callback
 from myswat.cli.progress import (
     _build_live_display,
     _check_esc,
@@ -57,6 +58,20 @@ HELP_TEXT = """
   /new                  Start a new session (close current)
   /quit, /exit, Ctrl+D  Exit chat
 """
+
+
+def _build_prompt_session(
+    settings: MySwatSettings,
+    history_name: str,
+) -> PromptSession[str]:
+    return create_prompt_session(
+        config_path=settings.config_path,
+        history_name=history_name,
+        prompt_session_factory=PromptSession,
+        key_bindings_factory=KeyBindings,
+    )
+
+
 def _extract_delegation(text: str) -> tuple[str, str] | None:
     """Extract a delegation task and mode from an agent response.
 
@@ -153,18 +168,7 @@ def run_chat(
     if sm is None:
         raise typer.Exit(1)
 
-    # Multi-line prompt: Enter submits, Alt+Enter inserts newline (like codex CLI)
-    _bindings = KeyBindings()
-
-    @_bindings.add("escape", "enter")
-    def _newline(event):
-        event.current_buffer.insert_text("\n")
-
-    prompt_session: PromptSession[str] = PromptSession(
-        multiline=False,
-        key_bindings=_bindings,
-        prompt_continuation="... ",
-    )
+    prompt_session = _build_prompt_session(settings, f"chat-{project_slug}")
 
     # REPL
     while True:
@@ -601,18 +605,7 @@ def _run_inline_review(
 
 
 def _make_prompt_callback(prompt_session: PromptSession | None = None) -> Callable[[str], str]:
-    def ask_user(prompt_text: str) -> str:
-        if prompt_session:
-            try:
-                return prompt_session.prompt(prompt_text, multiline=False).strip()
-            except (EOFError, KeyboardInterrupt):
-                return "n"
-        try:
-            return input(f"\n{prompt_text}").strip()
-        except (EOFError, KeyboardInterrupt):
-            return "n"
-
-    return ask_user
+    return make_prompt_callback(prompt_session)
 
 
 def _run_design_review(

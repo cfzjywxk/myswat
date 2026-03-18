@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch, PropertyMock
 import pytest
 import typer
 from click.exceptions import Exit as ClickExit
+from prompt_toolkit.enums import EditingMode
+from prompt_toolkit.history import FileHistory
 
 from myswat.agents.base import AgentResponse
 from myswat.workflow.engine import WorkMode
@@ -588,6 +590,50 @@ class TestRunChat:
         settings.compaction.threshold_turns = 200
         settings.workflow.max_review_iterations = 5
         return settings
+
+    @patch("myswat.cli.chat_cmd.PromptSession")
+    @patch("myswat.cli.chat_cmd.preload_model")
+    @patch("myswat.cli.chat_cmd.MySwatSettings")
+    @patch("myswat.cli.chat_cmd.TiDBPool")
+    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.MemoryStore")
+    @patch("myswat.cli.chat_cmd.SessionManager")
+    def test_chat_uses_emacs_prompt_session(
+        self,
+        mock_sm_cls,
+        mock_store_cls,
+        mock_mig,
+        mock_pool_cls,
+        mock_settings_cls,
+        mock_preload,
+        mock_prompt_session_cls,
+    ):
+        from myswat.cli.chat_cmd import run_chat
+
+        settings = self._setup_mocks()
+        mock_settings_cls.return_value = settings
+
+        agent_row = _agent_row()
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = _proj()
+        mock_store.get_agent.return_value = agent_row
+        mock_store.list_agents.return_value = [agent_row]
+        mock_store_cls.return_value = mock_store
+
+        sm = MagicMock()
+        sm.session = SimpleNamespace(session_uuid="uuid-1234")
+        mock_sm_cls.return_value = sm
+
+        prompt_session = MagicMock()
+        prompt_session.prompt.return_value = "/quit"
+        mock_prompt_session_cls.return_value = prompt_session
+
+        run_chat("proj")
+
+        kwargs = mock_prompt_session_cls.call_args.kwargs
+        assert kwargs["editing_mode"] == EditingMode.EMACS
+        assert kwargs["enable_history_search"] is True
+        assert isinstance(kwargs["history"], FileHistory)
 
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")

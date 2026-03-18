@@ -8,6 +8,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import typer
 from click.exceptions import Exit as ClickExit
+from prompt_toolkit.enums import EditingMode
+from prompt_toolkit.history import FileHistory
 
 from myswat.workflow.engine import WorkMode
 
@@ -112,14 +114,15 @@ class TestRunWork:
 
     @patch("myswat.cli.work_cmd.WorkflowEngine")
     @patch("myswat.cli.work_cmd.submit_workflow_summary_learn_request")
+    @patch("myswat.cli.work_cmd.PromptSession")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.run_migrations")
     @patch("myswat.cli.work_cmd.MemoryStore")
     @patch("myswat.cli.work_cmd.SessionManager")
     def test_success(self, mock_sm_cls, mock_store_cls, mock_mig,
-                      mock_pool_cls, mock_settings_cls, mock_submit_learn,
-                      mock_engine_cls):
+                      mock_pool_cls, mock_settings_cls, mock_prompt_session_cls,
+                      mock_submit_learn, mock_engine_cls):
         settings = MagicMock()
         settings.compaction.threshold_turns = 200
         settings.workflow.max_review_iterations = 5
@@ -142,6 +145,10 @@ class TestRunWork:
         mock_store.create_work_item.return_value = 42
         mock_store_cls.return_value = mock_store
 
+        prompt_session = MagicMock()
+        prompt_session.prompt.return_value = "y"
+        mock_prompt_session_cls.return_value = prompt_session
+
         sm = MagicMock()
         sm.session = SimpleNamespace(session_uuid="uuid")
         sm._agent_row = qa_row
@@ -156,9 +163,14 @@ class TestRunWork:
         assert mock_store.create_work_item.call_args.kwargs["metadata_json"] == {"work_mode": "full"}
         assert mock_engine_cls.call_args.kwargs["mode"] == WorkMode.full
         assert mock_engine_cls.call_args.kwargs["auto_approve"] is False
+        assert mock_prompt_session_cls.call_args.kwargs["editing_mode"] == EditingMode.EMACS
+        assert isinstance(mock_prompt_session_cls.call_args.kwargs["history"], FileHistory)
+        assert mock_engine_cls.call_args.kwargs["ask_user"]("Approve?") == "y"
+        prompt_session.prompt.assert_called_with("Approve?", multiline=False)
         mock_submit_learn.assert_called_once()
 
     @patch("myswat.cli.work_cmd.WorkflowEngine")
+    @patch("myswat.cli.work_cmd.PromptSession")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.run_migrations")
@@ -171,6 +183,7 @@ class TestRunWork:
         mock_mig,
         mock_pool_cls,
         mock_settings_cls,
+        mock_prompt_session_cls,
         mock_engine_cls,
     ):
         settings = MagicMock()
@@ -215,6 +228,7 @@ class TestRunWork:
 
     @patch("myswat.cli.work_cmd._run_with_task_monitor")
     @patch("myswat.cli.work_cmd.WorkflowEngine")
+    @patch("myswat.cli.work_cmd.PromptSession")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.run_migrations")
@@ -227,6 +241,7 @@ class TestRunWork:
         mock_mig,
         mock_pool_cls,
         mock_settings_cls,
+        mock_prompt_session_cls,
         mock_engine_cls,
         mock_task_monitor,
     ):
@@ -269,13 +284,15 @@ class TestRunWork:
         assert kwargs["proj"]["id"] == 1
 
     @patch("myswat.cli.work_cmd.WorkflowEngine")
+    @patch("myswat.cli.work_cmd.PromptSession")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.run_migrations")
     @patch("myswat.cli.work_cmd.MemoryStore")
     @patch("myswat.cli.work_cmd.SessionManager")
     def test_failure(self, mock_sm_cls, mock_store_cls, mock_mig,
-                      mock_pool_cls, mock_settings_cls, mock_engine_cls):
+                      mock_pool_cls, mock_settings_cls, mock_prompt_session_cls,
+                      mock_engine_cls):
         settings = MagicMock()
         settings.compaction.threshold_turns = 200
         settings.workflow.max_review_iterations = 5
@@ -446,6 +463,7 @@ class TestRunWork:
         assert mock_engine_cls.call_args.kwargs["auto_approve"] is False
 
     @patch("myswat.cli.work_cmd.WorkflowEngine")
+    @patch("myswat.cli.work_cmd.PromptSession")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.run_migrations")
@@ -458,6 +476,7 @@ class TestRunWork:
         mock_mig,
         mock_pool_cls,
         mock_settings_cls,
+        mock_prompt_session_cls,
         mock_engine_cls,
     ):
         settings = MagicMock()
@@ -487,6 +506,7 @@ class TestRunWork:
         run_work("proj", "do stuff", auto_approve=True)
 
         assert mock_engine_cls.call_args.kwargs["auto_approve"] is True
+        mock_prompt_session_cls.assert_not_called()
 
     @patch("myswat.cli.work_cmd._launch_background_work")
     def test_design_mode_rejected_for_background(self, mock_launch_background_work):
