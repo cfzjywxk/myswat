@@ -28,6 +28,7 @@ class TestMakeRunnerFromRow:
             model="gpt-5",
             workdir=None,
             extra_flags=[],
+            timeout=None,
         )
 
     @patch("myswat.agents.factory.KimiRunner")
@@ -46,6 +47,7 @@ class TestMakeRunnerFromRow:
             model="kimi-2",
             workdir=None,
             extra_flags=[],
+            timeout=None,
         )
 
     @patch("myswat.agents.factory.ClaudeRunner")
@@ -67,6 +69,7 @@ class TestMakeRunnerFromRow:
             model="claude-sonnet-4-6",
             workdir="/tmp/project",
             extra_flags=[],
+            timeout=None,
             required_ip="203.0.113.10",
             ip_check_timeout_seconds=7,
         )
@@ -89,6 +92,7 @@ class TestMakeRunnerFromRow:
             model="claude-sonnet-4-6",
             workdir=None,
             extra_flags=[],
+            timeout=None,
             required_ip="198.51.100.5",
             ip_check_timeout_seconds=9,
         )
@@ -124,6 +128,7 @@ class TestMakeRunnerFromRow:
             model="gpt-5",
             workdir=None,
             extra_flags=["--verbose", "--timeout=60"],
+            timeout=None,
         )
 
     @patch("myswat.agents.factory.KimiRunner")
@@ -142,6 +147,7 @@ class TestMakeRunnerFromRow:
             model="k2",
             workdir=None,
             extra_flags=["--flag", "value"],
+            timeout=None,
         )
 
     def test_unknown_backend_raises(self):
@@ -172,6 +178,7 @@ class TestMakeMemoryWorkerRunner:
             model="gpt-5.4",
             workdir="/tmp/project",
             extra_flags=["--json"],
+            timeout=None,
         )
 
     @patch("myswat.agents.factory.ClaudeRunner")
@@ -191,6 +198,7 @@ class TestMakeMemoryWorkerRunner:
             model="claude-opus-4-6",
             workdir=None,
             extra_flags=["--print"],
+            timeout=None,
             required_ip="203.0.113.10",
             ip_check_timeout_seconds=7,
         )

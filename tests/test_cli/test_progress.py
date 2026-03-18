@@ -7,7 +7,8 @@ from unittest.mock import MagicMock, patch
 
 from rich.text import Text
 
-from myswat.cli.progress import _build_task_snapshot_display, _run_with_task_monitor
+from myswat.agents.base import AgentResponse
+from myswat.cli.progress import _build_task_snapshot_display, _run_with_task_monitor, _send_with_timer
 
 
 class _FakeLive:
@@ -73,3 +74,55 @@ def test_run_with_task_monitor_prints_final_snapshot_after_worker_finishes():
     printed = [call.args[0] for call in console.print.call_args_list if call.args]
     assert any(isinstance(arg, Text) and "Current task" in arg.plain for arg in printed)
     assert any(isinstance(arg, Text) and "Approved the finalized work-mode design." in arg.plain for arg in printed)
+
+
+class _SyncThread:
+    def __init__(self, target=None, daemon=None):
+        self._target = target
+        self._alive = False
+
+    def start(self):
+        self._alive = True
+        try:
+            if self._target is not None:
+                self._target()
+        finally:
+            self._alive = False
+
+    def join(self, timeout=None):
+        return None
+
+    def is_alive(self):
+        return self._alive
+
+
+def test_send_with_timer_clears_live_output_before_worker_runs():
+    runner = MagicMock()
+    runner._cleared = False
+
+    def clear_live_output():
+        runner._cleared = True
+
+    runner.clear_live_output.side_effect = clear_live_output
+    runner.live_output = ["stale line"]
+    runner.cancel.return_value = None
+
+    sm = MagicMock()
+    sm._runner = runner
+
+    def send(prompt, task_description=None):
+        assert runner._cleared is True
+        return AgentResponse(content="ok")
+
+    sm.send.side_effect = send
+
+    console = MagicMock()
+    with patch("myswat.cli.progress.threading.Thread", _SyncThread):
+        with patch("myswat.cli.progress.Live", _FakeLive):
+            with patch("myswat.cli.progress.termios.tcgetattr", side_effect=Exception("no tty")):
+                response, elapsed = _send_with_timer(console, sm, "hello")
+
+    assert response.content == "ok"
+    assert elapsed >= 0
+    runner.clear_live_output.assert_called_once()
+    sm.send.assert_called_once_with("hello", task_description=None)

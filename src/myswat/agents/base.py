@@ -5,6 +5,7 @@ from __future__ import annotations
 import signal
 import subprocess
 import threading
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
@@ -36,6 +37,9 @@ class AgentRunner(ABC):
 
     Call reset_session() to force a fresh AI session (e.g., /reset command).
     """
+
+    # Streaming output formats that produce JSONL events during work.
+    _STREAMING_FORMATS = frozenset({"stream-json", "json"})
 
     def __init__(
         self,
@@ -70,6 +74,36 @@ class AgentRunner(ABC):
         """Get a snapshot of live output lines accumulated so far."""
         with self._live_lock:
             return list(self._live_lines)
+
+    def clear_live_output(self) -> None:
+        """Clear the live output buffer.
+
+        Called before starting a new Live display to prevent stale lines
+        from the previous invocation from being rendered.
+        """
+        with self._live_lock:
+            self._live_lines.clear()
+
+    @property
+    def supports_activity_monitoring(self) -> bool:
+        """Whether this runner produces streaming stdout suitable for stall detection.
+
+        Returns False if extra_flags include --final-message-only or set
+        --output-format to a non-streaming format (e.g. text).
+        """
+        if "--final-message-only" in self.extra_flags:
+            return False
+        # CodexRunner uses --json (always streaming)
+        if "--json" in self.extra_flags:
+            return True
+        try:
+            idx = self.extra_flags.index("--output-format")
+            fmt = self.extra_flags[idx + 1]
+            return fmt in self._STREAMING_FORMATS
+        except (ValueError, IndexError):
+            # No explicit --output-format in extra_flags.
+            # All current runners add a streaming format in _base_flags().
+            return True
 
     def reset_session(self) -> None:
         """Clear the CLI session ID, forcing a fresh AI session on next invoke()."""
@@ -123,6 +157,11 @@ class AgentRunner(ABC):
 
         Stdout is read line-by-line and accumulated in live_output for
         real-time display by the caller.
+
+        When a timeout is configured, a watchdog daemon thread monitors
+        activity and kills the process if it stalls:
+        - Streaming runners: killed if no stdout/stderr line for `timeout` seconds.
+        - Non-streaming runners: killed if total wall-clock time exceeds `timeout`.
         """
         if self._cli_session_id is not None:
             cmd = self.build_resume_command(prompt)
@@ -135,6 +174,7 @@ class AgentRunner(ABC):
 
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
+        stalled = False
 
         try:
             self._process = subprocess.Popen(
@@ -145,35 +185,60 @@ class AgentRunner(ABC):
                 cwd=self.workdir,
             )
 
-            # Read stderr in a background thread so it doesn't block
+            # Watchdog thread — monitors stdout/stderr activity or wall-clock time
+            last_activity = time.monotonic()
+            start_time = last_activity
+
+            # Read stderr in a background thread so it doesn't block.
+            # Stderr output also counts as activity for stall detection.
             def _read_stderr():
+                nonlocal last_activity
                 for line in self._process.stderr:
+                    last_activity = time.monotonic()
                     stderr_lines.append(line)
 
             stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
             stderr_thread.start()
+            use_activity_monitoring = self.supports_activity_monitoring
+
+            if self.timeout:
+                def _watchdog():
+                    nonlocal stalled
+                    while self._process and self._process.poll() is None:
+                        now = time.monotonic()
+                        if use_activity_monitoring:
+                            elapsed_since_activity = now - last_activity
+                        else:
+                            elapsed_since_activity = now - start_time
+                        if elapsed_since_activity > self.timeout:
+                            stalled = True
+                            try:
+                                self._process.kill()
+                            except OSError:
+                                pass
+                            return
+                        time.sleep(10)
+
+                watcher = threading.Thread(target=_watchdog, daemon=True)
+                watcher.start()
+            else:
+                watcher = None
 
             # Read stdout line by line — feeds live_output
             for line in self._process.stdout:
+                last_activity = time.monotonic()
                 stdout_lines.append(line)
                 formatted = self.format_live_line(line.rstrip("\n"))
                 if formatted is not None:
                     with self._live_lock:
                         self._live_lines.append(formatted)
 
-            self._process.wait(timeout=self.timeout)
+            self._process.wait()
             stderr_thread.join(timeout=5)
+            if watcher is not None:
+                watcher.join(timeout=2)
             returncode = self._process.returncode
 
-        except subprocess.TimeoutExpired:
-            self._process.kill()
-            self._process.wait()
-            return AgentResponse(
-                content=f"Agent timed out after {self.timeout}s",
-                exit_code=-1,
-                raw_stdout="".join(stdout_lines),
-                raw_stderr="".join(stderr_lines),
-            )
         except FileNotFoundError:
             return AgentResponse(
                 content=f"CLI not found: {self.cli_path}",
@@ -185,6 +250,15 @@ class AgentRunner(ABC):
 
         stdout = "".join(stdout_lines)
         stderr = "".join(stderr_lines)
+
+        if stalled:
+            monitor_type = "no output" if use_activity_monitoring else "wall-clock"
+            return AgentResponse(
+                content=f"Agent stalled ({monitor_type} timeout): no progress for {self.timeout}s",
+                exit_code=-1,
+                raw_stdout=stdout,
+                raw_stderr=stderr,
+            )
 
         if returncode < 0:
             return AgentResponse(

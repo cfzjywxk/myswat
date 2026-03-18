@@ -274,8 +274,61 @@ def _run_workflow(
     background_worker: bool,
     mode: WorkMode = WorkMode.full,
     auto_approve: bool = False,
+    resume: int | None = None,
+    mode_explicit: bool = False,
 ) -> int:
     settings, store, proj, effective_workdir = _load_project_context(project_slug, workdir)
+
+    # ── Resume logic ──
+    resume_stage: str | None = None
+    if resume is not None:
+        from myswat.workflow.modes import INTERNAL_WORK_MODES
+
+        existing_item = store.get_work_item(resume)
+        if not existing_item or existing_item.get("project_id") != proj["id"]:
+            console.print(f"[red]Work item {resume} not found in project '{project_slug}'.[/red]")
+            raise typer.Exit(1)
+
+        item_metadata = existing_item.get("metadata_json") or {}
+        if isinstance(item_metadata, str):
+            import json as _json
+            try:
+                item_metadata = _json.loads(item_metadata)
+            except Exception:
+                item_metadata = {}
+
+        stored_mode = item_metadata.get("work_mode")
+        if stored_mode:
+            if stored_mode in {m.value for m in INTERNAL_WORK_MODES}:
+                console.print(
+                    f"[red]Work item {resume} uses internal mode '{stored_mode}' "
+                    f"(created by a chat delegation flow). "
+                    f"Resume is not supported for internal modes. "
+                    f"Start a new work item instead.[/red]"
+                )
+                raise typer.Exit(1)
+
+            if mode_explicit and mode.value != stored_mode:
+                console.print(
+                    f"[red]Work item {resume} was created with mode '{stored_mode}', "
+                    f"but --resume is being called with mode '{mode.value}'. "
+                    f"Omit the mode flag to inherit, or start a new work item.[/red]"
+                )
+                raise typer.Exit(1)
+
+            mode = WorkMode(stored_mode)
+
+        requirement = existing_item.get("description") or existing_item.get("title") or ""
+        if not requirement:
+            console.print(f"[red]Work item {resume} has no stored requirement.[/red]")
+            raise typer.Exit(1)
+
+        state = store.get_work_item_state(resume)
+        if state:
+            resume_stage = state.get("current_stage")
+
+        work_item_id = resume
+        console.print(f"[dim]Resuming work item {resume} from stage: {resume_stage or 'start'}[/dim]")
 
     dev_agent, qa_agents = _get_workflow_agents(store, proj["id"])
     arch_agent = _get_architect_agent(store, proj["id"]) if mode == WorkMode.full else None
@@ -405,6 +458,7 @@ def _run_workflow(
         mode=mode,
         auto_approve=(background_worker or auto_approve),
         should_cancel=cancel_event.is_set,
+        resume_stage=resume_stage,
     )
 
     final_status = "blocked"
@@ -652,6 +706,8 @@ def run_work(
     background: bool = False,
     mode: WorkMode = WorkMode.full,
     auto_approve: bool = False,
+    resume: int | None = None,
+    mode_explicit: bool = False,
 ) -> None:
     """Run the full teamwork workflow."""
     if background:
@@ -668,6 +724,8 @@ def run_work(
         background_worker=False,
         mode=mode,
         auto_approve=auto_approve,
+        resume=resume,
+        mode_explicit=mode_explicit,
     )
 
 

@@ -47,6 +47,9 @@ class AgentSettings(BaseSettings):
     claude_default_flags: list[str] = Field(
         default=["--print", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"],
     )
+    # Kill agent subprocess if no stdout/stderr output for this many seconds.
+    # 0 = disabled. Default: 1200 (20 min).
+    agent_stall_timeout_seconds: int = 1200
 
     model_config = {"env_prefix": "MYSWAT_AGENTS_"}
 

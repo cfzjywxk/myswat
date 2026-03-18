@@ -97,6 +97,14 @@ def _cli_path_for_backend(backend: str, settings: MySwatSettings | None) -> str:
     raise typer.BadParameter(f"Unknown CLI backend: {backend}")
 
 
+def _stall_timeout(settings: MySwatSettings | None) -> int | None:
+    """Read agent_stall_timeout_seconds from settings; 0 → None (disabled)."""
+    value = _nested_attr(settings, "agents", "agent_stall_timeout_seconds")
+    if isinstance(value, int) and value > 0:
+        return value
+    return None
+
+
 def make_runner(
     *,
     backend: str,
@@ -105,6 +113,7 @@ def make_runner(
     extra_flags: list[str] | None = None,
     settings: MySwatSettings | None = None,
     workdir: str | None = None,
+    timeout: int | None = None,
 ) -> AgentRunner:
     flags = list(extra_flags or [])
 
@@ -114,6 +123,7 @@ def make_runner(
             model=model,
             workdir=workdir,
             extra_flags=flags,
+            timeout=timeout,
         )
     if backend == "kimi":
         return KimiRunner(
@@ -121,6 +131,7 @@ def make_runner(
             model=model,
             workdir=workdir,
             extra_flags=flags,
+            timeout=timeout,
         )
     if backend == "claude":
         return ClaudeRunner(
@@ -128,6 +139,7 @@ def make_runner(
             model=model,
             workdir=workdir,
             extra_flags=flags,
+            timeout=timeout,
             required_ip=_claude_required_ip(settings),
             ip_check_timeout_seconds=_claude_ip_check_timeout_seconds(settings),
         )
@@ -153,6 +165,7 @@ def make_runner_from_row(
         extra_flags=extra_flags,
         settings=settings,
         workdir=workdir,
+        timeout=_stall_timeout(settings),
     )
 
 
@@ -170,4 +183,5 @@ def make_memory_worker_runner(
         extra_flags=_default_flags_for_backend(backend, settings),
         settings=settings,
         workdir=workdir,
+        timeout=_stall_timeout(settings),
     )

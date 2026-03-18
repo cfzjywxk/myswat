@@ -431,6 +431,10 @@ def _send_with_timer(
         except Exception as exc:
             error[0] = exc
 
+    # Clear stale live output from the previous invocation before the worker
+    # can start appending fresh lines. Clearing after worker.start() would fix
+    # the stale-render race but can also erase the new invocation's first lines.
+    sm._runner.clear_live_output()
     worker = threading.Thread(target=_run, daemon=True)
     worker.start()
 

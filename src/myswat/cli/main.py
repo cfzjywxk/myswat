@@ -90,7 +90,7 @@ def _resolve_work_mode(*, design: bool, develop: bool, test: bool) -> WorkMode:
 
 @app.command()
 def work(
-    requirement: str = typer.Argument(..., help="Requirement description"),
+    requirement: str = typer.Argument(None, help="Requirement description (optional when --resume)"),
     project: str = typer.Option(..., "--project", "-p", help="Project slug"),
     workdir: str = typer.Option(None, "--workdir", "-w", help="Working directory override"),
     background: bool = typer.Option(
@@ -102,6 +102,7 @@ def work(
     develop_mode: bool = typer.Option(False, "--develop", "--dev", help="Run development only."),
     test_mode: bool = typer.Option(False, "--test", "--ga-test", help="Run GA testing only."),
     auto_approve: bool = typer.Option(False, "--auto-approve", help="Skip user checkpoints in foreground workflows."),
+    resume: int = typer.Option(None, "--resume", help="Resume a blocked/failed work item by ID."),
 ):
     """Run the teamwork workflow in full or selected foreground mode."""
     from myswat.cli.work_cmd import run_work
@@ -111,15 +112,33 @@ def work(
         develop=develop_mode,
         test=test_mode,
     )
+    mode_explicit = design_mode or develop_mode or test_mode
+
+    if resume is not None:
+        if requirement:
+            raise typer.BadParameter(
+                "Cannot provide a new requirement with --resume. "
+                "The original requirement is loaded from the work item. "
+                "To start fresh with a different requirement, omit --resume."
+            )
+        if background:
+            raise typer.BadParameter("--resume cannot be combined with --background.")
+    else:
+        if not requirement:
+            raise typer.BadParameter("Requirement is required when not using --resume.")
+
     if background and mode == WorkMode.design:
         raise typer.BadParameter("Design mode cannot be combined with --background.")
+
     run_work(
         project,
-        requirement,
+        requirement or "",
         workdir=workdir,
         background=background,
         mode=mode,
         auto_approve=auto_approve,
+        resume=resume,
+        mode_explicit=mode_explicit,
     )
 
 

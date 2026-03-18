@@ -711,6 +711,8 @@ class TestCommandRouting:
             background=False,
             mode=WorkMode.full,
             auto_approve=False,
+            resume=None,
+            mode_explicit=False,
         )
 
     @patch("myswat.cli.work_cmd.run_work")
@@ -738,6 +740,8 @@ class TestCommandRouting:
                 background=False,
                 mode=expected_mode,
                 auto_approve=False,
+                resume=None,
+                mode_explicit=True,
             )
 
     @patch("myswat.cli.work_cmd.run_work")
@@ -769,6 +773,8 @@ class TestCommandRouting:
             background=True,
             mode=WorkMode.full,
             auto_approve=False,
+            resume=None,
+            mode_explicit=False,
         )
 
     @patch("myswat.cli.work_cmd.run_work")
@@ -796,6 +802,8 @@ class TestCommandRouting:
             background=True,
             mode=WorkMode.develop,
             auto_approve=False,
+            resume=None,
+            mode_explicit=True,
         )
 
     @patch("myswat.cli.work_cmd.run_work")
@@ -813,6 +821,8 @@ class TestCommandRouting:
             background=False,
             mode=WorkMode.full,
             auto_approve=True,
+            resume=None,
+            mode_explicit=False,
         )
 
     @patch("myswat.cli.work_cmd.run_background_work_item")

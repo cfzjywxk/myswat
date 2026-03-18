@@ -156,6 +156,38 @@ class SessionManager:
         """
         self._runner.reset_session()
 
+    # Maximum stall retries before giving up.
+    _MAX_STALL_RETRIES = 3
+
+    def _build_system_context_and_track_revision(
+        self, task_description: str | None, prompt: str,
+    ) -> str | None:
+        """Build system context from agent prompt + TiDB knowledge.
+
+        Also updates memory revision bookkeeping on the TiDB session so
+        stale-knowledge warnings work correctly after a retry.
+        """
+        parts: list[str] = []
+        agent_system_prompt = self._agent_row.get("system_prompt")
+        if agent_system_prompt:
+            parts.append(agent_system_prompt)
+        context = self._retriever.build_context_for_agent(
+            project_id=self._project_id,
+            agent_id=self._agent_row["id"],
+            agent_role=self._agent_row.get("role"),
+            task_description=task_description or prompt,
+            current_session_id=self._session.id,
+            repo_path=self._runner.workdir,
+        )
+        current_memory_revision = self._store.get_project_memory_revision(self._project_id)
+        self._store.set_session_memory_revision(self._session.id, current_memory_revision)
+        if self._session is not None:
+            self._session.memory_revision_at_context_build = current_memory_revision
+        self._memory_revision_warned = False
+        if context:
+            parts.append(context)
+        return "\n\n---\n\n".join(parts) if parts else None
+
     def send(self, prompt: str, task_description: str | None = None) -> AgentResponse:
         """Send a prompt to the agent, persisting turns to TiDB.
 
@@ -168,6 +200,11 @@ class SessionManager:
             1. Just send the prompt — AI already has all context
             2. No TiDB context rebuild (the AI remembers naturally)
 
+        Stall handling:
+            If the agent stalls (exit_code == -1, not cancelled), retry up to
+            _MAX_STALL_RETRIES times with increasing timeout. Each retry resets
+            the AI session and rebuilds system context from TiDB.
+
         Always:
             - Save user + assistant turns to TiDB
             - Update progress note
@@ -176,35 +213,11 @@ class SessionManager:
             self.create_or_resume(purpose=task_description)
 
         # Build system context ONLY for the first turn of an AI session.
-        # Once the AI session is started, it remembers everything — no need
-        # to rebuild context from TiDB every turn.
         system_context = None
         if not self._runner.is_session_started:
-            parts = []
-            # Agent's own system prompt (role instructions, delegation rules, etc.)
-            agent_system_prompt = self._agent_row.get("system_prompt")
-            if agent_system_prompt:
-                parts.append(agent_system_prompt)
-            # TiDB knowledge + session context
-            context = self._retriever.build_context_for_agent(
-                project_id=self._project_id,
-                agent_id=self._agent_row["id"],
-                agent_role=self._agent_row.get("role"),
-                task_description=task_description or prompt,
-                current_session_id=self._session.id,
-                repo_path=self._runner.workdir,
+            system_context = self._build_system_context_and_track_revision(
+                task_description, prompt,
             )
-            current_memory_revision = self._store.get_project_memory_revision(self._project_id)
-            self._store.set_session_memory_revision(
-                self._session.id,
-                current_memory_revision,
-            )
-            if self._session is not None:
-                self._session.memory_revision_at_context_build = current_memory_revision
-            self._memory_revision_warned = False
-            if context:
-                parts.append(context)
-            system_context = "\n\n---\n\n".join(parts) if parts else None
 
         prompt_to_send = (
             self._maybe_prefix_memory_revision_hint(prompt)
@@ -221,9 +234,41 @@ class SessionManager:
             token_count_est=token_est,
         )
 
-        # Invoke agent (first call starts session, subsequent calls resume)
+        # Invoke agent with stall retry loop
+        original_timeout = self._runner.timeout
         t0 = time.monotonic()
-        response = self._runner.invoke(prompt_to_send, system_context=system_context)
+
+        for attempt in range(1, self._MAX_STALL_RETRIES + 1):
+            response = self._runner.invoke(prompt_to_send, system_context=system_context)
+
+            is_stall = response.exit_code == -1 and not response.cancelled
+            if not is_stall:
+                break  # success, explicit error, or user cancel
+
+            print(
+                f"[myswat] Agent stalled (attempt {attempt}/{self._MAX_STALL_RETRIES})",
+                file=sys.stderr,
+            )
+
+            if attempt >= self._MAX_STALL_RETRIES:
+                break  # exhausted retries
+
+            # Reset AI session and rebuild context for fresh retry
+            self._runner.reset_session()
+            system_context = self._build_system_context_and_track_revision(
+                task_description, prompt,
+            )
+            prompt_to_send = prompt  # fresh session, no revision hint needed
+
+            # Backoff: increase stall timeout for next attempt
+            # attempt 1 → 1.5x, attempt 2 → 2x of base timeout
+            if original_timeout:
+                self._runner.timeout = int(original_timeout * (1 + attempt * 0.5))
+
+        # Restore original timeout after retries
+        if original_timeout:
+            self._runner.timeout = original_timeout
+
         elapsed = time.monotonic() - t0
 
         # Save assistant turn with timing

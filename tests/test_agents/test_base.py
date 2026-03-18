@@ -184,6 +184,13 @@ class TestAgentRunnerProperties:
         output.append("line3")
         assert runner._live_lines == ["line1", "line2"]
 
+    def test_clear_live_output(self):
+        runner = _FakeRunner("a", "m")
+        runner._live_lines = ["line1", "line2"]
+        runner.clear_live_output()
+        assert runner._live_lines == []
+        assert runner.live_output == []
+
     def test_live_output_thread_safety(self):
         """Verify live_output acquires the lock by trying to get it while held."""
         runner = _FakeRunner("a", "m")
@@ -370,22 +377,42 @@ class TestAgentRunnerInvoke:
         runner.invoke("prompt")
         assert runner.live_output == ["line1", "line2"]
 
+    @patch("myswat.agents.base.time.monotonic")
+    @patch("myswat.agents.base.time.sleep")
     @patch("myswat.agents.base.subprocess.Popen")
-    def test_invoke_timeout_returns_exit_neg1(self, mock_popen_cls):
-        proc = _make_mock_popen(stdout_text="partial\n", returncode=0)
-        # wait() is called twice: first with timeout (should raise), then
-        # without timeout after kill (should succeed).
-        proc.wait.side_effect = [
-            subprocess.TimeoutExpired(cmd="x", timeout=10),
-            None,
-        ]
+    def test_invoke_timeout_returns_exit_neg1(self, mock_popen_cls, mock_sleep, mock_monotonic):
+        """Watchdog kills stalled process; invoke returns exit_code=-1."""
+        killed = threading.Event()
+
+        # Stdout yields one line then blocks, simulating a stalled process.
+        # When the watchdog calls proc.kill(), the event unblocks the iterator.
+        def blocking_stdout():
+            yield "partial\n"
+            killed.wait(timeout=5)
+
+        proc = _make_mock_popen(stdout_text="partial\n", returncode=-9)
+        proc.stdout = blocking_stdout()
+        # Use function-based side effects to avoid race with thread scheduling
+        proc.poll.side_effect = lambda: -9 if killed.is_set() else None
+        proc.wait.return_value = -9
+        proc.kill.side_effect = lambda: killed.set()
         mock_popen_cls.return_value = proc
+
+        # monotonic: returns 0 for first 3 calls, then 999 to trigger stall
+        mono_calls = 0
+
+        def monotonic_fn():
+            nonlocal mono_calls
+            mono_calls += 1
+            return 999 if mono_calls > 3 else 0
+
+        mock_monotonic.side_effect = monotonic_fn
 
         runner = _FakeRunner("agent", "m", timeout=10)
         resp = runner.invoke("slow prompt")
 
         assert resp.exit_code == -1
-        assert "timed out" in resp.content.lower()
+        assert "stall" in resp.content.lower()
         proc.kill.assert_called_once()
 
     @patch("myswat.agents.base.subprocess.Popen")
@@ -485,14 +512,31 @@ class TestAgentRunnerInvoke:
         # _process should be None after invoke completes (set in finally block)
         assert runner._process is None
 
+    @patch("myswat.agents.base.time.monotonic")
+    @patch("myswat.agents.base.time.sleep")
     @patch("myswat.agents.base.subprocess.Popen")
-    def test_invoke_clears_process_after_timeout(self, mock_popen_cls):
-        proc = _make_mock_popen(returncode=0)
-        proc.wait.side_effect = [
-            subprocess.TimeoutExpired(cmd="x", timeout=5),
-            None,
-        ]
+    def test_invoke_clears_process_after_timeout(self, mock_popen_cls, mock_sleep, mock_monotonic):
+        killed = threading.Event()
+
+        def blocking_stdout():
+            yield "partial\n"
+            killed.wait(timeout=5)
+
+        proc = _make_mock_popen(stdout_text="partial\n", returncode=-9)
+        proc.stdout = blocking_stdout()
+        proc.poll.side_effect = lambda: -9 if killed.is_set() else None
+        proc.wait.return_value = -9
+        proc.kill.side_effect = lambda: killed.set()
         mock_popen_cls.return_value = proc
+
+        mono_calls = 0
+
+        def monotonic_fn():
+            nonlocal mono_calls
+            mono_calls += 1
+            return 999 if mono_calls > 3 else 0
+
+        mock_monotonic.side_effect = monotonic_fn
 
         runner = _FakeRunner("agent", "m", timeout=5)
         runner.invoke("prompt")
