@@ -4,7 +4,7 @@
 
 | Component | Role |
 |-----------|------|
-| **CLI** (Typer) | `myswat init`, `learn`, `chat`, `run`, `work`, `gc` |
+| **CLI** (Typer) | `myswat init`, `chat`, `run`, `work`, `status`, `task`, `search`, `history`, `memory`, `gc`, `reset` |
 | **SessionManager** | Agent lifecycle, subprocess launch (codex/claude/kimi) |
 | **WorkflowEngine** | Mode dispatch: full, design, develop, test |
 | **MemoryRetriever** | 5-tier context builder for agent prompts |
@@ -31,11 +31,11 @@
 ### Knowledge Write Paths
 
 - **Session compaction** — AI extracts structured knowledge from conversation turns
-- **Document ingestion** — files chunked (Rust/Go boundary-aware), optionally AI-distilled
-- **Manual add** — `myswat memory add`
-- **Project learn** — `myswat learn` (delete-and-replace, not upsert)
+- **Workflow and chat learn triggers** — chat/session/workflow summaries can submit learn jobs
+- **Document ingestion** — files chunked (Rust/Go boundary-aware), optionally AI-distilled through the ingestion pipeline
+- **Project ops seeding** — `myswat init` stores core team workflow knowledge for new projects
 
-All paths except `learn` go through the **upsert pipeline**: content hash dedup, title-based merge candidate lookup, textual containment merge, optional LLM merge, supersede, or create.
+Knowledge created from sessions, workflow learns, and ingestion flows goes through the **upsert pipeline**: content hash dedup, title-based merge candidate lookup, textual containment merge, optional LLM merge, supersede, or create. Project-ops seeding uses its own title-aware replace/update path.
 
 ### Knowledge Search
 

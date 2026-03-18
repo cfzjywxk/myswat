@@ -35,13 +35,17 @@ You have a codebase. You have AI agents that can write code and review it. But y
 
 # Set up a project
 myswat init "my-project" --repo /path/to/repo
-myswat learn -p my-project
 
 # Run a task — full architect-led workflow
 myswat work -p my-project "Implement bloom filter for compaction"
 
 # Or just chat
 myswat chat -p my-project
+
+# Inspect persisted workflow state and memory
+myswat status -p my-project --details
+myswat history -p my-project --turns 50
+myswat search "bloom filter" -p my-project
 ```
 
 ## How It Works
@@ -81,8 +85,9 @@ Every conversation is persisted to TiDB and searchable:
 
 - **Session turns** — raw conversation history, cross-role visible
 - **Compacted knowledge** — AI-distilled insights from past sessions (architecture decisions, bug fixes, patterns, failure modes)
-- **Ingested documents** — your docs and source code, chunked and indexed
-- **Project ops** — build commands, test tiers, conventions (via `myswat learn`)
+- **Current workflow state** — work item summaries, recent artifacts, review loops, process logs
+- **Project ops** — team workflow knowledge plus project operating notes stored with the project
+- **Ingested documents** — available when loaded through the document-ingestion pipeline
 
 Search across all of it:
 
