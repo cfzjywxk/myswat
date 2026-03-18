@@ -11,6 +11,12 @@ from typing import Any, TYPE_CHECKING
 from rich.console import Console
 
 from myswat.config.settings import MySwatSettings
+from myswat.large_payloads import (
+    AGENT_FILE_PROMPT,
+    maybe_externalize_prompt,
+    maybe_externalize_response,
+    resolve_externalized_text,
+)
 
 if TYPE_CHECKING:
     from myswat.memory.store import MemoryStore
@@ -101,9 +107,13 @@ def _consult_architect(
             context=json.dumps(record.get("context", {}), indent=2)[:3000],
             traceback=werr.traceback_str[-1500:],
         )
-        response = runner.invoke(prompt)
+        sent_prompt, _ = maybe_externalize_prompt(
+            prompt,
+            label="architect-diagnose-request",
+        )
+        response = runner.invoke(sent_prompt, system_context=AGENT_FILE_PROMPT)
         if response.success:
-            return response.content
+            return resolve_externalized_text(response.content)
     except Exception as e:
         print(f"[error_handler] Architect diagnosis failed: {e}", file=sys.stderr)
     return None
@@ -155,8 +165,12 @@ def handle_workflow_error(
     console.print(f"[red]{type(werr.error).__name__}: {werr.error}[/red]")
 
     if suggestion:
+        rendered, _ = maybe_externalize_response(
+            suggestion,
+            label="architect-diagnosis",
+        )
         console.print(f"\n[bold yellow]Architect's analysis:[/bold yellow]")
-        console.print(suggestion[:2000])
+        console.print(rendered)
     else:
         console.print(
             "\n[dim]Error recorded. No automated diagnosis available.[/dim]"

@@ -1,11 +1,14 @@
 """Extended tests for MemoryStore – covers remaining uncovered methods."""
 
 import json
+from pathlib import Path
+import tempfile
 from unittest.mock import MagicMock, patch, call
 import pytest
 
 import myswat.memory.store as store_module
 from myswat.agents.base import AgentResponse
+from myswat.large_payloads import AGENT_FILE_PROMPT, extract_markdown_path
 from myswat.memory.store import MemoryStore
 from myswat.models.session import SessionTurn
 
@@ -258,6 +261,49 @@ class TestUpsertKnowledge:
         update_sql = mock_pool.execute.call_args_list[0][0][0]
         assert "UPDATE knowledge SET" in update_sql
         mock_pool.insert_returning_id.assert_not_called()
+
+
+class TestMergeWithRunner:
+    def test_externalizes_large_prompt_and_uses_file_prompt(self, store):
+        runner = MagicMock()
+        runner.invoke.return_value = AgentResponse(content="merged", exit_code=0)
+
+        merged = store._merge_with_runner(
+            runner=runner,
+            title="Architecture",
+            existing_content="A" * 1600,
+            new_content="B" * 1600,
+        )
+
+        assert merged == "merged"
+        sent_prompt = runner.invoke.call_args.args[0]
+        prompt_path = extract_markdown_path(sent_prompt)
+        assert prompt_path is not None
+        assert Path(prompt_path).exists()
+        prompt_text = Path(prompt_path).read_text(encoding="utf-8")
+        assert "Existing content:" in prompt_text
+        assert "A" * 200 in prompt_text
+        assert "B" * 200 in prompt_text
+        assert runner.invoke.call_args.kwargs["system_context"] == AGENT_FILE_PROMPT
+
+    def test_reads_externalized_merge_response(self, store):
+        runner = MagicMock()
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".md") as handle:
+            handle.write("merged body")
+            merged_path = handle.name
+        runner.invoke.return_value = AgentResponse(
+            content=f"The detailed response is in `{merged_path}`.",
+            exit_code=0,
+        )
+
+        merged = store._merge_with_runner(
+            runner=runner,
+            title="Architecture",
+            existing_content="old",
+            new_content="new",
+        )
+
+        assert merged == "merged body"
 
     def test_creates_new_row_when_no_safe_merge_exists(self, store, mock_pool):
         mock_pool.fetch_one.return_value = None

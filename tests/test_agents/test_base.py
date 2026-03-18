@@ -275,30 +275,19 @@ class TestAgentRunnerCancel:
         runner.cancel()
         proc.send_signal.assert_not_called()
 
-    def test_cancel_sends_sigterm_and_waits(self):
+    def test_cancel_kills_immediately(self):
         runner = _FakeRunner("a", "m")
         proc = MagicMock(spec=_REAL_POPEN)
         proc.poll.return_value = None  # still running
         runner._process = proc
         runner.cancel()
-        proc.send_signal.assert_called_once_with(signal.SIGTERM)
-        proc.wait.assert_called_once_with(timeout=3)
-
-    def test_cancel_kills_on_wait_timeout(self):
-        runner = _FakeRunner("a", "m")
-        proc = MagicMock(spec=_REAL_POPEN)
-        proc.poll.return_value = None
-        proc.wait.side_effect = subprocess.TimeoutExpired(cmd="x", timeout=3)
-        runner._process = proc
-        runner.cancel()
-        proc.send_signal.assert_called_once_with(signal.SIGTERM)
         proc.kill.assert_called_once()
 
     def test_cancel_ignores_oserror(self):
         runner = _FakeRunner("a", "m")
         proc = MagicMock(spec=_REAL_POPEN)
         proc.poll.return_value = None
-        proc.send_signal.side_effect = OSError("no such process")
+        proc.kill.side_effect = OSError("no such process")
         runner._process = proc
         runner.cancel()  # should not raise
 
@@ -498,6 +487,7 @@ class TestAgentRunnerInvoke:
         runner.invoke("prompt")
 
         call_kwargs = mock_popen_cls.call_args.kwargs
+        assert call_kwargs.get("stdin") == subprocess.DEVNULL
         assert call_kwargs.get("stdout") == subprocess.PIPE
         assert call_kwargs.get("stderr") == subprocess.PIPE
         assert call_kwargs.get("text") is True

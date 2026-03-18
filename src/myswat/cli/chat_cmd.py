@@ -31,6 +31,7 @@ from myswat.cli.progress import (
 from myswat.config.settings import MySwatSettings
 from myswat.db.connection import TiDBPool
 from myswat.db.schema import run_migrations
+from myswat.large_payloads import maybe_externalize_response, maybe_externalize_summary
 from myswat.memory.embedder import preload_model
 from myswat.memory.learn_triggers import submit_chat_learn_request
 from myswat.memory.store import MemoryStore
@@ -322,7 +323,11 @@ def run_chat(
             console.print(f"\n[yellow]Request cancelled.[/yellow] [dim]({_fmt_duration(elapsed)})[/dim]")
         elif response.success:
             console.print()
-            console.print(Markdown(response.content))
+            rendered, _ = maybe_externalize_response(
+                response.content,
+                label=f"{current_role}-chat-response",
+            )
+            console.print(Markdown(rendered))
             console.print(f"\n[dim]({_fmt_duration(elapsed)})[/dim]")
 
             try:
@@ -577,7 +582,10 @@ def _run_inline_review(
                 work_item_id,
                 event_type=event.get("event_type", "task_request"),
                 title=event.get("title"),
-                summary=event.get("summary", task),
+                summary=maybe_externalize_summary(
+                    event.get("summary", task),
+                    label=f"{event.get('event_type', 'task_request')}-summary",
+                ),
                 from_role=event.get("from_role"),
                 to_role=event.get("to_role"),
                 updated_by_agent_id=event.get("updated_by_agent_id"),

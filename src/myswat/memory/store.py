@@ -12,6 +12,11 @@ from typing import Any, TYPE_CHECKING
 import pymysql.err
 
 from myswat.db.connection import TiDBPool
+from myswat.large_payloads import (
+    AGENT_FILE_PROMPT,
+    maybe_externalize_prompt,
+    resolve_externalized_text,
+)
 from myswat.memory import embedder
 from myswat.models.knowledge import KnowledgeEntry
 from myswat.models.session import Session, SessionTurn
@@ -731,18 +736,24 @@ class MemoryStore:
         new_content: str,
     ) -> str | None:
         try:
+            prompt = MERGE_PROMPT.format(
+                title=title,
+                existing_content=existing_content,
+                new_content=new_content,
+            )
+            sent_prompt, _ = maybe_externalize_prompt(
+                prompt,
+                label="memory-merge-request",
+            )
             response = runner.invoke(
-                MERGE_PROMPT.format(
-                    title=title,
-                    existing_content=existing_content,
-                    new_content=new_content,
-                ),
+                sent_prompt,
+                system_context=AGENT_FILE_PROMPT,
             )
         except Exception:
             return None
         if not getattr(response, "success", False):
             return None
-        merged = str(getattr(response, "content", "") or "").strip()
+        merged = resolve_externalized_text(getattr(response, "content", "")).strip()
         return merged or None
 
     def _supersede_knowledge(

@@ -140,15 +140,11 @@ class AgentRunner(ABC):
         return None
 
     def cancel(self) -> None:
-        """Kill the running subprocess (called on ESC)."""
+        """Kill the running subprocess immediately (called on ESC / Ctrl+C)."""
         proc = self._process
         if proc and proc.poll() is None:
             try:
-                proc.send_signal(signal.SIGTERM)
-                try:
-                    proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+                proc.kill()
             except OSError:
                 pass
 
@@ -179,6 +175,7 @@ class AgentRunner(ABC):
         try:
             self._process = subprocess.Popen(
                 cmd,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,

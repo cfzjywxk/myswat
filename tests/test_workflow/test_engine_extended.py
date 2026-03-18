@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, PropertyMock, patch, call
 
 import pytest
 
 from myswat.agents.base import AgentResponse
+from myswat.agents.session_manager import SessionManager
+from myswat.large_payloads import extract_markdown_path
 from myswat.models.work_item import ReviewVerdict
+from myswat.models.session import Session
 from myswat.workflow.engine import (
     WorkMode,
     WorkflowEngine,
@@ -93,6 +97,23 @@ def _make_engine(
         arch_sm=arch_sm,
     )
     return engine, dev_sm, qa_sms
+
+
+def _real_sm(store, *, agent_id: int, role: str, response: AgentResponse) -> tuple[SessionManager, MagicMock]:
+    runner = MagicMock()
+    type(runner).is_session_started = PropertyMock(return_value=True)
+    runner.workdir = "/tmp/test"
+    runner.cli_session_id = f"cli-{agent_id}"
+    runner.timeout = None
+    runner.invoke.return_value = response
+    agent_row = {
+        "id": agent_id,
+        "role": role,
+        "system_prompt": f"You are {role}.",
+    }
+    sm = SessionManager(store=store, runner=runner, agent_row=agent_row, project_id=1)
+    sm._session = Session(id=agent_id, agent_id=agent_id, session_uuid=f"session-{agent_id}")
+    return sm, runner
 
 
 # ===================================================================
@@ -3182,5 +3203,153 @@ class TestWorkflowEngineEvents:
             event.event_type == "stage_complete"
             and event.metadata.get("failed") is True
             and "review failed" in event.message
+            for event in events
+        )
+
+    @patch("myswat.workflow.engine.console", new_callable=MagicMock)
+    def test_arch_design_review_externalizes_large_prompts_for_dev_and_qa(self, _mock_console):
+        store = MagicMock()
+        store.count_session_turns.return_value = 2
+        store.create_artifact.return_value = 42
+        store.create_review_cycle.return_value = 99
+        store.create_work_item_process_event.return_value = 1
+        arch_sm = make_fake_session_manager(agent_id=30, agent_role="architect")
+        dev_sm, dev_runner = _real_sm(
+            store,
+            agent_id=10,
+            role="developer",
+            response=_ok(_lgtm_json()),
+        )
+        qa_sm, qa_runner = _real_sm(
+            store,
+            agent_id=20,
+            role="qa_main",
+            response=_ok(_lgtm_json()),
+        )
+        engine = WorkflowEngine(
+            store=store,
+            dev_sm=dev_sm,
+            qa_sms=[qa_sm],
+            arch_sm=arch_sm,
+            project_id=1,
+            work_item_id=1,
+        )
+        artifact = "# Design\n\n" + ("A" * 2000)
+
+        result, iterations, passed = engine._run_review_loop(
+            artifact=artifact,
+            artifact_type="arch_design",
+            context="Requirement: ship it",
+            proposer=arch_sm,
+            reviewers=[dev_sm, qa_sm],
+            abort_on_agent_failure=True,
+        )
+
+        assert passed is True
+        assert iterations == 1
+        assert result == artifact
+        for runner in (dev_runner, qa_runner):
+            sent_prompt = runner.invoke.call_args.args[0]
+            prompt_path = extract_markdown_path(sent_prompt)
+            assert prompt_path is not None
+            assert Path(prompt_path).exists()
+            prompt_body = Path(prompt_path).read_text(encoding="utf-8")
+            assert artifact in prompt_body
+            assert "Review the following technical design proposal." in prompt_body
+            assert artifact not in sent_prompt
+
+    @patch("myswat.workflow.engine.console", new_callable=MagicMock)
+    def test_develop_review_externalizes_large_code_review_prompt(self, _mock_console):
+        store = MagicMock()
+        store.count_session_turns.return_value = 2
+        store.create_artifact.return_value = 42
+        store.create_review_cycle.return_value = 99
+        store.create_work_item_process_event.return_value = 1
+        dev_sm = make_fake_session_manager(agent_id=10, agent_role="developer")
+        qa_sm, qa_runner = _real_sm(
+            store,
+            agent_id=20,
+            role="qa_main",
+            response=_ok(_lgtm_json()),
+        )
+        engine = WorkflowEngine(
+            store=store,
+            dev_sm=dev_sm,
+            qa_sms=[qa_sm],
+            project_id=1,
+            work_item_id=1,
+        )
+        artifact = "## Phase Summary\n\n" + ("B" * 2200)
+
+        result, iterations, passed = engine._run_review_loop(
+            artifact=artifact,
+            artifact_type="code",
+            context="Requirement: implement it",
+        )
+
+        assert passed is True
+        assert iterations == 1
+        assert result == artifact
+        sent_prompt = qa_runner.invoke.call_args.args[0]
+        prompt_path = extract_markdown_path(sent_prompt)
+        assert prompt_path is not None
+        assert Path(prompt_path).exists()
+        prompt_body = Path(prompt_path).read_text(encoding="utf-8")
+        assert artifact in prompt_body
+        assert "You are a QA engineer reviewing a development phase." in prompt_body
+
+    @patch("myswat.workflow.engine.console", new_callable=MagicMock)
+    def test_review_loop_emits_stall_and_retry_events_from_session_manager(self, _mock_console):
+        store = MagicMock()
+        store.create_artifact.return_value = 42
+        store.create_review_cycle.return_value = 99
+        store.create_work_item_process_event.return_value = 1
+        events = []
+        dev_sm = make_fake_session_manager(agent_id=10, agent_role="developer")
+        qa_sm = make_fake_session_manager(agent_id=20, agent_role="qa_main")
+
+        def _reviewer_send(prompt, task_description=None, status_callback=None):
+            assert status_callback is not None
+            status_callback(
+                "agent_stalled",
+                {"attempt": 1, "max_attempts": 3, "timeout": 1200},
+            )
+            status_callback(
+                "agent_retry",
+                {"attempt": 1, "next_attempt": 2, "max_attempts": 3, "next_timeout": 1800},
+            )
+            return _ok(_lgtm_json())
+
+        qa_sm.send.side_effect = _reviewer_send
+
+        engine = WorkflowEngine(
+            store=store,
+            dev_sm=dev_sm,
+            qa_sms=[qa_sm],
+            project_id=1,
+            work_item_id=1,
+            on_event=events.append,
+        )
+
+        artifact, iteration, passed = engine._run_review_loop(
+            artifact="draft design",
+            artifact_type="design",
+            context="Requirement",
+            abort_on_agent_failure=True,
+        )
+
+        assert artifact == "draft design"
+        assert iteration == 1
+        assert passed is True
+        assert any(
+            event.event_type == "agent_working"
+            and event.agent_role == "qa_main"
+            and "stalled" in event.message
+            for event in events
+        )
+        assert any(
+            event.event_type == "agent_working"
+            and event.agent_role == "qa_main"
+            and "retrying" in event.message
             for event in events
         )

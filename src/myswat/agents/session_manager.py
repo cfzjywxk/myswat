@@ -5,12 +5,18 @@ from __future__ import annotations
 import logging
 import sys
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import pymysql.err
 
 from myswat.agents.base import AgentResponse
 from myswat.config.settings import MySwatSettings
+from myswat.large_payloads import (
+    AGENT_FILE_PROMPT,
+    maybe_externalize_prompt,
+    maybe_externalize_response,
+    maybe_externalize_system_context,
+)
 from myswat.memory.learn_triggers import submit_session_summary_learn_request
 from myswat.memory.retriever import MemoryRetriever
 
@@ -178,6 +184,7 @@ class SessionManager:
         stale-knowledge warnings work correctly after a retry.
         """
         parts: list[str] = []
+        parts.append(AGENT_FILE_PROMPT)
         agent_system_prompt = self._agent_row.get("system_prompt")
         if agent_system_prompt:
             parts.append(agent_system_prompt)
@@ -207,7 +214,12 @@ class SessionManager:
             parts.append(context)
         return "\n\n---\n\n".join(parts) if parts else None
 
-    def send(self, prompt: str, task_description: str | None = None) -> AgentResponse:
+    def send(
+        self,
+        prompt: str,
+        task_description: str | None = None,
+        status_callback: Callable[[str, dict[str, object]], None] | None = None,
+    ) -> AgentResponse:
         """Send a prompt to the agent, persisting turns to TiDB.
 
         First turn (no AI session yet):
@@ -244,13 +256,20 @@ class SessionManager:
             else prompt
         )
 
+        stored_prompt, stored_prompt_path = maybe_externalize_prompt(
+            prompt_to_send,
+            label=f"{self.agent_role}-request",
+        )
+        user_metadata = {"externalized_prompt_path": stored_prompt_path} if stored_prompt_path else None
+
         # Save user turn
         token_est = len(prompt) // 4
         self._store.append_turn(
             session_id=self._session.id,
             role="user",
-            content=prompt,
+            content=stored_prompt,
             token_count_est=token_est,
+            metadata=user_metadata,
         )
 
         # Invoke agent with stall retry loop
@@ -258,11 +277,39 @@ class SessionManager:
         t0 = time.monotonic()
 
         for attempt in range(1, self._MAX_STALL_RETRIES + 1):
-            response = self._runner.invoke(prompt_to_send, system_context=system_context)
+            sent_prompt, _ = maybe_externalize_prompt(
+                prompt_to_send,
+                label=f"{self.agent_role}-request",
+            )
+            sent_system_context = None
+            if system_context is not None:
+                sent_system_context, _ = maybe_externalize_system_context(
+                    system_context,
+                    label=f"{self.agent_role}-context",
+                )
+
+            response = self._runner.invoke(
+                sent_prompt,
+                system_context=sent_system_context,
+            )
 
             is_stall = response.exit_code == -1 and not response.cancelled
             if not is_stall:
                 break  # success, explicit error, or user cancel
+
+            timeout_seconds = self._runner.timeout or original_timeout
+            if status_callback is not None:
+                try:
+                    status_callback(
+                        "agent_stalled",
+                        {
+                            "attempt": attempt,
+                            "max_attempts": self._MAX_STALL_RETRIES,
+                            "timeout": timeout_seconds,
+                        },
+                    )
+                except Exception:
+                    pass
 
             print(
                 f"[myswat] Agent stalled (attempt {attempt}/{self._MAX_STALL_RETRIES})",
@@ -281,8 +328,23 @@ class SessionManager:
 
             # Backoff: increase stall timeout for next attempt
             # attempt 1 → 1.5x, attempt 2 → 2x of base timeout
+            next_timeout = None
             if original_timeout:
-                self._runner.timeout = int(original_timeout * (1 + attempt * 0.5))
+                next_timeout = int(original_timeout * (1 + attempt * 0.5))
+                self._runner.timeout = next_timeout
+            if status_callback is not None:
+                try:
+                    status_callback(
+                        "agent_retry",
+                        {
+                            "attempt": attempt,
+                            "next_attempt": attempt + 1,
+                            "max_attempts": self._MAX_STALL_RETRIES,
+                            "next_timeout": next_timeout,
+                        },
+                    )
+                except Exception:
+                    pass
 
         # Restore original timeout after retries
         if original_timeout:
@@ -292,18 +354,25 @@ class SessionManager:
 
         # Save assistant turn with timing
         assistant_token_est = len(response.content) // 4
+        stored_response, stored_response_path = maybe_externalize_response(
+            response.content,
+            label=f"{self.agent_role}-response",
+        )
+        assistant_metadata = {
+            "exit_code": response.exit_code,
+            "token_usage": response.token_usage,
+            "elapsed_seconds": round(elapsed, 1),
+            "cancelled": response.cancelled,
+            "cli_session_id": self._runner.cli_session_id,
+        }
+        if stored_response_path:
+            assistant_metadata["externalized_response_path"] = stored_response_path
         self._store.append_turn(
             session_id=self._session.id,
             role="assistant",
-            content=response.content,
+            content=stored_response,
             token_count_est=assistant_token_est,
-            metadata={
-                "exit_code": response.exit_code,
-                "token_usage": response.token_usage,
-                "elapsed_seconds": round(elapsed, 1),
-                "cancelled": response.cancelled,
-                "cli_session_id": self._runner.cli_session_id,
-            },
+            metadata=assistant_metadata,
         )
 
         # Update progress note

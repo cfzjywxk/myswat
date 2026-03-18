@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from rich.console import Console
 
 from myswat.cli.progress import _collapse_text
+from myswat.large_payloads import maybe_externalize_list, maybe_externalize_summary
 from myswat.models.work_item import ReviewVerdict
 from myswat.workflow.prompts import DEVELOPER_INITIAL, DEVELOPER_REVISION, REVIEWER
 
@@ -89,9 +90,9 @@ def run_review_loop(
             store.update_work_item_state(
                 work_item_id,
                 current_stage=stage,
-                latest_summary=summary[:4000],
-                next_todos=next_todos,
-                open_issues=open_issues,
+                latest_summary=maybe_externalize_summary(summary[:4000], label=f"{stage}-summary"),
+                next_todos=maybe_externalize_list(next_todos, label=f"{stage}-todo"),
+                open_issues=maybe_externalize_list(open_issues, label=f"{stage}-issue"),
                 last_artifact_id=last_artifact_id,
                 updated_by_agent_id=updated_by_agent_id,
             )
@@ -112,7 +113,9 @@ def run_review_loop(
                 work_item_id,
                 event_type=event_type,
                 title=title,
-                summary=_collapse_text(summary),
+                summary=_collapse_text(
+                    maybe_externalize_summary(summary, label=f"{event_type}-summary"),
+                ),
                 from_role=from_role,
                 to_role=to_role,
                 updated_by_agent_id=updated_by_agent_id,

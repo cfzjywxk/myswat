@@ -25,6 +25,7 @@ Workflow:
 from __future__ import annotations
 
 import io
+import inspect
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -35,6 +36,11 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 
 from myswat.cli.progress import _collapse_text
+from myswat.large_payloads import (
+    maybe_externalize_list,
+    maybe_externalize_response,
+    maybe_externalize_summary,
+)
 from myswat.models.work_item import ReviewVerdict
 from myswat.workflow.events import WorkflowEvent
 from myswat.workflow.modes import WorkMode
@@ -248,6 +254,12 @@ class WorkflowEngine:
     ) -> None:
         if not self._work_item_id:
             return
+        latest_summary = maybe_externalize_summary(
+            latest_summary,
+            label=f"{current_stage}-summary",
+        ) if latest_summary is not None else None
+        next_todos = maybe_externalize_list(next_todos, label=f"{current_stage}-todo")
+        open_issues = maybe_externalize_list(open_issues, label=f"{current_stage}-issue")
         try:
             self._store.update_work_item_state(
                 self._work_item_id,
@@ -281,6 +293,7 @@ class WorkflowEngine:
     ) -> None:
         if not self._work_item_id:
             return
+        summary = maybe_externalize_summary(summary, label=f"{event_type}-summary")
         try:
             self._store.append_work_item_process_event(
                 self._work_item_id,
@@ -293,6 +306,114 @@ class WorkflowEngine:
             )
         except Exception:
             pass
+
+    def _make_status_callback(
+        self,
+        stage: str,
+        sm: "SessionManager",
+    ) -> Callable[[str, dict[str, object]], None]:
+        def _callback(event_type: str, payload: dict[str, object]) -> None:
+            attempt = int(payload.get("attempt") or 0)
+            max_attempts = int(payload.get("max_attempts") or 0)
+
+            if event_type == "agent_stalled":
+                timeout = payload.get("timeout")
+                message = f"{sm.agent_role} stalled"
+                if attempt and max_attempts:
+                    message += f" ({attempt}/{max_attempts})"
+                if timeout:
+                    message += f" after {timeout}s without output"
+                self._emit(
+                    "warning",
+                    message,
+                    stage=stage,
+                    agent_role=sm.agent_role,
+                    **payload,
+                )
+                self._emit(
+                    "agent_working",
+                    message,
+                    stage=stage,
+                    agent_role=sm.agent_role,
+                    **payload,
+                )
+                self._append_process_event(
+                    event_type="agent_stall",
+                    title="Agent stalled",
+                    summary=message,
+                    from_role=sm.agent_role,
+                    to_role="myswat",
+                    updated_by_agent_id=sm.agent_id,
+                )
+                return
+
+            if event_type == "agent_retry":
+                next_attempt = int(payload.get("next_attempt") or 0)
+                next_timeout = payload.get("next_timeout")
+                message = f"{sm.agent_role} retrying"
+                if next_attempt and max_attempts:
+                    message += f" ({next_attempt}/{max_attempts})"
+                if next_timeout:
+                    message += f" with {next_timeout}s timeout"
+                self._emit(
+                    "info",
+                    message,
+                    stage=stage,
+                    agent_role=sm.agent_role,
+                    **payload,
+                )
+                self._emit(
+                    "agent_working",
+                    message,
+                    stage=stage,
+                    agent_role=sm.agent_role,
+                    **payload,
+                )
+                self._append_process_event(
+                    event_type="agent_retry",
+                    title="Agent retry",
+                    summary=message,
+                    from_role="myswat",
+                    to_role=sm.agent_role,
+                    updated_by_agent_id=sm.agent_id,
+                )
+
+        return _callback
+
+    def _send_agent(
+        self,
+        sm: "SessionManager",
+        prompt: str,
+        *,
+        task_description: str,
+        stage: str,
+    ):
+        send_kwargs: dict[str, object] = {
+            "task_description": task_description,
+        }
+        try:
+            signature = inspect.signature(sm.send)
+        except (TypeError, ValueError):
+            signature = None
+        if signature is None or any(
+            param.kind == inspect.Parameter.VAR_KEYWORD
+            for param in signature.parameters.values()
+        ) or "status_callback" in signature.parameters:
+            send_kwargs["status_callback"] = self._make_status_callback(stage, sm)
+        return sm.send(prompt, **send_kwargs)
+
+    def _print_markdown_panel(
+        self,
+        content: str,
+        *,
+        title: str,
+        border_style: str,
+        label: str,
+    ) -> None:
+        rendered, _ = maybe_externalize_response(content, label=label)
+        self._real_console.print(
+            Panel(Markdown(rendered), title=title, border_style=border_style),
+        )
 
     def _record_blocked_failure(
         self,
@@ -573,7 +694,12 @@ class WorkflowEngine:
         self._emit("agent_working", "Producing technical design...", stage="design", agent_role=self._arch.agent_role)
         self._console.print("[yellow]Architect producing technical design...[/yellow]")
         prompt = ARCH_TECH_DESIGN.format(requirement=requirement)
-        response = self._arch.send(prompt, task_description=f"Architect design: {requirement[:100]}")
+        response = self._send_agent(
+            self._arch,
+            prompt,
+            task_description=f"Architect design: {requirement[:100]}",
+            stage="design",
+        )
         if not response.success:
             self._emit("agent_error", f"Agent failed (exit={response.exit_code})", stage="design", agent_role=self._arch.agent_role)
             self._console.print(f"[red]Architect agent failed (exit={response.exit_code})[/red]")
@@ -641,7 +767,12 @@ class WorkflowEngine:
             result.final_report = self._generate_report(result, [])
             return self._sync_result_failure_state(result)
 
-        self._real_console.print(Panel(Markdown(design), title="Reviewed Design", border_style="green"))
+        self._print_markdown_panel(
+            design,
+            title="Reviewed Design",
+            border_style="green",
+            label="reviewed-design",
+        )
         design = self._user_checkpoint(
             design,
             "arch_design",
@@ -665,7 +796,12 @@ class WorkflowEngine:
         self._console.print(Panel("[bold]Stage 3: Final Report[/bold]", border_style="blue"))
         report = self._generate_report(result, [])
         result.final_report = report
-        self._real_console.print(Panel(Markdown(report), title="Architect Design Workflow Report", border_style="green"))
+        self._print_markdown_panel(
+            report,
+            title="Architect Design Workflow Report",
+            border_style="green",
+            label="architect-design-report",
+        )
         self._emit("stage_complete", "Report generated", stage="report")
         self._persist_task_state(
             current_stage="workflow_completed",
@@ -685,7 +821,12 @@ class WorkflowEngine:
         self._emit("agent_working", "Producing formal test plan...", stage="testplan_design", agent_role=qa_lead.agent_role)
         self._console.print("[yellow]QA producing formal test plan...[/yellow]")
         prompt = QA_DESIGN_TEST_PLAN.format(requirement=requirement)
-        response = qa_lead.send(prompt, task_description=f"QA test plan: {requirement[:100]}")
+        response = self._send_agent(
+            qa_lead,
+            prompt,
+            task_description=f"QA test plan: {requirement[:100]}",
+            stage="testplan_design",
+        )
         if not response.success:
             self._emit("agent_error", f"Agent failed (exit={response.exit_code})", stage="testplan_design", agent_role=qa_lead.agent_role)
             self._console.print(f"[red]QA agent failed (exit={response.exit_code})[/red]")
@@ -755,7 +896,12 @@ class WorkflowEngine:
             result.final_report = self._generate_report(result, [])
             return self._sync_result_failure_state(result)
 
-        self._real_console.print(Panel(Markdown(test_plan), title="Reviewed Test Plan", border_style="green"))
+        self._print_markdown_panel(
+            test_plan,
+            title="Reviewed Test Plan",
+            border_style="green",
+            label="reviewed-test-plan",
+        )
         test_plan = self._user_checkpoint(
             test_plan,
             "test_plan",
@@ -783,7 +929,12 @@ class WorkflowEngine:
         self._console.print(Panel("[bold]Stage 3: Final Report[/bold]", border_style="blue"))
         report = self._generate_report(result, [])
         result.final_report = report
-        self._real_console.print(Panel(Markdown(report), title="Test Plan Workflow Report", border_style="green"))
+        self._print_markdown_panel(
+            report,
+            title="Test Plan Workflow Report",
+            border_style="green",
+            label="test-plan-report",
+        )
         self._emit("stage_complete", "Report generated", stage="report")
         self._persist_task_state(
             current_stage="workflow_completed",
@@ -814,7 +965,12 @@ class WorkflowEngine:
                 self._emit("agent_working", "Producing technical design...", stage="design", agent_role=self._arch.agent_role)
                 self._console.print("[yellow]Architect producing technical design...[/yellow]")
                 prompt = ARCH_TECH_DESIGN.format(requirement=requirement)
-                response = self._arch.send(prompt, task_description=f"Architect design: {requirement[:100]}")
+                response = self._send_agent(
+                    self._arch,
+                    prompt,
+                    task_description=f"Architect design: {requirement[:100]}",
+                    stage="design",
+                )
                 if not response.success:
                     self._emit("agent_error", f"Agent failed (exit={response.exit_code})", stage="design", agent_role=self._arch.agent_role)
                     self._console.print(f"[red]Architect agent failed (exit={response.exit_code})[/red]")
@@ -902,7 +1058,12 @@ class WorkflowEngine:
 
             # User checkpoint: approved design
             checkpoint_title = "Reviewed Design" if self._arch else "QA-Approved Design"
-            self._real_console.print(Panel(Markdown(design), title=checkpoint_title, border_style="green"))
+            self._print_markdown_panel(
+                design,
+                title=checkpoint_title,
+                border_style="green",
+                label="approved-design",
+            )
             design = self._user_checkpoint(
                 design,
                 "arch_design" if self._arch else "design",
@@ -958,7 +1119,12 @@ class WorkflowEngine:
                 return result
 
             # User checkpoint: approved plan
-            self._real_console.print(Panel(Markdown(plan), title="QA-Approved Plan", border_style="green"))
+            self._print_markdown_panel(
+                plan,
+                title="QA-Approved Plan",
+                border_style="green",
+                label="approved-plan",
+            )
             plan = self._user_checkpoint(
                 plan, "plan", "Plan approved by QA. Start development? [Y/n/or type feedback] "
             )
@@ -1043,7 +1209,12 @@ class WorkflowEngine:
             and ga_result.passed
         ) if result.phases else False
 
-        self._real_console.print(Panel(Markdown(report), title="E2E Workflow Report", border_style="green"))
+        self._print_markdown_panel(
+            report,
+            title="E2E Workflow Report",
+            border_style="green",
+            label="e2e-workflow-report",
+        )
         self._emit("stage_complete", "Report generated", stage="report")
         self._persist_task_state(
             current_stage="workflow_completed" if result.success else "workflow_finished_with_issues",
@@ -1100,7 +1271,12 @@ class WorkflowEngine:
                 result.final_report = "Design workflow cancelled during design review."
                 return result
 
-            self._real_console.print(Panel(Markdown(design), title="Reviewed Design", border_style="green"))
+            self._print_markdown_panel(
+                design,
+                title="Reviewed Design",
+                border_style="green",
+                label="reviewed-design",
+            )
             design = self._user_checkpoint(
                 design,
                 "design",
@@ -1149,7 +1325,12 @@ class WorkflowEngine:
                 result.final_report = "Design workflow cancelled during plan review."
                 return result
 
-            self._real_console.print(Panel(Markdown(plan), title="Reviewed Plan", border_style="green"))
+            self._print_markdown_panel(
+                plan,
+                title="Reviewed Plan",
+                border_style="green",
+                label="reviewed-plan",
+            )
             plan = self._user_checkpoint(
                 plan,
                 "plan",
@@ -1169,7 +1350,12 @@ class WorkflowEngine:
         result.final_report = report
         result.success = result.design_review_passed and result.plan_review_passed
 
-        self._real_console.print(Panel(Markdown(report), title="Design Workflow Report", border_style="green"))
+        self._print_markdown_panel(
+            report,
+            title="Design Workflow Report",
+            border_style="green",
+            label="design-workflow-report",
+        )
         self._emit("stage_complete", "Report generated", stage="report")
         self._persist_task_state(
             current_stage="workflow_completed" if result.success else "workflow_finished_with_issues",
@@ -1233,7 +1419,12 @@ class WorkflowEngine:
         result.final_report = report
         result.success = all(p.committed for p in result.phases) if result.phases else False
 
-        self._real_console.print(Panel(Markdown(report), title="Development Workflow Report", border_style="green"))
+        self._print_markdown_panel(
+            report,
+            title="Development Workflow Report",
+            border_style="green",
+            label="development-workflow-report",
+        )
         self._emit("stage_complete", "Report generated", stage="report")
         self._persist_task_state(
             current_stage="workflow_completed" if result.success else "workflow_finished_with_issues",
@@ -1277,7 +1468,12 @@ class WorkflowEngine:
         result.final_report = report
         result.success = ga_result.passed
 
-        self._real_console.print(Panel(Markdown(report), title="Test Workflow Report", border_style="green"))
+        self._print_markdown_panel(
+            report,
+            title="Test Workflow Report",
+            border_style="green",
+            label="test-workflow-report",
+        )
         self._emit("stage_complete", "Report generated", stage="report")
         self._persist_task_state(
             current_stage="workflow_completed" if result.success else "workflow_finished_with_issues",
@@ -1298,7 +1494,12 @@ class WorkflowEngine:
         self._emit("agent_working", "Producing technical design...", stage="design", agent_role=self._dev.agent_role)
         self._console.print("[yellow]Dev producing technical design...[/yellow]")
         prompt = DEV_TECH_DESIGN.format(requirement=requirement)
-        response = self._dev.send(prompt, task_description=f"Tech design: {requirement[:100]}")
+        response = self._send_agent(
+            self._dev,
+            prompt,
+            task_description=f"Tech design: {requirement[:100]}",
+            stage="design",
+        )
         if not response.success:
             self._emit("agent_error", f"Agent failed (exit={response.exit_code})", stage="design", agent_role=self._dev.agent_role)
             self._console.print(f"[red]Dev agent failed (exit={response.exit_code})[/red]")
@@ -1340,7 +1541,12 @@ class WorkflowEngine:
             requirement=requirement[:4000],
             design=design[:8000],
         )
-        response = self._dev.send(prompt, task_description="Implementation planning")
+        response = self._send_agent(
+            self._dev,
+            prompt,
+            task_description="Implementation planning",
+            stage="planning",
+        )
         if not response.success:
             self._console.print(f"[red]Dev agent failed (exit={response.exit_code})[/red]")
             if abort_on_failure:
@@ -1408,7 +1614,12 @@ class WorkflowEngine:
             total_phases=total_phases,
             completed_phases=completed_ctx,
         )
-        response = self._dev.send(prompt, task_description=f"Phase {phase_index}: {phase_name}")
+        response = self._send_agent(
+            self._dev,
+            prompt,
+            task_description=f"Phase {phase_index}: {phase_name}",
+            stage=f"phase_{phase_index}",
+        )
         if not response.success:
             self._emit("agent_error", "Implementation failed", stage=f"phase_{phase_index}", agent_role=self._dev.agent_role)
             return PhaseResult(name=phase_name, summary="Implementation failed.", review_iterations=0)
@@ -1423,7 +1634,12 @@ class WorkflowEngine:
             phase_name=phase_name,
             phase_index=phase_index,
         )
-        summary_resp = self._dev.send(summary_prompt, task_description=f"Summarize phase {phase_index}")
+        summary_resp = self._send_agent(
+            self._dev,
+            summary_prompt,
+            task_description=f"Summarize phase {phase_index}",
+            stage=f"phase_{phase_index}",
+        )
         summary = summary_resp.content if summary_resp.success else response.content
         self._emit("agent_done", "Summary submitted for review", stage=f"phase_{phase_index}", agent_role=self._dev.agent_role)
         self._persist_task_state(
@@ -1466,7 +1682,12 @@ class WorkflowEngine:
             phase_name=phase_name,
             phase_index=phase_index,
         )
-        commit_resp = self._dev.send(commit_prompt, task_description=f"Commit phase {phase_index}")
+        commit_resp = self._send_agent(
+            self._dev,
+            commit_prompt,
+            task_description=f"Commit phase {phase_index}",
+            stage=f"phase_{phase_index}",
+        )
         committed = commit_resp.success
 
         if committed:
@@ -1551,7 +1772,12 @@ class WorkflowEngine:
             design=design[:3000],
             dev_summary=dev_summary[:4000],
         )
-        response = qa_lead.send(prompt, task_description="GA test plan")
+        response = self._send_agent(
+            qa_lead,
+            prompt,
+            task_description="GA test plan",
+            stage="ga_test",
+        )
         if not response.success:
             self._emit("agent_error", "Failed to generate test plan", stage="ga_test", agent_role=qa_lead.agent_role)
             self._console.print("[red]QA failed to generate test plan.[/red]")
@@ -1592,7 +1818,12 @@ class WorkflowEngine:
         result.test_plan_review_passed = test_plan_review_passed
 
         # User checkpoint on test plan
-        self._real_console.print(Panel(Markdown(test_plan), title="Reviewed Test Plan", border_style="green"))
+        self._print_markdown_panel(
+            test_plan,
+            title="Reviewed Test Plan",
+            border_style="green",
+            label="reviewed-test-plan",
+        )
         test_plan = self._user_checkpoint(
             test_plan, "test_plan",
             "Test plan reviewed by Dev. Approve and start testing? [Y/n/or type feedback] ",
@@ -1613,7 +1844,12 @@ class WorkflowEngine:
         self._emit("agent_working", "Executing GA tests...", stage="ga_test", agent_role=qa_lead.agent_role)
         self._console.print("[yellow]QA executing GA tests...[/yellow]")
         exec_prompt = QA_EXECUTE_GA_TEST.format(test_plan=test_plan[:8000])
-        exec_response = qa_lead.send(exec_prompt, task_description="Execute GA tests")
+        exec_response = self._send_agent(
+            qa_lead,
+            exec_prompt,
+            task_description="Execute GA tests",
+            stage="ga_test",
+        )
         if not exec_response.success:
             self._emit("agent_error", "Failed to execute tests", stage="ga_test", agent_role=qa_lead.agent_role)
             self._console.print("[red]QA failed to execute tests.[/red]")
@@ -1715,7 +1951,12 @@ class WorkflowEngine:
                 test_plan=test_plan[:4000],
                 fixed_bugs=fixed_summaries,
             )
-            continue_response = qa_lead.send(continue_prompt, task_description="Continue GA tests")
+            continue_response = self._send_agent(
+                qa_lead,
+                continue_prompt,
+                task_description="Continue GA tests",
+                stage="ga_test",
+            )
             if not continue_response.success:
                 self._console.print("[red]QA failed to continue tests.[/red]")
                 break
@@ -1752,7 +1993,12 @@ class WorkflowEngine:
             test_plan=test_plan[:3000],
             test_history="\n\n".join(test_history)[:6000],
         )
-        report_response = qa_lead.send(report_prompt, task_description="GA test report")
+        report_response = self._send_agent(
+            qa_lead,
+            report_prompt,
+            task_description="GA test report",
+            stage="ga_test",
+        )
         if report_response.success:
             result.test_report = report_response.content
             self._persist_task_state(
@@ -1811,7 +2057,12 @@ class WorkflowEngine:
             requirement=requirement[:1000],
             design=design[:2000],
         )
-        est_response = self._dev.send(estimate_prompt, task_description=f"Estimate bug: {title[:60]}")
+        est_response = self._send_agent(
+            self._dev,
+            estimate_prompt,
+            task_description=f"Estimate bug: {title[:60]}",
+            stage="bug_fix",
+        )
         if not est_response.success:
             self._console.print("[red]Dev failed to estimate bug.[/red]")
             return result
@@ -1846,7 +2097,12 @@ class WorkflowEngine:
                 bug_description=bug.get("description", ""),
                 repro_steps=bug.get("repro_steps", "N/A"),
             )
-            fix_response = self._dev.send(fix_prompt, task_description=f"Fix bug: {title[:60]}")
+            fix_response = self._send_agent(
+                self._dev,
+                fix_prompt,
+                task_description=f"Fix bug: {title[:60]}",
+                stage="bug_fix",
+            )
             if not fix_response.success:
                 self._console.print("[red]Dev failed to fix bug.[/red]")
                 return result
@@ -1855,7 +2111,12 @@ class WorkflowEngine:
 
             # Step 3: Dev summarizes the fix
             summary_prompt = DEV_SUMMARIZE_BUG_FIX.format(bug_title=title)
-            summary_response = self._dev.send(summary_prompt, task_description=f"Summarize fix: {title[:60]}")
+            summary_response = self._send_agent(
+                self._dev,
+                summary_prompt,
+                task_description=f"Summarize fix: {title[:60]}",
+                stage="bug_fix",
+            )
             result.summary = summary_response.content[:1000] if summary_response.success else fix_response.content[:1000]
             result.fixed = fix_response.success
 
@@ -1895,7 +2156,12 @@ class WorkflowEngine:
         sub.design_review_passed = design_review_passed
 
         # User checkpoint
-        self._real_console.print(Panel(Markdown(sub_design), title="Bug Fix Design", border_style="yellow"))
+        self._print_markdown_panel(
+            sub_design,
+            title="Bug Fix Design",
+            border_style="yellow",
+            label="bug-fix-design",
+        )
         sub_design = self._user_checkpoint(
             sub_design, "design",
             "Bug fix design approved by QA. Proceed? [Y/n/or type feedback] ",
@@ -1925,7 +2191,12 @@ class WorkflowEngine:
         sub.plan_review_passed = plan_review_passed
 
         # User checkpoint
-        self._real_console.print(Panel(Markdown(sub_plan), title="Bug Fix Plan", border_style="yellow"))
+        self._print_markdown_panel(
+            sub_plan,
+            title="Bug Fix Plan",
+            border_style="yellow",
+            label="bug-fix-plan",
+        )
         sub_plan = self._user_checkpoint(
             sub_plan, "plan",
             "Bug fix plan approved. Start implementation? [Y/n/or type feedback] ",
@@ -2085,9 +2356,11 @@ class WorkflowEngine:
             with ThreadPoolExecutor(max_workers=len(reviewer_prompts)) as executor:
                 future_to_reviewer = {
                     executor.submit(
-                        reviewer.send,
+                        self._send_agent,
+                        reviewer,
                         prompt,
                         task_description=f"Review {artifact_type} (iter {iteration})",
+                        stage=sp,
                     ): reviewer
                     for reviewer, prompt in reviewer_prompts
                 }
@@ -2246,7 +2519,12 @@ class WorkflowEngine:
             feedback = "\n".join(f"- {issue}" for issue in all_issues)
 
             address_prompt = self._build_address_prompt(artifact_type, current, feedback)
-            response = prop.send(address_prompt, task_description=f"Address {artifact_type} review")
+            response = self._send_agent(
+                prop,
+                address_prompt,
+                task_description=f"Address {artifact_type} review",
+                stage=sp,
+            )
             if self._cancelled():
                 self._console.print(f"[yellow]{artifact_type} review cancelled by user.[/yellow]")
                 break
@@ -2384,14 +2662,20 @@ class WorkflowEngine:
             else:
                 self._real_console.print(f"[yellow]Sending your feedback to {target.agent_role}...[/yellow]")
                 address_prompt = self._build_address_prompt(artifact_type, artifact, response)
-                agent_response = target.send(
-                    address_prompt, task_description=f"Address user feedback on {artifact_type}",
+                agent_response = self._send_agent(
+                    target,
+                    address_prompt,
+                    task_description=f"Address user feedback on {artifact_type}",
+                    stage=artifact_type,
                 )
                 if agent_response.success:
                     artifact = agent_response.content
-                    self._real_console.print(Panel(
-                        Markdown(artifact), title=f"Updated {artifact_type.title()}", border_style="yellow",
-                    ))
+                    self._print_markdown_panel(
+                        artifact,
+                        title=f"Updated {artifact_type.title()}",
+                        border_style="yellow",
+                        label=f"updated-{artifact_type}",
+                    )
                     # Persist the revised artifact so resume loads the
                     # post-feedback version, not the stale review-loop version.
                     if persist_artifact and self._work_item_id:
@@ -2518,7 +2802,12 @@ class WorkflowEngine:
             prompt = DEV_FINAL_REPORT.format(
                 completed_phases="\n".join(completed_summaries),
             )
-            response = self._dev.send(prompt, task_description="Final report")
+            response = self._send_agent(
+                self._dev,
+                prompt,
+                task_description="Final report",
+                stage="report",
+            )
             if response.success:
                 dev_report = response.content
 
@@ -2611,7 +2900,12 @@ class WorkflowEngine:
             prompt = DEV_FINAL_REPORT.format(
                 completed_phases="\n".join(completed_summaries),
             )
-            response = self._dev.send(prompt, task_description="Final report")
+            response = self._send_agent(
+                self._dev,
+                prompt,
+                task_description="Final report",
+                stage="report",
+            )
             if response.success:
                 dev_report = response.content
 

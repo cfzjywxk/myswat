@@ -8,6 +8,12 @@ from typing import Any
 from myswat.agents.base import AgentRunner
 from myswat.agents.factory import make_memory_worker_runner
 from myswat.config.settings import MySwatSettings
+from myswat.large_payloads import (
+    AGENT_FILE_PROMPT,
+    maybe_externalize_prompt,
+    maybe_externalize_system_context,
+    resolve_externalized_text,
+)
 from myswat.models.learn import LearnActionEnvelope, LearnRequest
 
 MEMORY_WORKER_SYSTEM_PROMPT = """You are MySwat's hidden memory worker.
@@ -25,6 +31,10 @@ Rules:
 - Use exact create/update/delete knowledge actions.
 - Use relation_actions and index_hints only when you have specific structured data.
 """
+
+FILE_AWARE_MEMORY_WORKER_SYSTEM_PROMPT = "\n\n---\n\n".join(
+    [AGENT_FILE_PROMPT, MEMORY_WORKER_SYSTEM_PROMPT],
+)
 
 
 def _extract_json_block(text: str) -> dict | list | None:
@@ -98,14 +108,25 @@ class MemoryWorker:
         context: dict[str, Any],
     ) -> LearnActionEnvelope:
         prompt = self.build_prompt(request=request, context=context)
-        response = self._runner.invoke(prompt, system_context=MEMORY_WORKER_SYSTEM_PROMPT)
+        sent_prompt, _ = maybe_externalize_prompt(
+            prompt,
+            label="memory-worker-request",
+        )
+        sent_system_context, _ = maybe_externalize_system_context(
+            FILE_AWARE_MEMORY_WORKER_SYSTEM_PROMPT,
+            label="memory-worker-context",
+        )
+        response = self._runner.invoke(
+            sent_prompt,
+            system_context=sent_system_context,
+        )
         if not response.success:
             raise RuntimeError(
                 f"Memory worker failed (backend={self._backend}, model={self._model}, "
                 f"exit={response.exit_code})"
             )
 
-        data = _extract_json_block(response.content)
+        data = _extract_json_block(resolve_externalized_text(response.content))
         if not isinstance(data, dict):
             raise ValueError("Memory worker did not return a JSON object envelope")
         return LearnActionEnvelope.model_validate(data)

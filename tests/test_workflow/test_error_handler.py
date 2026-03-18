@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+import tempfile
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from myswat.agents.base import AgentResponse
+from myswat.large_payloads import AGENT_FILE_PROMPT, extract_markdown_path
 from myswat.workflow.error_handler import (
     WorkflowError,
     _build_runner,
@@ -153,6 +156,57 @@ class TestConsultArchitect:
 
         assert result is not None
         assert "Root cause" in result
+
+    def test_externalizes_large_prompt_and_uses_file_prompt(self):
+        store = MagicMock()
+        store.get_agent.return_value = {
+            "id": 1, "cli_backend": "codex", "cli_path": "codex",
+            "model_name": "gpt-5.4", "cli_extra_args": None,
+        }
+        err = WorkflowError(
+            error=ValueError("bad " + ("X" * 1500)),
+            stage="test",
+            context={"details": "Y" * 1500},
+        )
+
+        with patch("myswat.workflow.error_handler._build_runner") as mock_build:
+            mock_runner = MagicMock()
+            mock_runner.invoke.return_value = AgentResponse(content="ok", exit_code=0)
+            mock_build.return_value = mock_runner
+
+            _consult_architect(err, store, project_id=1)
+
+        sent_prompt = mock_runner.invoke.call_args.args[0]
+        prompt_path = extract_markdown_path(sent_prompt)
+        assert prompt_path is not None
+        assert Path(prompt_path).exists()
+        prompt_text = Path(prompt_path).read_text(encoding="utf-8")
+        assert "bad " in prompt_text
+        assert "Y" * 200 in prompt_text
+        assert mock_runner.invoke.call_args.kwargs["system_context"] == AGENT_FILE_PROMPT
+
+    def test_reads_externalized_architect_response(self):
+        store = MagicMock()
+        store.get_agent.return_value = {
+            "id": 1, "cli_backend": "codex", "cli_path": "codex",
+            "model_name": "gpt-5.4", "cli_extra_args": None,
+        }
+        err = WorkflowError(error=ValueError("test"), stage="test")
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".md") as handle:
+            handle.write("Root cause: X. Fix: Y.\n")
+            response_path = handle.name
+
+        with patch("myswat.workflow.error_handler._build_runner") as mock_build:
+            mock_runner = MagicMock()
+            mock_runner.invoke.return_value = AgentResponse(
+                content=f"The detailed response is in `{response_path}`.",
+                exit_code=0,
+            )
+            mock_build.return_value = mock_runner
+
+            result = _consult_architect(err, store, project_id=1)
+
+        assert result == "Root cause: X. Fix: Y.\n"
 
     def test_returns_none_when_no_architect(self):
         store = MagicMock()

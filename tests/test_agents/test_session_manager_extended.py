@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
@@ -12,6 +13,7 @@ import pytest
 
 from myswat.agents.base import AgentResponse
 from myswat.agents.session_manager import SessionManager
+from myswat.large_payloads import extract_markdown_path
 from myswat.models.session import Session
 
 
@@ -256,7 +258,9 @@ class TestMemoryFallbacks:
             response = sm.send("hello", task_description="greet")
 
         assert response.content == "response"
-        assert runner.invoke.call_args.kwargs["system_context"] == "Be helpful."
+        system_context = runner.invoke.call_args.kwargs["system_context"]
+        assert "Be helpful." in system_context
+        assert "Large Payload Handling" in system_context
         assert "[session memory] Context build failed" in caplog.text
         assert "search down" in caplog.text
 
@@ -271,7 +275,9 @@ class TestMemoryFallbacks:
         with caplog.at_level(logging.WARNING):
             context = sm._build_system_context_and_track_revision("task", "prompt")
 
-        assert context == "Be helpful.\n\n---\n\nctx"
+        assert "Be helpful." in context
+        assert "ctx" in context
+        assert "Large Payload Handling" in context
         assert "[session memory] Revision tracking failed" in caplog.text
         assert "revision write down" in caplog.text
 
@@ -336,3 +342,80 @@ class TestMemoryFallbacks:
         assert runner.reset_session.call_count == 2
         assert runner.timeout is None
         assert "Agent stalled (attempt 3/3)" in captured.getvalue()
+
+    def test_send_externalizes_large_prompt_and_response_to_temp_markdown(self):
+        sm, store, runner = _make_sm()
+        _attach_session(sm, session_id=1)
+        type(runner).is_session_started = PropertyMock(return_value=True)
+        store.count_session_turns.return_value = 2
+        large_prompt = "prompt section\n" + ("A" * 1500)
+        large_response = "response section\n" + ("B" * 1500)
+        runner.invoke.return_value = AgentResponse(content=large_response, exit_code=0)
+
+        response = sm.send(large_prompt, task_description="large")
+
+        assert response.content == large_response
+        sent_prompt = runner.invoke.call_args.args[0]
+        prompt_path = extract_markdown_path(sent_prompt)
+        assert prompt_path is not None
+        assert Path(prompt_path).exists()
+        assert large_prompt in Path(prompt_path).read_text(encoding="utf-8")
+
+        user_call = store.append_turn.call_args_list[0]
+        assistant_call = store.append_turn.call_args_list[1]
+        assert extract_markdown_path(user_call.kwargs["content"]) is not None
+        response_path = assistant_call.kwargs["metadata"]["externalized_response_path"]
+        assert Path(response_path).exists()
+        assert large_response in Path(response_path).read_text(encoding="utf-8")
+        assert "The detailed response is in" in assistant_call.kwargs["content"]
+
+    @pytest.mark.parametrize("role", ["architect", "developer", "qa_main", "qa_vice"])
+    def test_first_turn_externalizes_large_system_context_for_primary_roles(self, role):
+        large_system_prompt = f"You are {role}.\n" + ("S" * 900)
+        sm, store, runner = _make_sm(
+            agent_row={"id": 1, "role": role, "system_prompt": large_system_prompt},
+        )
+        store.get_active_session.return_value = None
+        store.create_session.return_value = Session(id=1, agent_id=1, session_uuid="uuid-1")
+        store.get_project_memory_revision.return_value = 3
+        store.count_session_turns.return_value = 2
+        sm._retriever.build_context_for_agent = MagicMock(return_value="C" * 900)
+        type(runner).is_session_started = PropertyMock(return_value=False)
+        runner.invoke.return_value = AgentResponse(content="ok", exit_code=0)
+
+        sm.send("hello", task_description="bootstrap")
+
+        sent_system_context = runner.invoke.call_args.kwargs["system_context"]
+        context_path = extract_markdown_path(sent_system_context)
+        assert context_path is not None
+        context_text = Path(context_path).read_text(encoding="utf-8")
+        assert "Large Payload Handling" in context_text
+        assert large_system_prompt in context_text
+        assert "C" * 900 in context_text
+
+    def test_send_status_callback_reports_stall_and_retry(self):
+        sm, store, runner = _make_sm()
+        store.get_active_session.return_value = None
+        store.create_session.return_value = Session(id=1, agent_id=1, session_uuid="uuid-1")
+        store.get_project_memory_revision.return_value = 3
+        store.count_session_turns.return_value = 2
+        runner.timeout = 20
+        type(runner).is_session_started = PropertyMock(return_value=False)
+        sm._retriever.build_context_for_agent = MagicMock(return_value="ctx")
+        runner.invoke.side_effect = [
+            AgentResponse(content="", exit_code=-1, cancelled=False),
+            AgentResponse(content="ok", exit_code=0, cancelled=False),
+        ]
+        callback = MagicMock()
+
+        response = sm.send("hello", task_description="greet", status_callback=callback)
+
+        assert response.content == "ok"
+        callback.assert_any_call(
+            "agent_stalled",
+            {"attempt": 1, "max_attempts": 3, "timeout": 20},
+        )
+        callback.assert_any_call(
+            "agent_retry",
+            {"attempt": 1, "next_attempt": 2, "max_attempts": 3, "next_timeout": 30},
+        )
