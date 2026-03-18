@@ -827,7 +827,7 @@ class MemoryStore:
                 trigger_kind,
                 source_session_id,
                 source_work_item_id,
-                json.dumps(payload_json or {}),
+                json.dumps(payload_json or {}, default=str),
                 status,
             ),
         )

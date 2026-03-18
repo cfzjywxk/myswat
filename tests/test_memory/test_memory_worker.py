@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -113,3 +114,21 @@ def test_run_reads_externalized_json_response() -> None:
     envelope = worker.run(request=request, context={})
 
     assert envelope.knowledge_actions == []
+
+
+def test_run_serializes_datetime_context() -> None:
+    runner = MagicMock()
+    runner.invoke.return_value = AgentResponse(
+        content='{"knowledge_actions":[],"relation_actions":[],"index_hints":[]}',
+        exit_code=0,
+    )
+    worker = MemoryWorker(settings=MySwatSettings(), runner=runner)
+    request = LearnRequest(project_id=1, source_kind="session", trigger_kind="session_termination")
+
+    worker.run(
+        request=request,
+        context={"source_session": {"created_at": datetime(2026, 3, 18, 22, 5, 0)}},
+    )
+
+    sent_prompt = runner.invoke.call_args.args[0]
+    assert "2026-03-18T22:05:00" in sent_prompt

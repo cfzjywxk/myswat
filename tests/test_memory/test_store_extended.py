@@ -1,6 +1,7 @@
 """Extended tests for MemoryStore – covers remaining uncovered methods."""
 
 import json
+from datetime import datetime
 from pathlib import Path
 import tempfile
 from unittest.mock import MagicMock, patch, call
@@ -304,6 +305,22 @@ class TestMergeWithRunner:
         )
 
         assert merged == "merged body"
+
+
+class TestLearnRequests:
+    def test_create_learn_request_serializes_datetime_payload(self, store, mock_pool):
+        mock_pool.insert_returning_id.return_value = 9
+
+        request_id = store.create_learn_request(
+            project_id=1,
+            source_kind="session",
+            trigger_kind="session_termination",
+            payload_json={"closed_at": datetime(2026, 3, 18, 22, 30, 0)},
+        )
+
+        assert request_id == 9
+        payload_json = mock_pool.insert_returning_id.call_args[0][1][5]
+        assert "2026-03-18 22:30:00" in payload_json
 
     def test_creates_new_row_when_no_safe_merge_exists(self, store, mock_pool):
         mock_pool.fetch_one.return_value = None

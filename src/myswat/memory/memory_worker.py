@@ -37,6 +37,16 @@ FILE_AWARE_MEMORY_WORKER_SYSTEM_PROMPT = "\n\n---\n\n".join(
 )
 
 
+def _json_default(value: Any) -> str:
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        try:
+            return isoformat()
+        except TypeError:
+            pass
+    return str(value)
+
+
 def _extract_json_block(text: str) -> dict | list | None:
     """Extract a JSON object or array from text that may contain markdown."""
     text = text.strip()
@@ -98,7 +108,7 @@ class MemoryWorker:
         }
         return (
             "Analyze the learn request and return a strict action envelope.\n\n"
-            f"{json.dumps(payload, indent=2, sort_keys=True)}"
+            f"{json.dumps(payload, indent=2, sort_keys=True, default=_json_default)}"
         )
 
     def run(
