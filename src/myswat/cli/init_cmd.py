@@ -355,7 +355,8 @@ def _validate_pending_default_agents(agent_defs: list[dict], store: MemoryStore,
 TEAM_WORKFLOWS_KNOWLEDGE = """\
 ## Team Workflows
 
-myswat orchestrates a multi-agent team: architect, developer, qa_main, qa_vice.
+myswat orchestrates a core team of architect, developer, and qa_main.
+An optional qa_vice role can be added later when you want a second QA reviewer.
 Agents delegate work to the team by ending a response with a ```delegate block.
 The system reads the MODE and TASK lines and starts the matching workflow automatically.
 
@@ -408,7 +409,7 @@ TASK: <concise description of the work>
 
 - MODE is optional; defaults to "develop" if omitted.
 - Only the architect role can delegate with MODE: full, design, or develop.
-- Only QA roles (qa_main, qa_vice) can delegate with MODE: testplan.
+- Only QA roles (qa_main, and qa_vice when configured) can delegate with MODE: testplan.
 - The developer role does not delegate — it receives delegated work.
 
 ### Decision Guide
@@ -451,16 +452,16 @@ def _seed_team_workflows(store: MemoryStore, project_id: int) -> None:
 
 
 def _seed_default_agents(store: MemoryStore, settings: MySwatSettings, project_id: int) -> None:
-    """Create the 4 default agent roles if they don't exist."""
+    """Create the default core agent roles, plus optional qa_vice when enabled."""
     architect_backend = _setting_str(settings.agents, "architect_backend", "codex")
     developer_backend = _setting_str(settings.agents, "developer_backend", "codex")
     qa_main_backend = _setting_str(settings.agents, "qa_main_backend", "claude")
+    qa_vice_enabled = settings.agents.qa_vice_enabled
     qa_vice_backend = _setting_str(settings.agents, "qa_vice_backend", "kimi")
 
     architect_path, architect_flags = _backend_path_and_flags(settings.agents, architect_backend)
     developer_path, developer_flags = _backend_path_and_flags(settings.agents, developer_backend)
     qa_main_path, qa_main_flags = _backend_path_and_flags(settings.agents, qa_main_backend)
-    qa_vice_path, qa_vice_flags = _backend_path_and_flags(settings.agents, qa_vice_backend)
     if qa_main_backend == "claude":
         qa_main_flags = _ensure_flag_value(qa_main_flags, "--effort", "high")
 
@@ -492,16 +493,21 @@ def _seed_default_agents(store: MemoryStore, settings: MySwatSettings, project_i
             "cli_extra_args": qa_main_flags,
             "system_prompt": QA_MAIN_SYSTEM_PROMPT,
         },
-        {
-            "role": "qa_vice",
-            "display_name": "QA (Secondary)",
-            "cli_backend": qa_vice_backend,
-            "model_name": settings.agents.qa_vice_model,
-            "cli_path": qa_vice_path,
-            "cli_extra_args": qa_vice_flags,
-            "system_prompt": QA_VICE_SYSTEM_PROMPT,
-        },
     ]
+
+    if qa_vice_enabled:
+        qa_vice_path, qa_vice_flags = _backend_path_and_flags(settings.agents, qa_vice_backend)
+        agent_defs.append(
+            {
+                "role": "qa_vice",
+                "display_name": "QA (Secondary)",
+                "cli_backend": qa_vice_backend,
+                "model_name": settings.agents.qa_vice_model,
+                "cli_path": qa_vice_path,
+                "cli_extra_args": qa_vice_flags,
+                "system_prompt": QA_VICE_SYSTEM_PROMPT,
+            }
+        )
 
     _validate_pending_default_agents(agent_defs, store, project_id)
 

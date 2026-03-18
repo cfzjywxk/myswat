@@ -66,13 +66,14 @@ class TestInitHelpers:
 # ---------------------------------------------------------------------------
 class TestSeedDefaultAgents:
     @patch("myswat.cli.init_cmd._is_cli_available", return_value=True)
-    def test_creates_4_agents(self, mock_available):
+    def test_creates_3_core_agents_by_default(self, mock_available):
         store = MagicMock()
         store.get_agent.return_value = None
         settings = MagicMock()
         settings.agents.architect_model = "gpt-5"
         settings.agents.developer_model = "gpt-5"
         settings.agents.qa_main_model = "claude-opus-4-6"
+        settings.agents.qa_vice_enabled = False
         settings.agents.qa_vice_model = "kimi"
         settings.agents.codex_path = "codex"
         settings.agents.claude_path = "claude"
@@ -82,16 +83,17 @@ class TestSeedDefaultAgents:
         settings.agents.kimi_default_flags = ["--print"]
 
         _seed_default_agents(store, settings, 1)
-        assert store.create_agent.call_count == 4
+        assert store.create_agent.call_count == 3
 
     @patch("myswat.cli.init_cmd._is_cli_available", return_value=True)
-    def test_seeded_agents_include_system_prompts(self, mock_available):
+    def test_seeded_default_agents_include_core_system_prompts(self, mock_available):
         store = MagicMock()
         store.get_agent.return_value = None
         settings = MagicMock()
         settings.agents.architect_model = "gpt-5"
         settings.agents.developer_model = "gpt-5"
         settings.agents.qa_main_model = "claude-opus-4-6"
+        settings.agents.qa_vice_enabled = False
         settings.agents.qa_vice_model = "kimi"
         settings.agents.codex_path = "codex"
         settings.agents.claude_path = "claude"
@@ -106,7 +108,30 @@ class TestSeedDefaultAgents:
         assert ARCHITECT_SYSTEM_PROMPT in prompts
         assert DEVELOPER_SYSTEM_PROMPT in prompts
         assert QA_MAIN_SYSTEM_PROMPT in prompts
+        assert QA_VICE_SYSTEM_PROMPT not in prompts
+
+    @patch("myswat.cli.init_cmd._is_cli_available", return_value=True)
+    def test_seeded_agents_include_optional_qa_vice_when_enabled(self, mock_available):
+        store = MagicMock()
+        store.get_agent.return_value = None
+        settings = MagicMock()
+        settings.agents.architect_model = "gpt-5"
+        settings.agents.developer_model = "gpt-5"
+        settings.agents.qa_main_model = "claude-opus-4-6"
+        settings.agents.qa_vice_enabled = True
+        settings.agents.qa_vice_model = "kimi"
+        settings.agents.codex_path = "codex"
+        settings.agents.claude_path = "claude"
+        settings.agents.kimi_path = "kimi"
+        settings.agents.codex_default_flags = ["--json"]
+        settings.agents.claude_default_flags = ["--print"]
+        settings.agents.kimi_default_flags = ["--print"]
+
+        _seed_default_agents(store, settings, 1)
+
+        prompts = [call.kwargs.get("system_prompt") for call in store.create_agent.call_args_list]
         assert QA_VICE_SYSTEM_PROMPT in prompts
+        assert store.create_agent.call_count == 4
 
     @patch("myswat.cli.init_cmd._is_cli_available", return_value=True)
     def test_skips_existing_agents(self, mock_available):
@@ -116,6 +141,7 @@ class TestSeedDefaultAgents:
         settings.agents.architect_model = "gpt-5"
         settings.agents.developer_model = "gpt-5"
         settings.agents.qa_main_model = "claude-opus-4-6"
+        settings.agents.qa_vice_enabled = False
         settings.agents.qa_vice_model = "kimi"
         settings.agents.codex_path = "codex"
         settings.agents.claude_path = "claude"
@@ -141,6 +167,7 @@ class TestSeedDefaultAgents:
         settings.agents.architect_model = "gpt-5"
         settings.agents.developer_model = "gpt-5"
         settings.agents.qa_main_model = "claude-opus-4-6"
+        settings.agents.qa_vice_enabled = False
         settings.agents.qa_vice_model = "kimi"
         settings.agents.codex_path = "codex"
         settings.agents.claude_path = "claude"
@@ -150,7 +177,7 @@ class TestSeedDefaultAgents:
         settings.agents.kimi_default_flags = ["--print"]
 
         _seed_default_agents(store, settings, 1)
-        assert store.create_agent.call_count == 3
+        assert store.create_agent.call_count == 2
 
     @patch("myswat.cli.init_cmd._is_cli_available", return_value=True)
     def test_uses_configured_backends(self, mock_available):
@@ -160,6 +187,7 @@ class TestSeedDefaultAgents:
         settings.agents.architect_model = "claude-sonnet-4-6"
         settings.agents.developer_model = "claude-sonnet-4-6"
         settings.agents.qa_main_model = "kimi"
+        settings.agents.qa_vice_enabled = True
         settings.agents.qa_vice_model = "gpt-5"
         settings.agents.architect_backend = "claude"
         settings.agents.developer_backend = "claude"
@@ -194,6 +222,7 @@ class TestSeedDefaultAgents:
         settings.agents.architect_model = "gpt-5"
         settings.agents.developer_model = "gpt-5"
         settings.agents.qa_main_model = "claude-opus-4-6"
+        settings.agents.qa_vice_enabled = False
         settings.agents.qa_vice_model = "kimi"
         settings.agents.codex_path = "codex"
         settings.agents.claude_path = "claude"
@@ -215,6 +244,7 @@ class TestSeedDefaultAgents:
         settings.agents.architect_model = "gpt-5"
         settings.agents.developer_model = "gpt-5"
         settings.agents.qa_main_model = "claude-opus-4-6"
+        settings.agents.qa_vice_enabled = False
         settings.agents.qa_vice_model = "kimi"
         settings.agents.codex_path = "codex"
         settings.agents.claude_path = "claude"

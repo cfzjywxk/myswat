@@ -94,6 +94,7 @@ class TestAgentSettings:
         assert settings.architect_backend == "codex"
         assert settings.developer_backend == "codex"
         assert settings.qa_main_backend == "claude"
+        assert settings.qa_vice_enabled is False
         assert settings.qa_vice_backend == "kimi"
         assert settings.developer_model == "gpt-5.4"
         assert settings.architect_model == "gpt-5.4"
@@ -181,6 +182,11 @@ class TestAgentSettings:
         monkeypatch.setenv("MYSWAT_AGENTS_QA_VICE_MODEL", "custom/vice-model")
         settings = AgentSettings()
         assert settings.qa_vice_model == "custom/vice-model"
+
+    def test_env_override_qa_vice_enabled(self, monkeypatch):
+        monkeypatch.setenv("MYSWAT_AGENTS_QA_VICE_ENABLED", "true")
+        settings = AgentSettings()
+        assert settings.qa_vice_enabled is True
 
 
 # ---------------------------------------------------------------------------

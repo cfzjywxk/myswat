@@ -692,7 +692,8 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.run_migrations")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    def test_help_command(self, mock_sm_cls,
+    @patch("myswat.cli.chat_cmd.console.print")
+    def test_help_command(self, mock_console_print, mock_sm_cls,
                           mock_store_cls, mock_mig, mock_pool_cls,
                           mock_settings_cls, mock_preload,
                           mock_prompt_session_cls):
@@ -717,6 +718,13 @@ class TestRunChat:
         mock_prompt_session_cls.return_value = prompt_session
 
         run_chat("proj")
+
+        printed = "\n".join(
+            str(call.args[0]) for call in mock_console_print.call_args_list if call.args
+        )
+        assert "/task" in printed
+        assert "/history" in printed
+        assert "qa_vice" not in printed
 
     @patch("myswat.cli.chat_cmd.PromptSession")
     @patch("myswat.cli.chat_cmd.preload_model")

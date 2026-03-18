@@ -158,7 +158,11 @@ class TestBuildContextForAgent:
         assert "MySwat Project Access" in result
         assert "./myswat status -p proj" in result
         assert "./myswat history -p proj --turns 50" in result
+        assert './myswat search "<query>" -p proj' in result
+        assert "./myswat task <id> -p proj" in result
         assert "/status" in result
+        assert "/task <id>" in result
+        assert "/history [n]" in result
 
     def test_includes_current_session_turns(self, retriever, mock_store):
         mock_store.get_session.return_value = {"compacted_through_turn_index": -1}

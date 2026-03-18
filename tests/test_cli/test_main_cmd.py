@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import re
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -861,6 +862,18 @@ class TestCommandRouting:
         runner = CliRunner()
         result = runner.invoke(app, ["stop", "42", "--project", "proj"])
         mock_stop_work_item.assert_called_once_with("proj", 42)
+
+    def test_help_lists_project_introspection_commands(self):
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["--help"])
+
+        assert result.exit_code == 0
+        commands = set(re.findall(r"│\s+([a-z][a-z0-9-]*)\s+", result.output))
+        for visible_name in ("chat", "work", "status", "search", "history", "task", "memory", "gc", "stop", "init", "reset"):
+            assert visible_name in commands
 
     def test_feed_command_removed(self):
         from typer.testing import CliRunner

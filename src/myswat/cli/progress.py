@@ -204,8 +204,8 @@ def _build_task_monitor_display(
         )
 
     text.append("\n  Query from another terminal:\n", style="bold")
-    text.append(f"    myswat task {work_item_id or '<id>'} -p {proj['slug']}\n", style="dim")
     text.append(f"    myswat status -p {proj['slug']}\n", style="dim")
+    text.append(f"    myswat status -p {proj['slug']} --details\n", style="dim")
     return text
 
 
@@ -250,8 +250,8 @@ def _build_task_snapshot_display(
             text.append(f"    - {_single_line_preview(issue, 100)}\n", style="yellow")
 
     text.append("\n  Query from another terminal:\n", style="bold")
-    text.append(f"    myswat task {work_item_id} -p {proj['slug']}\n", style="dim")
     text.append(f"    myswat status -p {proj['slug']}\n", style="dim")
+    text.append(f"    myswat status -p {proj['slug']} --details\n", style="dim")
     return text
 
 

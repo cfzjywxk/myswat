@@ -222,8 +222,8 @@ def _cleanup_runtime_file(path_value: object) -> None:
 
 def _print_tracking_commands(project_slug: str, work_item_id: int) -> None:
     console.print("[dim]Query progress:[/dim]")
-    console.print(f"[dim]  myswat task {work_item_id} -p {project_slug}[/dim]")
-    console.print(f"[dim]  myswat status -p {project_slug}[/dim]\n")
+    console.print(f"[dim]  myswat status -p {project_slug}[/dim]")
+    console.print(f"[dim]  myswat status -p {project_slug} --details[/dim]\n")
 
 
 def _install_cancel_signal_handlers(
@@ -791,7 +791,7 @@ def stop_work_item(project_slug: str, work_item_id: int) -> None:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         console.print(
-            f"[red]Background worker PID {pid} is not running. Check `myswat task {work_item_id} -p {project_slug}`.[/red]"
+            f"[red]Background worker PID {pid} is not running. Check `myswat status -p {project_slug} --details`.[/red]"
         )
         raise typer.Exit(1)
 

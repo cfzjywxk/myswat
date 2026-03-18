@@ -45,6 +45,8 @@ def test_build_task_snapshot_display_includes_summary_and_todos():
     assert "Summary: Finalized WORK_MODE_DESIGN.md" in renderable.plain
     assert "Reopen the architect session" in renderable.plain
     assert "Confirm rollout notes wording" in renderable.plain
+    assert "myswat status -p myswat --details" in renderable.plain
+    assert "myswat task" not in renderable.plain
 
 
 def test_run_with_task_monitor_prints_final_snapshot_after_worker_finishes():

@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import io
+import logging
+from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
+
+import pymysql.err
+import pytest
 
 from myswat.agents.base import AgentResponse
 from myswat.agents.session_manager import SessionManager
@@ -181,3 +186,153 @@ class TestSubmitSessionSummary:
                 sm._submit_session_summary()
 
         assert "[session learn] Failed: worker down" in captured.getvalue()
+
+
+class TestMemoryFallbacks:
+    def test_restore_cli_session_ignores_lookup_failure(self):
+        sm, store, runner = _make_sm()
+        store.get_session_turns.side_effect = RuntimeError("db down")
+
+        sm._restore_cli_session(12)
+
+        runner.restore_session.assert_not_called()
+
+    def test_restore_cli_session_ignores_non_assistant_and_non_dict_metadata(self):
+        sm, store, runner = _make_sm()
+        store.get_session_turns.return_value = [
+            SimpleNamespace(role="user", metadata_json={"cli_session_id": "skip-user"}),
+            SimpleNamespace(role="assistant", metadata_json="not-a-dict"),
+            SimpleNamespace(role="assistant", metadata_json={}),
+        ]
+
+        sm._restore_cli_session(12)
+
+        runner.restore_session.assert_not_called()
+
+    def test_memory_revision_hint_failure_is_best_effort(self, caplog):
+        sm, store, _ = _make_sm()
+        sm._session = Session(
+            id=1,
+            agent_id=1,
+            session_uuid="uuid-1",
+            memory_revision_at_context_build=1,
+        )
+        store.get_project_memory_revision.side_effect = pymysql.err.OperationalError(
+            2003, "revision down",
+        )
+
+        with caplog.at_level(logging.WARNING):
+            prompt = sm._maybe_prefix_memory_revision_hint("continue")
+
+        assert prompt == "continue"
+        assert "[session memory] Revision check failed" in caplog.text
+        assert "revision down" in caplog.text
+
+    def test_memory_revision_hint_skips_when_revision_not_newer(self):
+        sm, store, _ = _make_sm()
+        sm._session = Session(
+            id=1,
+            agent_id=1,
+            session_uuid="uuid-1",
+            memory_revision_at_context_build=3,
+        )
+        store.get_project_memory_revision.return_value = 3
+
+        assert sm._maybe_prefix_memory_revision_hint("continue") == "continue"
+
+    def test_send_continues_when_memory_context_build_fails(self, caplog):
+        sm, store, runner = _make_sm()
+        store.get_active_session.return_value = None
+        store.create_session.return_value = Session(id=1, agent_id=1, session_uuid="uuid-1")
+        store.get_project_memory_revision.return_value = 5
+        store.count_session_turns.return_value = 2
+        type(runner).is_session_started = PropertyMock(return_value=False)
+        runner.invoke.return_value = AgentResponse(content="response", exit_code=0)
+        sm._retriever.build_context_for_agent = MagicMock(
+            side_effect=pymysql.err.OperationalError(2003, "search down"),
+        )
+
+        with caplog.at_level(logging.WARNING):
+            response = sm.send("hello", task_description="greet")
+
+        assert response.content == "response"
+        assert runner.invoke.call_args.kwargs["system_context"] == "Be helpful."
+        assert "[session memory] Context build failed" in caplog.text
+        assert "search down" in caplog.text
+
+    def test_build_system_context_logs_revision_tracking_failure(self, caplog):
+        sm, store, _ = _make_sm()
+        sm._session = Session(id=1, agent_id=1, session_uuid="uuid-1")
+        sm._retriever.build_context_for_agent = MagicMock(return_value="ctx")
+        store.get_project_memory_revision.side_effect = pymysql.err.OperationalError(
+            2003, "revision write down",
+        )
+
+        with caplog.at_level(logging.WARNING):
+            context = sm._build_system_context_and_track_revision("task", "prompt")
+
+        assert context == "Be helpful.\n\n---\n\nctx"
+        assert "[session memory] Revision tracking failed" in caplog.text
+        assert "revision write down" in caplog.text
+
+    def test_send_propagates_memory_layer_programming_errors(self):
+        sm, store, runner = _make_sm()
+        store.get_active_session.return_value = None
+        store.create_session.return_value = Session(id=1, agent_id=1, session_uuid="uuid-1")
+        store.count_session_turns.return_value = 2
+        type(runner).is_session_started = PropertyMock(return_value=False)
+        sm._retriever.build_context_for_agent = MagicMock(side_effect=TypeError("bug"))
+
+        with pytest.raises(TypeError, match="bug"):
+            sm.send("hello", task_description="greet")
+
+    def test_send_retries_stalled_runner_with_backoff_and_restores_timeout(self):
+        sm, store, runner = _make_sm()
+        store.get_active_session.return_value = None
+        store.create_session.return_value = Session(id=1, agent_id=1, session_uuid="uuid-1")
+        store.get_project_memory_revision.return_value = 3
+        store.count_session_turns.return_value = 2
+        runner.timeout = 20
+        type(runner).is_session_started = PropertyMock(return_value=False)
+        sm._retriever.build_context_for_agent = MagicMock(return_value="ctx")
+        runner.invoke.side_effect = [
+            AgentResponse(content="", exit_code=-1, cancelled=False),
+            AgentResponse(content="", exit_code=-1, cancelled=False),
+            AgentResponse(content="ok", exit_code=0, cancelled=False),
+        ]
+
+        captured = io.StringIO()
+        with patch("sys.stderr", captured):
+            response = sm.send("hello", task_description="greet")
+
+        assert response.content == "ok"
+        assert runner.reset_session.call_count == 2
+        assert sm._retriever.build_context_for_agent.call_count == 3
+        assert runner.timeout == 20
+        assert store.set_session_memory_revision.call_count == 3
+        assert "Agent stalled (attempt 1/3)" in captured.getvalue()
+        assert "Agent stalled (attempt 2/3)" in captured.getvalue()
+
+    def test_send_returns_last_stall_response_after_retry_exhaustion(self):
+        sm, store, runner = _make_sm()
+        store.get_active_session.return_value = None
+        store.create_session.return_value = Session(id=1, agent_id=1, session_uuid="uuid-1")
+        store.get_project_memory_revision.return_value = 3
+        store.count_session_turns.return_value = 2
+        runner.timeout = None
+        type(runner).is_session_started = PropertyMock(return_value=False)
+        sm._retriever.build_context_for_agent = MagicMock(return_value="ctx")
+        runner.invoke.side_effect = [
+            AgentResponse(content="stall-1", exit_code=-1, cancelled=False),
+            AgentResponse(content="stall-2", exit_code=-1, cancelled=False),
+            AgentResponse(content="stall-3", exit_code=-1, cancelled=False),
+        ]
+
+        captured = io.StringIO()
+        with patch("sys.stderr", captured):
+            response = sm.send("hello", task_description="greet")
+
+        assert response.content == "stall-3"
+        assert runner.reset_session.call_count == 2
+        assert runner.timeout is None
+        assert "Agent stalled (attempt 3/3)" in captured.getvalue()

@@ -47,14 +47,14 @@ HELP_TEXT = """
 [bold]Commands:[/bold]
   /help                 Show this help
   /status               Show project status
-  /task [id]            Show details for a work item (latest active item if omitted)
+  /task <id>            Show detailed status for one work item
+  /history [n]          Show recent turns from the active chat session
   /work <requirement>   Start full workflow: design -> plan -> develop -> test
-  /role <role>          Switch agent role (developer, architect, qa_main, qa_vice)
+  /role <role>          Switch agent role (developer, architect, qa_main)
   /reset                Reset AI session (fresh context reload, same TiDB session)
   /review <task>        Start the legacy dev+reviewer loop for a task
   /agents               List available agents
   /sessions             Show active sessions
-  /history [n]          Show last n turns (default 10)
   /new                  Start a new session (close current)
   /quit, /exit, Ctrl+D  Exit chat
 """

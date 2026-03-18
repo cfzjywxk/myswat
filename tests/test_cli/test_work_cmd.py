@@ -223,8 +223,8 @@ class TestRunWork:
             run_work("proj", "do stuff")
 
         rendered = [str(call.args[0]) for call in mock_console_print.call_args_list if call.args]
-        assert any("myswat task 42 -p proj" in line for line in rendered)
         assert any("myswat status -p proj" in line for line in rendered)
+        assert any("myswat status -p proj --details" in line for line in rendered)
 
     @patch("myswat.cli.work_cmd._run_with_task_monitor")
     @patch("myswat.cli.work_cmd.WorkflowEngine")
@@ -581,8 +581,8 @@ class TestRunWork:
         )
         assert (tmp_path / "runs" / "proj" / "work-42.pid").read_text(encoding="ascii").strip() == "12345"
         rendered = [str(call.args[0]) for call in mock_console_print.call_args_list if call.args]
-        assert any("myswat task 42 -p proj" in line for line in rendered)
         assert any("myswat status -p proj" in line for line in rendered)
+        assert any("myswat status -p proj --details" in line for line in rendered)
 
     @patch("myswat.cli.work_cmd.WorkflowEngine")
     @patch("myswat.cli.work_cmd.MySwatSettings")

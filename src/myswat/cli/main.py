@@ -175,10 +175,11 @@ def stop(
 
 def _format_history_timestamp(value) -> str:
     if hasattr(value, "isoformat"):
+        isoformat = value.isoformat
         try:
-            return value.isoformat(sep=" ", timespec="seconds")
+            return isoformat(sep=" ", timespec="seconds")
         except TypeError:
-            return value.isoformat()
+            return isoformat()
     return str(value)
 
 
@@ -867,8 +868,10 @@ def status(
                         pass
                 console.print(f"  {role_label}{time_tag}: {content}")
 
-    console.print("\n[dim]Use `myswat task <id> -p "
-                  f"{proj['slug']}` for one work item, or `myswat status -p {proj['slug']}` to refresh.[/dim]")
+    console.print(
+        "\n[dim]Use `myswat task <id> -p "
+        f"{proj['slug']}` for one work item, or `myswat status -p {proj['slug']} --details` for full workflow detail.[/dim]"
+    )
 
     # Knowledge stats
     knowledge_row = pool.fetch_one(

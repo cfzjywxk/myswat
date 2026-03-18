@@ -30,6 +30,7 @@ class AgentSettings(BaseSettings):
     architect_backend: str = "codex"
     developer_backend: str = "codex"
     qa_main_backend: str = "claude"
+    qa_vice_enabled: bool = False
     qa_vice_backend: str = "kimi"
     developer_model: str = "gpt-5.4"
     architect_model: str = "gpt-5.4"

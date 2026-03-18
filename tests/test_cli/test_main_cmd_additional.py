@@ -1,0 +1,323 @@
+"""Additional coverage-focused tests for myswat.cli.main."""
+
+from __future__ import annotations
+
+from datetime import date
+import json
+from unittest.mock import MagicMock, patch
+
+import pytest
+import pymysql.err
+import typer
+from click.exceptions import Exit as ClickExit
+from rich.console import Console
+from rich.tree import Tree
+from typer.testing import CliRunner
+
+from myswat.cli.main import (
+    _build_teamwork_flow_entries,
+    _format_history_timestamp,
+    _infer_stage_labels,
+    _print_message_flow,
+    _print_task_state,
+    app,
+)
+
+
+def test_work_command_requires_requirement_without_resume():
+    from myswat.cli.main import work
+
+    with pytest.raises(typer.BadParameter, match="Requirement is required"):
+        work(
+            project="proj",
+            requirement=None,
+            background=False,
+            resume=None,
+            design_mode=False,
+            develop_mode=False,
+            test_mode=False,
+            auto_approve=False,
+            workdir=None,
+        )
+
+
+def test_work_command_rejects_requirement_with_resume():
+    from myswat.cli.main import work
+
+    with pytest.raises(typer.BadParameter, match="Cannot provide a new requirement with --resume"):
+        work(
+            project="proj",
+            requirement="new req",
+            background=False,
+            resume=7,
+            design_mode=False,
+            develop_mode=False,
+            test_mode=False,
+            auto_approve=False,
+            workdir=None,
+        )
+
+
+def test_work_command_rejects_resume_with_background():
+    from myswat.cli.main import work
+
+    with pytest.raises(typer.BadParameter, match="--resume cannot be combined with --background"):
+        work(
+            project="proj",
+            requirement=None,
+            background=True,
+            resume=7,
+            design_mode=False,
+            develop_mode=False,
+            test_mode=False,
+            auto_approve=False,
+            workdir=None,
+        )
+
+
+def test_format_history_timestamp_falls_back_to_plain_isoformat():
+    assert _format_history_timestamp(date(2026, 3, 18)) == "2026-03-18"
+
+
+@patch("myswat.memory.store.MemoryStore")
+@patch("myswat.db.connection.TiDBPool")
+@patch("myswat.config.settings.MySwatSettings")
+def test_gc_command_rejects_unknown_project(mock_settings_cls, mock_pool_cls, mock_store_cls):
+    settings = MagicMock()
+    settings.embedding.tidb_model = "built-in"
+    mock_settings_cls.return_value = settings
+    store = MagicMock()
+    store.get_project_by_slug.return_value = None
+    mock_store_cls.return_value = store
+
+    result = CliRunner().invoke(app, ["gc", "--project", "missing"])
+
+    assert result.exit_code == 1
+    assert "Project 'missing' not found." in result.stdout
+
+
+@patch("myswat.memory.store.MemoryStore")
+@patch("myswat.db.connection.TiDBPool")
+@patch("myswat.config.settings.MySwatSettings")
+def test_history_command_handles_missing_project_and_empty_rows(
+    mock_settings_cls,
+    mock_pool_cls,
+    mock_store_cls,
+):
+    settings = MagicMock()
+    settings.embedding.tidb_model = "built-in"
+    mock_settings_cls.return_value = settings
+    store = MagicMock()
+    store.get_project_by_slug.side_effect = [None, {"id": 1}]
+    store.get_recent_turns_global.return_value = []
+    mock_store_cls.return_value = store
+    runner = CliRunner()
+
+    missing = runner.invoke(app, ["history", "--project", "missing"])
+    empty = runner.invoke(app, ["history", "--project", "proj"])
+
+    assert missing.exit_code == 1
+    assert "Project 'missing' not found." in missing.stdout
+    assert empty.exit_code == 0
+    assert "No recent turns found." in empty.stdout
+
+
+@patch("myswat.db.schema.run_migrations", return_value=["v001"])
+@patch("myswat.db.connection.TiDBPool")
+@patch("myswat.config.settings.MySwatSettings")
+def test_reset_without_project_prints_reinit_hint(mock_settings_cls, mock_pool_cls, mock_migrations):
+    settings = MagicMock()
+    settings.tidb.database = "myswat"
+    mock_settings_cls.return_value = settings
+    first_pool = MagicMock()
+    first_pool.health_check.return_value = True
+    second_pool = MagicMock()
+    mock_pool_cls.side_effect = [first_pool, second_pool]
+
+    result = CliRunner().invoke(app, ["reset", "--yes"])
+
+    assert result.exit_code == 0
+    assert "Database is empty. Run 'myswat init <name>' to create a project." in result.stdout
+
+
+def test_build_teamwork_flow_entries_returns_empty_without_rows():
+    pool = MagicMock()
+    pool.fetch_all.return_value = []
+
+    assert _build_teamwork_flow_entries(pool, {"id": 7, "description": ""}) == []
+
+
+def test_print_message_flow_skips_non_dict_entries():
+    tree = Tree("root")
+
+    _print_message_flow(tree, ["skip-me", {"type": "review_request", "from_role": "dev", "to_role": "qa"}])
+
+    console = Console(record=True, force_terminal=False)
+    console.print(tree)
+    rendered = console.export_text()
+    assert "dev -> qa" in rendered
+
+
+def test_print_task_state_renders_background_and_process_log():
+    output = []
+
+    class _Console:
+        def print(self, message=""):
+            output.append(str(message))
+
+    _print_task_state(
+        _Console(),
+        {
+            "metadata_json": {
+                "work_mode": "develop",
+                "background": {
+                    "mode": "test",
+                    "state": "running",
+                    "pid": 1234,
+                    "log_path": "/tmp/work.log",
+                    "requested_at": "2026-03-18T10:00:00",
+                    "started_at": "2026-03-18T10:01:00",
+                    "finished_at": "2026-03-18T10:02:00",
+                },
+                "task_state": {
+                    "current_stage": "phase_2",
+                    "latest_summary": "working",
+                    "next_todos": ["ship"],
+                    "open_issues": ["retry"],
+                    "process_log": [
+                        {"type": "task_request", "summary": "start", "at": "2026-03-18 10:00:00"},
+                        "skip-me",
+                    ],
+                },
+            }
+        },
+    )
+
+    rendered = "\n".join(output)
+    assert "Execution:" in rendered
+    assert "Finished:" in rendered
+    assert "Process Log:" in rendered
+
+
+def test_print_task_state_prints_blank_line_for_background_only():
+    output = []
+
+    class _Console:
+        def print(self, message=""):
+            output.append(str(message))
+
+    _print_task_state(_Console(), {"metadata_json": {"background": {"state": "running"}}})
+
+    assert output[-1] == ""
+
+
+def test_infer_stage_labels_uses_generic_fallback():
+    labels = _infer_stage_labels([{"proposer_role": "analyst", "reviewer_role": "operator"}])
+
+    assert labels == ["Review (analyst → operator)"]
+
+
+@patch("myswat.config.settings.MySwatSettings")
+@patch("myswat.db.connection.TiDBPool")
+@patch("myswat.memory.store.MemoryStore")
+def test_status_handles_tidb_unreachable_and_local_cache(
+    mock_store_cls,
+    mock_pool_cls,
+    mock_settings_cls,
+    tmp_path,
+):
+    settings = MagicMock()
+    settings.tidb.host = "tidb.example"
+    settings.tidb.port = 4000
+    settings.embedding.tidb_model = "built-in"
+    mock_settings_cls.return_value = settings
+    store = MagicMock()
+    store.get_project_by_slug.side_effect = pymysql.err.OperationalError(2003, "boom")
+    mock_store_cls.return_value = store
+    runner = CliRunner()
+    repo_cache = tmp_path / "myswat.md"
+    repo_cache.write_text("cached", encoding="ascii")
+
+    with patch("pathlib.Path.cwd", return_value=tmp_path):
+        result = runner.invoke(app, ["status", "--project", "proj"])
+
+    assert result.exit_code == 1
+    assert "TiDB is unreachable from this environment." in result.stdout
+    assert str(repo_cache) in result.stdout
+
+
+@patch("myswat.config.settings.MySwatSettings")
+@patch("myswat.db.connection.TiDBPool")
+@patch("myswat.memory.store.MemoryStore")
+def test_status_renders_session_truncation_short_elapsed_and_invalid_metadata(
+    mock_store_cls,
+    mock_pool_cls,
+    mock_settings_cls,
+):
+    settings = MagicMock()
+    settings.embedding.tidb_model = "built-in"
+    mock_settings_cls.return_value = settings
+    store = MagicMock()
+    store.get_project_by_slug.return_value = {"id": 1, "slug": "proj", "name": "Proj"}
+    store.list_agents.return_value = []
+    store.list_work_items.return_value = []
+    store.count_session_turns.return_value = 2
+    mock_store_cls.return_value = store
+    long_pending = "x" * 210
+    long_content = "y" * 160
+    pool = MagicMock()
+    pool.fetch_all.side_effect = [
+        [
+            {"session_uuid": "uuid-12345678", "display_name": "Dev", "id": 1, "purpose": "doing things", "token_count_est": 99},
+            {"session_uuid": "uuid-87654321", "display_name": "QA", "id": 2, "purpose": "waiting", "token_count_est": 12},
+        ],
+        [],
+        [
+            {"role": "assistant", "content": long_content, "metadata_json": json.dumps({"elapsed_seconds": 59}), "created_at": "2026-03-18"},
+            {"role": "user", "content": "hi", "metadata_json": None, "created_at": "2026-03-18"},
+            {"role": "assistant", "content": "broken", "metadata_json": "{", "created_at": "2026-03-18"},
+        ],
+    ]
+    pool.fetch_one.side_effect = [
+        {"role": "user"},
+        {"content": long_pending},
+        {"role": "assistant"},
+        {"cnt": 0},
+        {"cnt": 0},
+    ]
+    mock_pool_cls.return_value = pool
+
+    result = CliRunner().invoke(app, ["status", "--project", "proj"])
+
+    assert result.exit_code == 0
+    assert "(59s)" in result.stdout
+    assert "..." in result.stdout
+
+
+@patch("myswat.cli.main._print_teamwork_details")
+@patch("myswat.config.settings.MySwatSettings")
+@patch("myswat.db.connection.TiDBPool")
+@patch("myswat.memory.store.MemoryStore")
+def test_task_command_without_description_still_prints_state(
+    mock_store_cls,
+    mock_pool_cls,
+    mock_settings_cls,
+    mock_teamwork,
+):
+    store = MagicMock()
+    store.get_project_by_slug.return_value = {"id": 1, "slug": "proj", "name": "Proj"}
+    store.get_work_item.return_value = {
+        "id": 7,
+        "project_id": 1,
+        "status": "in_progress",
+        "item_type": "code_change",
+        "title": "Implement feature",
+        "description": "",
+        "metadata_json": {},
+    }
+    mock_store_cls.return_value = store
+
+    result = CliRunner().invoke(app, ["task", "7", "--project", "proj"])
+
+    assert result.exit_code == 0
+    mock_teamwork.assert_called_once()

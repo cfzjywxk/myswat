@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import time
 from typing import TYPE_CHECKING
+
+import pymysql.err
 
 from myswat.agents.base import AgentResponse
 from myswat.config.settings import MySwatSettings
@@ -15,6 +18,9 @@ if TYPE_CHECKING:
     from myswat.agents.base import AgentRunner
     from myswat.memory.store import MemoryStore
     from myswat.models.session import Session
+
+logger = logging.getLogger(__name__)
+_MEMORY_LAYER_ERRORS = (pymysql.err.Error, OSError)
 
 
 class SessionManager:
@@ -137,13 +143,17 @@ class SessionManager:
         built_revision = getattr(self._session, "memory_revision_at_context_build", None)
         if built_revision is None:
             return prompt
-        current_revision = self._store.get_project_memory_revision(self._project_id)
+        try:
+            current_revision = self._store.get_project_memory_revision(self._project_id)
+        except _MEMORY_LAYER_ERRORS as exc:
+            logger.warning("[session memory] Revision check failed: %s", exc)
+            return prompt
         if current_revision <= built_revision:
             return prompt
         self._memory_revision_warned = True
         note = (
             "[myswat note: project knowledge changed since this session started. "
-            "Use `./myswat search \"<query>\" -p <project>` if you need fresh recall.]\n\n"
+            "Start a fresh chat or workflow run if you need fully refreshed recall.]\n\n"
         )
         return note + prompt
 
@@ -171,18 +181,27 @@ class SessionManager:
         agent_system_prompt = self._agent_row.get("system_prompt")
         if agent_system_prompt:
             parts.append(agent_system_prompt)
-        context = self._retriever.build_context_for_agent(
-            project_id=self._project_id,
-            agent_id=self._agent_row["id"],
-            agent_role=self._agent_row.get("role"),
-            task_description=task_description or prompt,
-            current_session_id=self._session.id,
-            repo_path=self._runner.workdir,
-        )
-        current_memory_revision = self._store.get_project_memory_revision(self._project_id)
-        self._store.set_session_memory_revision(self._session.id, current_memory_revision)
-        if self._session is not None:
-            self._session.memory_revision_at_context_build = current_memory_revision
+        context = None
+        try:
+            context = self._retriever.build_context_for_agent(
+                project_id=self._project_id,
+                agent_id=self._agent_row["id"],
+                agent_role=self._agent_row.get("role"),
+                task_description=task_description or prompt,
+                current_session_id=self._session.id,
+                repo_path=self._runner.workdir,
+            )
+        except _MEMORY_LAYER_ERRORS as exc:
+            logger.warning("[session memory] Context build failed: %s", exc)
+
+        try:
+            current_memory_revision = self._store.get_project_memory_revision(self._project_id)
+            self._store.set_session_memory_revision(self._session.id, current_memory_revision)
+            if self._session is not None:
+                self._session.memory_revision_at_context_build = current_memory_revision
+        except _MEMORY_LAYER_ERRORS as exc:
+            logger.warning("[session memory] Revision tracking failed: %s", exc)
+
         self._memory_revision_warned = False
         if context:
             parts.append(context)
