@@ -24,6 +24,7 @@ Workflow:
 
 from __future__ import annotations
 
+import io
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -35,6 +36,7 @@ from rich.panel import Panel
 
 from myswat.cli.progress import _collapse_text
 from myswat.models.work_item import ReviewVerdict
+from myswat.workflow.events import WorkflowEvent
 from myswat.workflow.modes import WorkMode
 from myswat.workflow.prompts import (
     ARCH_ADDRESS_DESIGN_COMMENTS,
@@ -181,6 +183,7 @@ class WorkflowEngine:
         should_cancel: Callable[[], bool] | None = None,
         arch_sm: SessionManager | None = None,
         resume_stage: str | None = None,
+        on_event: Callable[[WorkflowEvent], None] | None = None,
     ) -> None:
         self._store = store
         self._dev = dev_sm
@@ -201,6 +204,37 @@ class WorkflowEngine:
         self._blocked = False
         self._failure_summary = ""
         self._blocked_stage = ""
+        self._on_event = on_event
+        # When an event handler is attached, use a quiet console to suppress
+        # status prints (the display renderer shows structured output instead).
+        # The real console is kept for user-facing content (artifact panels
+        # before checkpoints, final reports) which Rich Live renders above
+        # the transient display.
+        self._real_console = console
+        if on_event is not None:
+            self._console = Console(file=io.StringIO(), quiet=True)
+        else:
+            self._console = console
+
+    def _emit(
+        self,
+        event_type: str,
+        message: str,
+        *,
+        stage: str = "",
+        agent_role: str | None = None,
+        detail: str | None = None,
+        **metadata: object,
+    ) -> None:
+        if self._on_event is not None:
+            self._on_event(WorkflowEvent(
+                event_type=event_type,
+                message=message,
+                stage=stage,
+                agent_role=agent_role,
+                detail=detail,
+                metadata=metadata,
+            ))
 
     def _persist_task_state(
         self,
@@ -225,7 +259,7 @@ class WorkflowEngine:
                 updated_by_agent_id=updated_by_agent_id,
             )
         except Exception as e:
-            console.print(f"[dim red]Warning: Failed to persist task state: {e}[/dim red]")
+            self._console.print(f"[dim red]Warning: Failed to persist task state: {e}[/dim red]")
 
     @staticmethod
     def _first_lines(text: str, limit: int = 4) -> list[str]:
@@ -534,12 +568,15 @@ class WorkflowEngine:
     def _run_architect_design_mode(self, requirement: str, result: WorkflowResult) -> WorkflowResult:
         assert self._arch is not None
 
-        console.print(Panel("[bold]Stage 1: Technical Design[/bold]", border_style="blue"))
-        console.print("[yellow]Architect producing technical design...[/yellow]")
+        self._emit("stage_start", "Stage 1: Technical Design", stage="design")
+        self._console.print(Panel("[bold]Stage 1: Technical Design[/bold]", border_style="blue"))
+        self._emit("agent_working", "Producing technical design...", stage="design", agent_role=self._arch.agent_role)
+        self._console.print("[yellow]Architect producing technical design...[/yellow]")
         prompt = ARCH_TECH_DESIGN.format(requirement=requirement)
         response = self._arch.send(prompt, task_description=f"Architect design: {requirement[:100]}")
         if not response.success:
-            console.print(f"[red]Architect agent failed (exit={response.exit_code})[/red]")
+            self._emit("agent_error", f"Agent failed (exit={response.exit_code})", stage="design", agent_role=self._arch.agent_role)
+            self._console.print(f"[red]Architect agent failed (exit={response.exit_code})[/red]")
             self._record_blocked_failure(
                 stage="design_draft_blocked",
                 summary=f"[{self._arch.agent_role}] design draft failed (exit={response.exit_code})",
@@ -552,6 +589,7 @@ class WorkflowEngine:
             result.final_report = self._generate_report(result, [])
             return self._sync_result_failure_state(result)
 
+        self._emit("agent_done", "Design draft submitted", stage="design", agent_role=self._arch.agent_role)
         design = response.content
         result.design = design
         self._persist_task_state(
@@ -574,7 +612,8 @@ class WorkflowEngine:
             result.final_report = "Architect-design workflow cancelled during technical design."
             return self._sync_result_failure_state(result)
 
-        console.print(Panel("[bold]Stage 2: Design Review[/bold]", border_style="blue"))
+        self._emit("stage_start", "Stage 2: Design Review", stage="design_review")
+        self._console.print(Panel("[bold]Stage 2: Design Review[/bold]", border_style="blue"))
         design, iters, design_review_passed = self._run_review_loop(
             artifact=design,
             artifact_type="arch_design",
@@ -602,7 +641,7 @@ class WorkflowEngine:
             result.final_report = self._generate_report(result, [])
             return self._sync_result_failure_state(result)
 
-        console.print(Panel(Markdown(design), title="Reviewed Design", border_style="green"))
+        self._real_console.print(Panel(Markdown(design), title="Reviewed Design", border_style="green"))
         design = self._user_checkpoint(
             design,
             "arch_design",
@@ -610,7 +649,7 @@ class WorkflowEngine:
             proposer=self._arch,
         )
         if design is None:
-            console.print("[yellow]Workflow stopped by user.[/yellow]")
+            self._console.print("[yellow]Workflow stopped by user.[/yellow]")
             self._persist_task_state(
                 current_stage="design_rejected_by_user",
                 latest_summary=result.design[:4000],
@@ -622,10 +661,12 @@ class WorkflowEngine:
 
         result.design = design
         result.success = True
-        console.print(Panel("[bold]Stage 3: Final Report[/bold]", border_style="blue"))
+        self._emit("stage_start", "Final Report", stage="report")
+        self._console.print(Panel("[bold]Stage 3: Final Report[/bold]", border_style="blue"))
         report = self._generate_report(result, [])
         result.final_report = report
-        console.print(Panel(Markdown(report), title="Architect Design Workflow Report", border_style="green"))
+        self._real_console.print(Panel(Markdown(report), title="Architect Design Workflow Report", border_style="green"))
+        self._emit("stage_complete", "Report generated", stage="report")
         self._persist_task_state(
             current_stage="workflow_completed",
             latest_summary=report[:4000],
@@ -639,12 +680,15 @@ class WorkflowEngine:
         assert self._arch is not None
         qa_lead = self._qas[0]
 
-        console.print(Panel("[bold]Stage 1: Test Plan Design[/bold]", border_style="blue"))
-        console.print("[yellow]QA producing formal test plan...[/yellow]")
+        self._emit("stage_start", "Test Plan Design", stage="testplan_design")
+        self._console.print(Panel("[bold]Stage 1: Test Plan Design[/bold]", border_style="blue"))
+        self._emit("agent_working", "Producing formal test plan...", stage="testplan_design", agent_role=qa_lead.agent_role)
+        self._console.print("[yellow]QA producing formal test plan...[/yellow]")
         prompt = QA_DESIGN_TEST_PLAN.format(requirement=requirement)
         response = qa_lead.send(prompt, task_description=f"QA test plan: {requirement[:100]}")
         if not response.success:
-            console.print(f"[red]QA agent failed (exit={response.exit_code})[/red]")
+            self._emit("agent_error", f"Agent failed (exit={response.exit_code})", stage="testplan_design", agent_role=qa_lead.agent_role)
+            self._console.print(f"[red]QA agent failed (exit={response.exit_code})[/red]")
             self._record_blocked_failure(
                 stage="testplan_draft_blocked",
                 summary=f"[{qa_lead.agent_role}] test plan draft failed (exit={response.exit_code})",
@@ -657,6 +701,7 @@ class WorkflowEngine:
             result.final_report = self._generate_report(result, [])
             return self._sync_result_failure_state(result)
 
+        self._emit("agent_done", "Test plan draft submitted", stage="testplan_design", agent_role=qa_lead.agent_role)
         test_plan = response.content
         self._persist_task_state(
             current_stage="testplan_draft",
@@ -679,7 +724,8 @@ class WorkflowEngine:
             result.ga_test = GATestResult(test_plan=test_plan)
             return self._sync_result_failure_state(result)
 
-        console.print(Panel("[bold]Stage 2: Test Plan Review[/bold]", border_style="blue"))
+        self._emit("stage_start", "Test Plan Review", stage="testplan_review")
+        self._console.print(Panel("[bold]Stage 2: Test Plan Review[/bold]", border_style="blue"))
         test_plan, iters, test_plan_review_passed = self._run_review_loop(
             artifact=test_plan,
             artifact_type="test_plan",
@@ -709,7 +755,7 @@ class WorkflowEngine:
             result.final_report = self._generate_report(result, [])
             return self._sync_result_failure_state(result)
 
-        console.print(Panel(Markdown(test_plan), title="Reviewed Test Plan", border_style="green"))
+        self._real_console.print(Panel(Markdown(test_plan), title="Reviewed Test Plan", border_style="green"))
         test_plan = self._user_checkpoint(
             test_plan,
             "test_plan",
@@ -717,7 +763,7 @@ class WorkflowEngine:
             proposer=qa_lead,
         )
         if test_plan is None:
-            console.print("[yellow]Workflow stopped by user.[/yellow]")
+            self._console.print("[yellow]Workflow stopped by user.[/yellow]")
             self._persist_task_state(
                 current_stage="testplan_rejected_by_user",
                 latest_summary=result.ga_test.test_plan[:4000] if result.ga_test else "",
@@ -733,10 +779,12 @@ class WorkflowEngine:
         result.ga_test.test_plan_review_iterations = iters
         result.ga_test.test_plan_review_passed = True
         result.success = True
-        console.print(Panel("[bold]Stage 3: Final Report[/bold]", border_style="blue"))
+        self._emit("stage_start", "Final Report", stage="report")
+        self._console.print(Panel("[bold]Stage 3: Final Report[/bold]", border_style="blue"))
         report = self._generate_report(result, [])
         result.final_report = report
-        console.print(Panel(Markdown(report), title="Test Plan Workflow Report", border_style="green"))
+        self._real_console.print(Panel(Markdown(report), title="Test Plan Workflow Report", border_style="green"))
+        self._emit("stage_complete", "Report generated", stage="report")
         self._persist_task_state(
             current_stage="workflow_completed",
             latest_summary=report[:4000],
@@ -750,23 +798,26 @@ class WorkflowEngine:
         entry = self._resume_entry_point()
 
         if entry == "done":
-            console.print("[dim]Workflow already completed — nothing to resume.[/dim]")
+            self._console.print("[dim]Workflow already completed — nothing to resume.[/dim]")
             result.success = True
             result.final_report = "Workflow was already completed."
             return result
 
         if self._resume_stage:
-            console.print(f"[dim]Resuming from stage: {self._resume_stage} (entry={entry})[/dim]")
+            self._console.print(f"[dim]Resuming from stage: {self._resume_stage} (entry={entry})[/dim]")
 
         # ── Stage 1: Tech design ──
         if entry in ("start", "design"):
-            console.print(Panel("[bold]Stage 1: Technical Design[/bold]", border_style="blue"))
+            self._emit("stage_start", "Technical Design", stage="design")
+            self._console.print(Panel("[bold]Stage 1: Technical Design[/bold]", border_style="blue"))
             if self._arch is not None:
-                console.print("[yellow]Architect producing technical design...[/yellow]")
+                self._emit("agent_working", "Producing technical design...", stage="design", agent_role=self._arch.agent_role)
+                self._console.print("[yellow]Architect producing technical design...[/yellow]")
                 prompt = ARCH_TECH_DESIGN.format(requirement=requirement)
                 response = self._arch.send(prompt, task_description=f"Architect design: {requirement[:100]}")
                 if not response.success:
-                    console.print(f"[red]Architect agent failed (exit={response.exit_code})[/red]")
+                    self._emit("agent_error", f"Agent failed (exit={response.exit_code})", stage="design", agent_role=self._arch.agent_role)
+                    self._console.print(f"[red]Architect agent failed (exit={response.exit_code})[/red]")
                     self._record_blocked_failure(
                         stage="design_draft_blocked",
                         summary=f"[{self._arch.agent_role}] design draft failed (exit={response.exit_code})",
@@ -778,6 +829,7 @@ class WorkflowEngine:
                     )
                     result.final_report = self._generate_report(result, [])
                     return self._sync_result_failure_state(result)
+                self._emit("agent_done", "Design draft submitted", stage="design", agent_role=self._arch.agent_role)
                 design = response.content
                 result.design = design
                 self._persist_task_state(
@@ -797,7 +849,7 @@ class WorkflowEngine:
             else:
                 design = self._run_design(requirement)
                 if not design:
-                    console.print("[red]Dev failed to produce design. Aborting.[/red]")
+                    self._console.print("[red]Dev failed to produce design. Aborting.[/red]")
                     return result
                 result.design = design
             if self._cancelled():
@@ -811,7 +863,8 @@ class WorkflowEngine:
 
         # ── Stage 2: Design review ──
         if entry in ("start", "design", "design_review"):
-            console.print(Panel("[bold]Stage 2: Design Review[/bold]", border_style="blue"))
+            self._emit("stage_start", "Design Review", stage="design_review")
+            self._console.print(Panel("[bold]Stage 2: Design Review[/bold]", border_style="blue"))
             if self._arch is not None:
                 reviewers = [self._dev, *self._qas]
                 design, iters, design_review_passed = self._run_review_loop(
@@ -849,7 +902,7 @@ class WorkflowEngine:
 
             # User checkpoint: approved design
             checkpoint_title = "Reviewed Design" if self._arch else "QA-Approved Design"
-            console.print(Panel(Markdown(design), title=checkpoint_title, border_style="green"))
+            self._real_console.print(Panel(Markdown(design), title=checkpoint_title, border_style="green"))
             design = self._user_checkpoint(
                 design,
                 "arch_design" if self._arch else "design",
@@ -857,7 +910,7 @@ class WorkflowEngine:
                 proposer=self._arch,
             )
             if design is None:
-                console.print("[yellow]Workflow stopped by user.[/yellow]")
+                self._console.print("[yellow]Workflow stopped by user.[/yellow]")
                 self._persist_task_state(
                     current_stage="design_rejected_by_user",
                     latest_summary=result.design[:4000],
@@ -872,10 +925,11 @@ class WorkflowEngine:
 
         # ── Stage 3: Implementation planning ──
         if entry in ("start", "design", "design_review", "plan"):
-            console.print(Panel("[bold]Stage 3: Implementation Planning[/bold]", border_style="blue"))
+            self._emit("stage_start", "Implementation Planning", stage="planning")
+            self._console.print(Panel("[bold]Stage 3: Implementation Planning[/bold]", border_style="blue"))
             plan = self._run_planning(design, requirement)
             if not plan:
-                console.print("[red]Dev failed to produce plan. Aborting.[/red]")
+                self._console.print("[red]Dev failed to produce plan. Aborting.[/red]")
                 return result
             result.plan = plan
             if self._cancelled():
@@ -889,7 +943,8 @@ class WorkflowEngine:
 
         # ── Stage 4: Plan review ──
         if entry in ("start", "design", "design_review", "plan", "plan_review"):
-            console.print(Panel("[bold]Stage 4: Plan Review[/bold]", border_style="blue"))
+            self._emit("stage_start", "Plan Review", stage="plan_review")
+            self._console.print(Panel("[bold]Stage 4: Plan Review[/bold]", border_style="blue"))
             plan, iters, plan_review_passed = self._run_review_loop(
                 artifact=plan,
                 artifact_type="plan",
@@ -903,12 +958,12 @@ class WorkflowEngine:
                 return result
 
             # User checkpoint: approved plan
-            console.print(Panel(Markdown(plan), title="QA-Approved Plan", border_style="green"))
+            self._real_console.print(Panel(Markdown(plan), title="QA-Approved Plan", border_style="green"))
             plan = self._user_checkpoint(
                 plan, "plan", "Plan approved by QA. Start development? [Y/n/or type feedback] "
             )
             if plan is None:
-                console.print("[yellow]Workflow stopped by user.[/yellow]")
+                self._console.print("[yellow]Workflow stopped by user.[/yellow]")
                 return result
             result.plan = plan
         else:
@@ -916,9 +971,10 @@ class WorkflowEngine:
 
         # ── Stage 5: Phased development ──
         if entry in ("start", "design", "design_review", "plan", "plan_review", "phases"):
-            console.print(Panel("[bold]Stage 5: Development[/bold]", border_style="blue"))
+            self._emit("stage_start", "Development", stage="development")
+            self._console.print(Panel("[bold]Stage 5: Development[/bold]", border_style="blue"))
             phases = self._parse_phases(plan)
-            console.print(f"[dim]Parsed {len(phases)} phase(s) from plan.[/dim]")
+            self._console.print(f"[dim]Parsed {len(phases)} phase(s) from plan.[/dim]")
 
             start_phase = self._resume_phase_index() if entry == "phases" else 1
             # Reconstruct state for already-completed phases
@@ -927,14 +983,14 @@ class WorkflowEngine:
 
             for i, phase in enumerate(phases, 1):
                 if i < start_phase:
-                    console.print(f"[dim]Phase {i}/{len(phases)}: already completed, skipping[/dim]")
+                    self._console.print(f"[dim]Phase {i}/{len(phases)}: already completed, skipping[/dim]")
                     continue
                 if self._cancelled():
                     result.final_report = f"Workflow cancelled before phase {i}."
                     return result
-                console.print(f"\n[bold cyan]{'='*60}[/bold cyan]")
-                console.print(f"[bold cyan]Phase {i}/{len(phases)}: {phase}[/bold cyan]")
-                console.print(f"[bold cyan]{'='*60}[/bold cyan]")
+                self._console.print(f"\n[bold cyan]{'='*60}[/bold cyan]")
+                self._console.print(f"[bold cyan]Phase {i}/{len(phases)}: {phase}[/bold cyan]")
+                self._console.print(f"[bold cyan]{'='*60}[/bold cyan]")
 
                 phase_result = self._run_phase(
                     phase_name=phase,
@@ -957,7 +1013,8 @@ class WorkflowEngine:
             result.phases = self._load_completed_phases(expected_count=phase_count)
 
         # ── Stage 6: GA Test ──
-        console.print(Panel("[bold]Stage 6: GA Test[/bold]", border_style="blue"))
+        self._emit("stage_start", "GA Test", stage="ga_test")
+        self._console.print(Panel("[bold]Stage 6: GA Test[/bold]", border_style="blue"))
         dev_summary = "\n\n".join(completed_summaries)
         ga_result = self._run_ga_test_phase(requirement, design, plan, dev_summary)
         result.ga_test = ga_result
@@ -966,7 +1023,7 @@ class WorkflowEngine:
             return result
 
         if ga_result.aborted:
-            console.print(Panel(
+            self._real_console.print(Panel(
                 f"[bold red]GA Test aborted.[/bold red]\n"
                 f"Bugs found: {ga_result.bugs_found}, Fixed: {ga_result.bugs_fixed}\n"
                 f"User intervention required.",
@@ -974,10 +1031,11 @@ class WorkflowEngine:
                 border_style="red",
             ))
         elif ga_result.passed:
-            console.print("[bold green]GA Test passed![/bold green]")
+            self._console.print("[bold green]GA Test passed![/bold green]")
 
         # ── Stage 7: Final report ──
-        console.print(Panel("[bold]Stage 7: Final Report[/bold]", border_style="blue"))
+        self._emit("stage_start", "Final Report", stage="report")
+        self._console.print(Panel("[bold]Stage 7: Final Report[/bold]", border_style="blue"))
         report = self._generate_report(result, completed_summaries)
         result.final_report = report
         result.success = (
@@ -985,7 +1043,8 @@ class WorkflowEngine:
             and ga_result.passed
         ) if result.phases else False
 
-        console.print(Panel(Markdown(report), title="E2E Workflow Report", border_style="green"))
+        self._real_console.print(Panel(Markdown(report), title="E2E Workflow Report", border_style="green"))
+        self._emit("stage_complete", "Report generated", stage="report")
         self._persist_task_state(
             current_stage="workflow_completed" if result.success else "workflow_finished_with_issues",
             latest_summary=report[:4000],
@@ -999,20 +1058,21 @@ class WorkflowEngine:
         entry = self._resume_entry_point()
 
         if entry == "done":
-            console.print("[dim]Workflow already completed — nothing to resume.[/dim]")
+            self._console.print("[dim]Workflow already completed — nothing to resume.[/dim]")
             result.success = True
             result.final_report = "Workflow was already completed."
             return result
 
         if self._resume_stage:
-            console.print(f"[dim]Resuming from stage: {self._resume_stage} (entry={entry})[/dim]")
+            self._console.print(f"[dim]Resuming from stage: {self._resume_stage} (entry={entry})[/dim]")
 
         # Stage 1: Tech design
         if entry in ("start", "design"):
-            console.print(Panel("[bold]Stage 1: Technical Design[/bold]", border_style="blue"))
+            self._emit("stage_start", "Technical Design", stage="design")
+            self._console.print(Panel("[bold]Stage 1: Technical Design[/bold]", border_style="blue"))
             design = self._run_design(requirement)
             if not design:
-                console.print("[red]Dev failed to produce design. Aborting.[/red]")
+                self._console.print("[red]Dev failed to produce design. Aborting.[/red]")
                 result.final_report = "Design workflow failed: developer did not produce a technical design."
                 return result
             result.design = design
@@ -1026,7 +1086,8 @@ class WorkflowEngine:
 
         # Stage 2: Design review
         if entry in ("start", "design", "design_review"):
-            console.print(Panel("[bold]Stage 2: Design Review[/bold]", border_style="blue"))
+            self._emit("stage_start", "Design Review", stage="design_review")
+            self._console.print(Panel("[bold]Stage 2: Design Review[/bold]", border_style="blue"))
             design, iters, design_review_passed = self._run_review_loop(
                 artifact=design,
                 artifact_type="design",
@@ -1039,14 +1100,14 @@ class WorkflowEngine:
                 result.final_report = "Design workflow cancelled during design review."
                 return result
 
-            console.print(Panel(Markdown(design), title="Reviewed Design", border_style="green"))
+            self._real_console.print(Panel(Markdown(design), title="Reviewed Design", border_style="green"))
             design = self._user_checkpoint(
                 design,
                 "design",
                 "Design reviewed by QA. Proceed to planning? [Y/n/or type feedback] ",
             )
             if design is None:
-                console.print("[yellow]Workflow stopped by user.[/yellow]")
+                self._console.print("[yellow]Workflow stopped by user.[/yellow]")
                 result.final_report = "Design workflow stopped by user after design review."
                 return result
             result.design = design
@@ -1055,10 +1116,11 @@ class WorkflowEngine:
 
         # Stage 3: Planning
         if entry in ("start", "design", "design_review", "plan"):
-            console.print(Panel("[bold]Stage 3: Implementation Planning[/bold]", border_style="blue"))
+            self._emit("stage_start", "Implementation Planning", stage="planning")
+            self._console.print(Panel("[bold]Stage 3: Implementation Planning[/bold]", border_style="blue"))
             plan = self._run_planning(design, requirement)
             if not plan:
-                console.print("[red]Dev failed to produce plan. Aborting.[/red]")
+                self._console.print("[red]Dev failed to produce plan. Aborting.[/red]")
                 result.final_report = "Design workflow failed: developer did not produce an implementation plan."
                 return result
             result.plan = plan
@@ -1073,7 +1135,8 @@ class WorkflowEngine:
         # Stage 4: Plan review
         # entry "phases"/"ga_test" means plan was already approved in design mode
         if entry not in ("phases", "ga_test"):
-            console.print(Panel("[bold]Stage 4: Plan Review[/bold]", border_style="blue"))
+            self._emit("stage_start", "Plan Review", stage="plan_review")
+            self._console.print(Panel("[bold]Stage 4: Plan Review[/bold]", border_style="blue"))
             plan, iters, plan_review_passed = self._run_review_loop(
                 artifact=plan,
                 artifact_type="plan",
@@ -1086,26 +1149,28 @@ class WorkflowEngine:
                 result.final_report = "Design workflow cancelled during plan review."
                 return result
 
-            console.print(Panel(Markdown(plan), title="Reviewed Plan", border_style="green"))
+            self._real_console.print(Panel(Markdown(plan), title="Reviewed Plan", border_style="green"))
             plan = self._user_checkpoint(
                 plan,
                 "plan",
                 "Plan reviewed by QA. Finish design workflow? [Y/n/or type feedback] ",
             )
             if plan is None:
-                console.print("[yellow]Workflow stopped by user.[/yellow]")
+                self._console.print("[yellow]Workflow stopped by user.[/yellow]")
                 result.final_report = "Design workflow stopped by user after plan review."
                 return result
             result.plan = plan
         else:
             result.plan_review_passed = True
 
-        console.print(Panel("[bold]Stage 5: Final Report[/bold]", border_style="blue"))
+        self._emit("stage_start", "Final Report", stage="report")
+        self._console.print(Panel("[bold]Stage 5: Final Report[/bold]", border_style="blue"))
         report = self._generate_report(result, [])
         result.final_report = report
         result.success = result.design_review_passed and result.plan_review_passed
 
-        console.print(Panel(Markdown(report), title="Design Workflow Report", border_style="green"))
+        self._real_console.print(Panel(Markdown(report), title="Design Workflow Report", border_style="green"))
+        self._emit("stage_complete", "Report generated", stage="report")
         self._persist_task_state(
             current_stage="workflow_completed" if result.success else "workflow_finished_with_issues",
             latest_summary=report[:4000],
@@ -1119,17 +1184,18 @@ class WorkflowEngine:
         entry = self._resume_entry_point()
 
         if entry == "done":
-            console.print("[dim]Workflow already completed — nothing to resume.[/dim]")
+            self._console.print("[dim]Workflow already completed — nothing to resume.[/dim]")
             result.success = True
             result.final_report = "Workflow was already completed."
             return result
 
         if self._resume_stage:
-            console.print(f"[dim]Resuming from stage: {self._resume_stage} (entry={entry})[/dim]")
+            self._console.print(f"[dim]Resuming from stage: {self._resume_stage} (entry={entry})[/dim]")
 
-        console.print(Panel("[bold]Stage 1: Development[/bold]", border_style="blue"))
+        self._emit("stage_start", "Development", stage="development")
+        self._console.print(Panel("[bold]Stage 1: Development[/bold]", border_style="blue"))
         phases = self._parse_phases(requirement)
-        console.print(f"[dim]Parsed {len(phases)} phase(s) from requirement.[/dim]")
+        self._console.print(f"[dim]Parsed {len(phases)} phase(s) from requirement.[/dim]")
 
         start_phase = self._resume_phase_index() if entry == "phases" else 1
         completed_summaries = self._load_completed_phase_summaries(start_phase) if start_phase > 1 else []
@@ -1137,14 +1203,14 @@ class WorkflowEngine:
 
         for i, phase in enumerate(phases, 1):
             if i < start_phase:
-                console.print(f"[dim]Phase {i}/{len(phases)}: already completed, skipping[/dim]")
+                self._console.print(f"[dim]Phase {i}/{len(phases)}: already completed, skipping[/dim]")
                 continue
             if self._cancelled():
                 result.final_report = f"Development workflow cancelled before phase {i}."
                 return result
-            console.print(f"\n[bold cyan]{'='*60}[/bold cyan]")
-            console.print(f"[bold cyan]Phase {i}/{len(phases)}: {phase}[/bold cyan]")
-            console.print(f"[bold cyan]{'='*60}[/bold cyan]")
+            self._console.print(f"\n[bold cyan]{'='*60}[/bold cyan]")
+            self._console.print(f"[bold cyan]Phase {i}/{len(phases)}: {phase}[/bold cyan]")
+            self._console.print(f"[bold cyan]{'='*60}[/bold cyan]")
 
             phase_result = self._run_phase(
                 phase_name=phase,
@@ -1161,12 +1227,14 @@ class WorkflowEngine:
                 result.final_report = f"Development workflow cancelled during phase {i}."
                 return result
 
-        console.print(Panel("[bold]Stage 2: Final Report[/bold]", border_style="blue"))
+        self._emit("stage_start", "Final Report", stage="report")
+        self._console.print(Panel("[bold]Stage 2: Final Report[/bold]", border_style="blue"))
         report = self._generate_report(result, completed_summaries)
         result.final_report = report
         result.success = all(p.committed for p in result.phases) if result.phases else False
 
-        console.print(Panel(Markdown(report), title="Development Workflow Report", border_style="green"))
+        self._real_console.print(Panel(Markdown(report), title="Development Workflow Report", border_style="green"))
+        self._emit("stage_complete", "Report generated", stage="report")
         self._persist_task_state(
             current_stage="workflow_completed" if result.success else "workflow_finished_with_issues",
             latest_summary=report[:4000],
@@ -1180,16 +1248,17 @@ class WorkflowEngine:
         entry = self._resume_entry_point()
 
         if entry == "done":
-            console.print("[dim]Workflow already completed — nothing to resume.[/dim]")
+            self._console.print("[dim]Workflow already completed — nothing to resume.[/dim]")
             result.success = True
             result.final_report = "Workflow was already completed."
             return result
 
         if self._resume_stage:
-            console.print(f"[dim]Resuming from stage: {self._resume_stage} (entry={entry})[/dim]")
+            self._console.print(f"[dim]Resuming from stage: {self._resume_stage} (entry={entry})[/dim]")
 
         # GA test always re-runs from start (sub-stage resume not yet supported)
-        console.print(Panel("[bold]Stage 1: GA Test[/bold]", border_style="blue"))
+        self._emit("stage_start", "GA Test", stage="ga_test")
+        self._console.print(Panel("[bold]Stage 1: GA Test[/bold]", border_style="blue"))
         ga_result = self._run_ga_test_phase(
             requirement,
             requirement,
@@ -1202,12 +1271,14 @@ class WorkflowEngine:
             result.final_report = "Test workflow cancelled during GA testing."
             return result
 
-        console.print(Panel("[bold]Stage 2: Final Report[/bold]", border_style="blue"))
+        self._emit("stage_start", "Final Report", stage="report")
+        self._console.print(Panel("[bold]Stage 2: Final Report[/bold]", border_style="blue"))
         report = self._generate_report(result, [])
         result.final_report = report
         result.success = ga_result.passed
 
-        console.print(Panel(Markdown(report), title="Test Workflow Report", border_style="green"))
+        self._real_console.print(Panel(Markdown(report), title="Test Workflow Report", border_style="green"))
+        self._emit("stage_complete", "Report generated", stage="report")
         self._persist_task_state(
             current_stage="workflow_completed" if result.success else "workflow_finished_with_issues",
             latest_summary=report[:4000],
@@ -1224,11 +1295,13 @@ class WorkflowEngine:
     def _run_design(self, requirement: str, abort_on_failure: bool = False) -> str:
         if self._cancelled():
             return ""
-        console.print("[yellow]Dev producing technical design...[/yellow]")
+        self._emit("agent_working", "Producing technical design...", stage="design", agent_role=self._dev.agent_role)
+        self._console.print("[yellow]Dev producing technical design...[/yellow]")
         prompt = DEV_TECH_DESIGN.format(requirement=requirement)
         response = self._dev.send(prompt, task_description=f"Tech design: {requirement[:100]}")
         if not response.success:
-            console.print(f"[red]Dev agent failed (exit={response.exit_code})[/red]")
+            self._emit("agent_error", f"Agent failed (exit={response.exit_code})", stage="design", agent_role=self._dev.agent_role)
+            self._console.print(f"[red]Dev agent failed (exit={response.exit_code})[/red]")
             if abort_on_failure:
                 self._record_blocked_failure(
                     stage="design_draft_blocked",
@@ -1240,7 +1313,8 @@ class WorkflowEngine:
                     title="Technical design draft failed",
                 )
             return ""
-        console.print("[green]Dev submitted design.[/green]")
+        self._emit("agent_done", "Design draft submitted", stage="design", agent_role=self._dev.agent_role)
+        self._console.print("[green]Dev submitted design.[/green]")
         self._persist_task_state(
             current_stage="design_draft",
             latest_summary=response.content[:4000],
@@ -1260,14 +1334,15 @@ class WorkflowEngine:
     def _run_planning(self, design: str, requirement: str, abort_on_failure: bool = False) -> str:
         if self._cancelled():
             return ""
-        console.print("[yellow]Dev creating implementation plan...[/yellow]")
+        self._emit("agent_working", "Creating implementation plan...", stage="planning", agent_role=self._dev.agent_role)
+        self._console.print("[yellow]Dev creating implementation plan...[/yellow]")
         prompt = DEV_IMPLEMENTATION_PLAN.format(
             requirement=requirement[:4000],
             design=design[:8000],
         )
         response = self._dev.send(prompt, task_description="Implementation planning")
         if not response.success:
-            console.print(f"[red]Dev agent failed (exit={response.exit_code})[/red]")
+            self._console.print(f"[red]Dev agent failed (exit={response.exit_code})[/red]")
             if abort_on_failure:
                 self._record_blocked_failure(
                     stage="plan_draft_blocked",
@@ -1279,7 +1354,8 @@ class WorkflowEngine:
                     title="Implementation plan draft failed",
                 )
             return ""
-        console.print("[green]Dev submitted implementation plan.[/green]")
+        self._emit("agent_done", "Implementation plan submitted", stage="planning", agent_role=self._dev.agent_role)
+        self._console.print("[green]Dev submitted implementation plan.[/green]")
         self._persist_task_state(
             current_stage="plan_draft",
             latest_summary=response.content[:4000],
@@ -1310,10 +1386,13 @@ class WorkflowEngine:
     ) -> PhaseResult:
         if self._cancelled():
             return PhaseResult(name=phase_name, summary="Cancelled by user.", review_iterations=0)
+        self._emit("phase_start", f"Phase {phase_index}/{total_phases}: {phase_name}", stage=f"phase_{phase_index}",
+                    phase_index=phase_index, total_phases=total_phases, phase_name=phase_name)
         completed_ctx = "\n".join(completed_summaries) if completed_summaries else "None yet."
 
         # Step 1: Dev implements
-        console.print("[yellow]Dev implementing...[/yellow]")
+        self._emit("agent_working", "Implementing...", stage=f"phase_{phase_index}", agent_role=self._dev.agent_role)
+        self._console.print("[yellow]Dev implementing...[/yellow]")
         self._persist_task_state(
             current_stage=f"phase_{phase_index}_implementing",
             latest_summary=phase_name,
@@ -1331,18 +1410,22 @@ class WorkflowEngine:
         )
         response = self._dev.send(prompt, task_description=f"Phase {phase_index}: {phase_name}")
         if not response.success:
+            self._emit("agent_error", "Implementation failed", stage=f"phase_{phase_index}", agent_role=self._dev.agent_role)
             return PhaseResult(name=phase_name, summary="Implementation failed.", review_iterations=0)
         if self._cancelled():
             return PhaseResult(name=phase_name, summary="Cancelled by user.", review_iterations=0)
+        self._emit("agent_done", "Implementation complete", stage=f"phase_{phase_index}", agent_role=self._dev.agent_role)
 
         # Step 2: Dev summarizes
-        console.print("[yellow]Dev summarizing changes...[/yellow]")
+        self._emit("agent_working", "Summarizing changes...", stage=f"phase_{phase_index}", agent_role=self._dev.agent_role)
+        self._console.print("[yellow]Dev summarizing changes...[/yellow]")
         summary_prompt = DEV_SUMMARIZE_PHASE.format(
             phase_name=phase_name,
             phase_index=phase_index,
         )
         summary_resp = self._dev.send(summary_prompt, task_description=f"Summarize phase {phase_index}")
         summary = summary_resp.content if summary_resp.success else response.content
+        self._emit("agent_done", "Summary submitted for review", stage=f"phase_{phase_index}", agent_role=self._dev.agent_role)
         self._persist_task_state(
             current_stage=f"phase_{phase_index}_under_review",
             latest_summary=summary[:4000],
@@ -1377,7 +1460,8 @@ class WorkflowEngine:
             )
 
         # Step 4: Dev commits
-        console.print(f"[yellow]Dev committing phase {phase_index}...[/yellow]")
+        self._emit("agent_working", f"Committing phase {phase_index}...", stage=f"phase_{phase_index}", agent_role=self._dev.agent_role)
+        self._console.print(f"[yellow]Dev committing phase {phase_index}...[/yellow]")
         commit_prompt = DEV_COMMIT_PHASE.format(
             phase_name=phase_name,
             phase_index=phase_index,
@@ -1386,9 +1470,15 @@ class WorkflowEngine:
         committed = commit_resp.success
 
         if committed:
-            console.print(f"[bold green]Phase {phase_index} committed.[/bold green]")
+            self._emit("phase_done", f"Phase {phase_index} committed", stage=f"phase_{phase_index}",
+                        status="committed", review_iterations=review_iters, review_passed=review_passed,
+                        phase_index=phase_index, total_phases=total_phases, phase_name=phase_name)
+            self._console.print(f"[bold green]Phase {phase_index} committed.[/bold green]")
         else:
-            console.print(f"[red]Phase {phase_index} commit failed.[/red]")
+            self._emit("phase_done", f"Phase {phase_index} commit failed", stage=f"phase_{phase_index}",
+                        status="failed", review_iterations=review_iters, review_passed=review_passed,
+                        phase_index=phase_index, total_phases=total_phases, phase_name=phase_name)
+            self._console.print(f"[red]Phase {phase_index} commit failed.[/red]")
 
         self._persist_task_state(
             current_stage=f"phase_{phase_index}_committed" if committed else f"phase_{phase_index}_commit_failed",
@@ -1424,7 +1514,7 @@ class WorkflowEngine:
                     },
                 )
             except Exception as e:
-                console.print(f"[dim red]Warning: Failed to persist phase result: {e}[/dim red]")
+                self._console.print(f"[dim red]Warning: Failed to persist phase result: {e}[/dim red]")
 
         return phase_result
 
@@ -1454,7 +1544,8 @@ class WorkflowEngine:
         )
 
         # Step 1: QA generates test plan
-        console.print("[yellow]QA generating GA test plan...[/yellow]")
+        self._emit("agent_working", "Generating GA test plan...", stage="ga_test", agent_role=qa_lead.agent_role)
+        self._console.print("[yellow]QA generating GA test plan...[/yellow]")
         prompt = QA_GA_TEST_PLAN.format(
             requirement=requirement[:2000],
             design=design[:3000],
@@ -1462,11 +1553,13 @@ class WorkflowEngine:
         )
         response = qa_lead.send(prompt, task_description="GA test plan")
         if not response.success:
-            console.print("[red]QA failed to generate test plan.[/red]")
+            self._emit("agent_error", "Failed to generate test plan", stage="ga_test", agent_role=qa_lead.agent_role)
+            self._console.print("[red]QA failed to generate test plan.[/red]")
             return result
         if self._cancelled():
             result.aborted = True
             return result
+        self._emit("agent_done", "GA test plan submitted", stage="ga_test", agent_role=qa_lead.agent_role)
         test_plan = response.content
         result.test_plan = test_plan
         self._persist_task_state(
@@ -1485,7 +1578,8 @@ class WorkflowEngine:
         )
 
         # Step 2: Dev + User review test plan
-        console.print(Panel("[bold]Test Plan Review[/bold]", border_style="cyan"))
+        self._emit("stage_start", "Test Plan Review", stage="ga_test_review")
+        self._console.print(Panel("[bold]Test Plan Review[/bold]", border_style="cyan"))
         test_plan, iters, test_plan_review_passed = self._run_review_loop(
             artifact=test_plan,
             artifact_type="test_plan",
@@ -1498,7 +1592,7 @@ class WorkflowEngine:
         result.test_plan_review_passed = test_plan_review_passed
 
         # User checkpoint on test plan
-        console.print(Panel(Markdown(test_plan), title="Reviewed Test Plan", border_style="green"))
+        self._real_console.print(Panel(Markdown(test_plan), title="Reviewed Test Plan", border_style="green"))
         test_plan = self._user_checkpoint(
             test_plan, "test_plan",
             "Test plan reviewed by Dev. Approve and start testing? [Y/n/or type feedback] ",
@@ -1516,22 +1610,25 @@ class WorkflowEngine:
         )
 
         # Step 3: QA executes tests
-        console.print("[yellow]QA executing GA tests...[/yellow]")
+        self._emit("agent_working", "Executing GA tests...", stage="ga_test", agent_role=qa_lead.agent_role)
+        self._console.print("[yellow]QA executing GA tests...[/yellow]")
         exec_prompt = QA_EXECUTE_GA_TEST.format(test_plan=test_plan[:8000])
         exec_response = qa_lead.send(exec_prompt, task_description="Execute GA tests")
         if not exec_response.success:
-            console.print("[red]QA failed to execute tests.[/red]")
+            self._emit("agent_error", "Failed to execute tests", stage="ga_test", agent_role=qa_lead.agent_role)
+            self._console.print("[red]QA failed to execute tests.[/red]")
             return result
         if self._cancelled():
             result.aborted = True
             return result
+        self._emit("agent_done", "GA tests executed", stage="ga_test", agent_role=qa_lead.agent_role)
 
         test_output = exec_response.content
         bugs = self._parse_test_results(test_output)
         test_history = [f"Initial run: {test_output[:2000]}"]
 
         if not bugs:
-            console.print("[bold green]All GA tests passed![/bold green]")
+            self._console.print("[bold green]All GA tests passed![/bold green]")
             result.test_report = test_output
             result.passed = True
             self._persist_task_state(
@@ -1544,18 +1641,18 @@ class WorkflowEngine:
 
         # Step 4: Bug fix loop
         result.bugs_found = len(bugs)
-        console.print(f"[bold red]{len(bugs)} bug(s) found in GA test.[/bold red]")
+        self._console.print(f"[bold red]{len(bugs)} bug(s) found in GA test.[/bold red]")
 
         while bugs:
             if self._cancelled():
                 result.aborted = True
                 break
             if result.bugs_found > MAX_GA_BUGS:
-                console.print(
+                self._console.print(
                     f"\n[bold red]More than {MAX_GA_BUGS} bugs found ({result.bugs_found} total). "
                     f"Stopping GA test phase.[/bold red]"
                 )
-                console.print(
+                self._console.print(
                     "[yellow]Too many bugs indicate deeper issues. "
                     "Please review the situation and decide how to proceed.[/yellow]"
                 )
@@ -1570,12 +1667,12 @@ class WorkflowEngine:
                 break
 
             for bug in bugs:
-                console.print(
+                self._console.print(
                     f"\n[bold red]Bug: {bug.get('title', 'Unknown')} "
                     f"[{bug.get('severity', '?')}][/bold red]"
                 )
                 if bug.get("description"):
-                    console.print(f"[dim]{bug['description'][:200]}[/dim]")
+                    self._console.print(f"[dim]{bug['description'][:200]}[/dim]")
 
                 bug_fix = self._run_bug_fix(
                     bug,
@@ -1586,9 +1683,9 @@ class WorkflowEngine:
                 result.bug_fixes.append(bug_fix)
                 if bug_fix.fixed:
                     result.bugs_fixed += 1
-                    console.print(f"[green]Bug fixed: {bug_fix.title}[/green]")
+                    self._console.print(f"[green]Bug fixed: {bug_fix.title}[/green]")
                 else:
-                    console.print(f"[red]Bug fix failed: {bug_fix.title}[/red]")
+                    self._console.print(f"[red]Bug fix failed: {bug_fix.title}[/red]")
 
             unresolved_arch_changes = [
                 bf for bf in result.bug_fixes
@@ -1602,14 +1699,14 @@ class WorkflowEngine:
                     open_issues=[bf.title for bf in unresolved_arch_changes[:10]],
                     updated_by_agent_id=qa_lead.agent_id,
                 )
-                console.print(
+                self._console.print(
                     "[yellow]Architecture-change findings recorded for follow-up. "
                     "Skipping automatic re-test.[/yellow]"
                 )
                 break
 
             # QA re-tests after all fixes in this round
-            console.print("\n[yellow]QA re-running tests after bug fixes...[/yellow]")
+            self._console.print("\n[yellow]QA re-running tests after bug fixes...[/yellow]")
             fixed_summaries = "\n".join(
                 f"- {bf.title}: {bf.summary[:200]}"
                 for bf in result.bug_fixes if bf.fixed
@@ -1620,7 +1717,7 @@ class WorkflowEngine:
             )
             continue_response = qa_lead.send(continue_prompt, task_description="Continue GA tests")
             if not continue_response.success:
-                console.print("[red]QA failed to continue tests.[/red]")
+                self._console.print("[red]QA failed to continue tests.[/red]")
                 break
             if self._cancelled():
                 result.aborted = True
@@ -1632,7 +1729,7 @@ class WorkflowEngine:
 
             if bugs:
                 result.bugs_found += len(bugs)
-                console.print(
+                self._console.print(
                     f"[bold red]{len(bugs)} new bug(s) found "
                     f"({result.bugs_found} total).[/bold red]"
                 )
@@ -1644,13 +1741,13 @@ class WorkflowEngine:
                     updated_by_agent_id=qa_lead.agent_id,
                 )
             else:
-                console.print("[bold green]All tests pass after bug fixes![/bold green]")
+                self._console.print("[bold green]All tests pass after bug fixes![/bold green]")
 
         if not result.aborted and not bugs:
             result.passed = True
 
         # QA generates final test report
-        console.print("[yellow]QA generating test report...[/yellow]")
+        self._console.print("[yellow]QA generating test report...[/yellow]")
         report_prompt = QA_GA_TEST_REPORT.format(
             test_plan=test_plan[:3000],
             test_history="\n\n".join(test_history)[:6000],
@@ -1704,7 +1801,8 @@ class WorkflowEngine:
             return result
 
         # Step 1: Dev estimates the bug
-        console.print(f"[yellow]Dev estimating bug: {title}...[/yellow]")
+        self._emit("agent_working", f"Estimating bug: {title}", stage="bug_fix", agent_role=self._dev.agent_role)
+        self._console.print(f"[yellow]Dev estimating bug: {title}...[/yellow]")
         estimate_prompt = DEV_ESTIMATE_BUG.format(
             bug_title=title,
             bug_description=bug.get("description", ""),
@@ -1715,7 +1813,7 @@ class WorkflowEngine:
         )
         est_response = self._dev.send(estimate_prompt, task_description=f"Estimate bug: {title[:60]}")
         if not est_response.success:
-            console.print("[red]Dev failed to estimate bug.[/red]")
+            self._console.print("[red]Dev failed to estimate bug.[/red]")
             return result
         if self._cancelled():
             return result
@@ -1725,14 +1823,14 @@ class WorkflowEngine:
         if assessment == "arch_change":
             result.arch_change = True
             if not allow_arch_fix:
-                console.print(
+                self._console.print(
                     "[bold yellow]Bug requires architecture change. "
                     "Recording follow-up work instead of launching a redesign workflow.[/bold yellow]"
                 )
                 result.fixed = False
                 result.summary = "Requires architecture change follow-up; test-only mode does not launch redesign."
                 return result
-            console.print(
+            self._console.print(
                 f"[bold yellow]Bug requires architecture change. "
                 f"Running full design->dev sub-workflow...[/bold yellow]"
             )
@@ -1740,7 +1838,8 @@ class WorkflowEngine:
             result.fixed = sub_result.success
             result.summary = sub_result.final_report[:500] if sub_result.final_report else "Sub-workflow completed"
         else:
-            console.print(f"[yellow]Simple fix. Dev fixing...[/yellow]")
+            self._emit("agent_working", f"Fixing bug: {title}", stage="bug_fix", agent_role=self._dev.agent_role)
+            self._console.print(f"[yellow]Simple fix. Dev fixing...[/yellow]")
             # Step 2: Dev fixes the bug
             fix_prompt = DEV_FIX_BUG_SIMPLE.format(
                 bug_title=title,
@@ -1749,7 +1848,7 @@ class WorkflowEngine:
             )
             fix_response = self._dev.send(fix_prompt, task_description=f"Fix bug: {title[:60]}")
             if not fix_response.success:
-                console.print("[red]Dev failed to fix bug.[/red]")
+                self._console.print("[red]Dev failed to fix bug.[/red]")
                 return result
             if self._cancelled():
                 return result
@@ -1777,7 +1876,8 @@ class WorkflowEngine:
         sub = WorkflowResult(requirement=bug_req)
 
         # Design
-        console.print(Panel("[bold]Bug Fix: Design[/bold]", border_style="yellow"))
+        self._emit("stage_start", "Bug Fix: Design", stage="bug_fix_design")
+        self._console.print(Panel("[bold]Bug Fix: Design[/bold]", border_style="yellow"))
         sub_design = self._run_design(bug_req)
         if not sub_design:
             return sub
@@ -1795,7 +1895,7 @@ class WorkflowEngine:
         sub.design_review_passed = design_review_passed
 
         # User checkpoint
-        console.print(Panel(Markdown(sub_design), title="Bug Fix Design", border_style="yellow"))
+        self._real_console.print(Panel(Markdown(sub_design), title="Bug Fix Design", border_style="yellow"))
         sub_design = self._user_checkpoint(
             sub_design, "design",
             "Bug fix design approved by QA. Proceed? [Y/n/or type feedback] ",
@@ -1806,7 +1906,8 @@ class WorkflowEngine:
         sub.design = sub_design
 
         # Planning
-        console.print(Panel("[bold]Bug Fix: Planning[/bold]", border_style="yellow"))
+        self._emit("stage_start", "Bug Fix: Planning", stage="bug_fix_planning")
+        self._console.print(Panel("[bold]Bug Fix: Planning[/bold]", border_style="yellow"))
         sub_plan = self._run_planning(sub_design, bug_req)
         if not sub_plan:
             return sub
@@ -1824,7 +1925,7 @@ class WorkflowEngine:
         sub.plan_review_passed = plan_review_passed
 
         # User checkpoint
-        console.print(Panel(Markdown(sub_plan), title="Bug Fix Plan", border_style="yellow"))
+        self._real_console.print(Panel(Markdown(sub_plan), title="Bug Fix Plan", border_style="yellow"))
         sub_plan = self._user_checkpoint(
             sub_plan, "plan",
             "Bug fix plan approved. Start implementation? [Y/n/or type feedback] ",
@@ -1835,11 +1936,12 @@ class WorkflowEngine:
         sub.plan = sub_plan
 
         # Phased dev
-        console.print(Panel("[bold]Bug Fix: Development[/bold]", border_style="yellow"))
+        self._emit("stage_start", "Bug Fix: Development", stage="bug_fix_development")
+        self._console.print(Panel("[bold]Bug Fix: Development[/bold]", border_style="yellow"))
         phases = self._parse_phases(sub_plan)
         completed: list[str] = []
         for i, phase in enumerate(phases, 1):
-            console.print(f"\n[bold yellow]Bug fix phase {i}/{len(phases)}: {phase}[/bold yellow]")
+            self._console.print(f"\n[bold yellow]Bug fix phase {i}/{len(phases)}: {phase}[/bold yellow]")
             phase_result = self._run_phase(
                 phase_name=phase,
                 phase_index=i,
@@ -1906,9 +2008,11 @@ class WorkflowEngine:
 
         for iteration in range(1, self._max_review + 1):
             if self._cancelled():
-                console.print(f"[yellow]{artifact_type} review cancelled by user.[/yellow]")
+                self._console.print(f"[yellow]{artifact_type} review cancelled by user.[/yellow]")
                 break
-            console.print(f"\n[dim]-- Review iteration {iteration}/{self._max_review} --[/dim]")
+            self._emit("review_start", f"Review iteration {iteration}/{self._max_review}",
+                        stage=sp, iteration=iteration, max_iterations=self._max_review)
+            self._console.print(f"\n[dim]-- Review iteration {iteration}/{self._max_review} --[/dim]")
 
             artifact_id = None
             if persist_artifacts and self._work_item_id:
@@ -1926,7 +2030,7 @@ class WorkflowEngine:
                         },
                     )
                 except Exception as e:
-                    console.print(f"[dim red]Warning: Failed to persist artifact: {e}[/dim red]")
+                    self._console.print(f"[dim red]Warning: Failed to persist artifact: {e}[/dim red]")
 
             all_issues: list[str] = []
             all_lgtm = True
@@ -1935,7 +2039,7 @@ class WorkflowEngine:
             active_revs = [r for r in revs if r.agent_id not in skipped_reviewers]
 
             if not active_revs:
-                console.print(f"[dim]No reviewers configured — auto-approving {artifact_type}.[/dim]")
+                self._console.print(f"[dim]No reviewers configured — auto-approving {artifact_type}.[/dim]")
                 self._append_process_event(
                     event_type="reaction",
                     title="MySwat reaction",
@@ -1957,7 +2061,7 @@ class WorkflowEngine:
             # Build prompts and log review requests for all active reviewers upfront.
             reviewer_prompts: list[tuple[SessionManager, str]] = []
             for reviewer in active_revs:
-                console.print(f"[yellow]{reviewer.agent_role} reviewing {artifact_type}...[/yellow]")
+                self._console.print(f"[yellow]{reviewer.agent_role} reviewing {artifact_type}...[/yellow]")
                 self._append_process_event(
                     event_type="review_request",
                     title=f"{artifact_type} review iteration {iteration}",
@@ -1998,11 +2102,22 @@ class WorkflowEngine:
                 _, response = review_results[reviewer.agent_id]
 
                 if not response.success:
-                    console.print(f"[red]{reviewer.agent_role} failed (exit={response.exit_code})[/red]")
+                    self._console.print(f"[red]{reviewer.agent_role} failed (exit={response.exit_code})[/red]")
                     if response.raw_stderr.strip():
-                        console.print(f"[dim]  stderr: {response.raw_stderr.strip()}[/dim]")
+                        self._console.print(f"[dim]  stderr: {response.raw_stderr.strip()}[/dim]")
                     failure_summary = f"[{reviewer.agent_role}] review failed (exit={response.exit_code})"
+                    failure_detail = response.raw_stderr.strip() or response.content[:200]
                     all_lgtm = False
+
+                    self._emit(
+                        "review_verdict",
+                        f"{reviewer.agent_role}: {'FAILED' if abort_on_agent_failure else 'SKIPPED'}",
+                        stage=sp,
+                        agent_role=reviewer.agent_role,
+                        verdict="failed" if abort_on_agent_failure else "skipped",
+                        issues=[failure_summary],
+                        summary=failure_detail,
+                    )
 
                     if abort_on_agent_failure and abort_failure is None:
                         # Mandatory reviewer — record first failure for abort after loop
@@ -2013,7 +2128,7 @@ class WorkflowEngine:
                         # Optional reviewer — skip and continue with remaining reviewers
                         skipped_reviewers.add(reviewer.agent_id)
                         all_issues.append(f"[{reviewer.agent_role}] skipped: {response.content[:200]}")
-                        console.print(
+                        self._console.print(
                             f"[yellow]{reviewer.agent_role} removed from review: "
                             f"{response.content[:100]}[/yellow]"
                         )
@@ -2022,17 +2137,21 @@ class WorkflowEngine:
                     continue
 
                 verdict = _parse_verdict(response.content)
-                console.print(f"  [bold]{reviewer.agent_role}: {verdict.verdict.upper()}[/bold]")
+                self._emit("review_verdict", f"{reviewer.agent_role}: {verdict.verdict.upper()}",
+                            stage=sp, agent_role=reviewer.agent_role,
+                            verdict=verdict.verdict, issues=verdict.issues[:5],
+                            summary=verdict.summary or "")
+                self._console.print(f"  [bold]{reviewer.agent_role}: {verdict.verdict.upper()}[/bold]")
 
                 if verdict.verdict != "lgtm":
                     all_lgtm = False
                     for issue in verdict.issues:
                         all_issues.append(f"[{reviewer.agent_role}] {issue}")
-                        console.print(f"    [red]- {issue}[/red]")
+                        self._console.print(f"    [red]- {issue}[/red]")
                     if verdict.summary and not verdict.issues:
                         all_issues.append(f"[{reviewer.agent_role}] {verdict.summary}")
                 elif verdict.summary:
-                    console.print(f"    [dim]{verdict.summary}[/dim]")
+                    self._console.print(f"    [dim]{verdict.summary}[/dim]")
 
                 verdict_summary = verdict.summary or ""
                 if verdict.issues:
@@ -2068,10 +2187,11 @@ class WorkflowEngine:
                             review_session_id=reviewer.session.id if reviewer.session else None,
                         )
                     except Exception as e:
-                        console.print(f"[dim red]Warning: Failed to persist review cycle: {e}[/dim red]")
+                        self._console.print(f"[dim red]Warning: Failed to persist review cycle: {e}[/dim red]")
 
             # After processing all responses, abort if any reviewer failed fatally.
             if abort_failure is not None and abort_reviewer is not None:
+                self._emit("stage_complete", abort_failure, stage=sp, failed=True)
                 self._record_blocked_failure(
                     stage=f"{sp}_review_blocked",
                     summary=abort_failure,
@@ -2092,7 +2212,8 @@ class WorkflowEngine:
                     to_role=prop.agent_role,
                     updated_by_agent_id=prop.agent_id,
                 )
-                console.print(f"\n[bold green]All reviewers gave LGTM at iteration {iteration}![/bold green]")
+                self._emit("review_complete", f"All reviewers approved at iteration {iteration}", stage=sp, approved=True, iteration=iteration)
+                self._console.print(f"\n[bold green]All reviewers gave LGTM at iteration {iteration}![/bold green]")
                 self._persist_task_state(
                     current_stage=f"{sp}_approved",
                     latest_summary=current[:4000],
@@ -2104,7 +2225,8 @@ class WorkflowEngine:
                 return current, iteration, True
 
             # Proposer addresses comments
-            console.print(f"\n[yellow]{prop.agent_role} addressing {len(all_issues)} comment(s)...[/yellow]")
+            self._emit("revision_start", f"Addressing {len(all_issues)} comment(s)...", stage=sp, agent_role=prop.agent_role)
+            self._console.print(f"\n[yellow]{prop.agent_role} addressing {len(all_issues)} comment(s)...[/yellow]")
             self._persist_task_state(
                 current_stage=f"{sp}_review",
                 latest_summary=current[:4000],
@@ -2126,11 +2248,11 @@ class WorkflowEngine:
             address_prompt = self._build_address_prompt(artifact_type, current, feedback)
             response = prop.send(address_prompt, task_description=f"Address {artifact_type} review")
             if self._cancelled():
-                console.print(f"[yellow]{artifact_type} review cancelled by user.[/yellow]")
+                self._console.print(f"[yellow]{artifact_type} review cancelled by user.[/yellow]")
                 break
 
             if not response.success:
-                console.print(f"[red]{prop.agent_role} failed to address comments.[/red]")
+                self._console.print(f"[red]{prop.agent_role} failed to address comments.[/red]")
                 if abort_on_agent_failure:
                     self._record_blocked_failure(
                         stage=f"{sp}_revision_blocked",
@@ -2177,9 +2299,9 @@ class WorkflowEngine:
                         },
                     )
                 except Exception as e:
-                    console.print(f"[dim red]Warning: Failed to persist final artifact: {e}[/dim red]")
+                    self._console.print(f"[dim red]Warning: Failed to persist final artifact: {e}[/dim red]")
 
-        console.print(f"[yellow]Max iterations reached for {artifact_type} review.[/yellow]")
+        self._console.print(f"[yellow]Max iterations reached for {artifact_type} review.[/yellow]")
         return current, self._max_review, False
 
     def _review_artifact_type(self, artifact_type: str) -> str:
@@ -2251,7 +2373,7 @@ class WorkflowEngine:
         """
         target = proposer or self._dev
         if self._auto_approve:
-            console.print("[dim]Auto-approve enabled; continuing without user checkpoint.[/dim]")
+            self._console.print("[dim]Auto-approve enabled; continuing without user checkpoint.[/dim]")
             return artifact
         while True:
             response = self._ask(prompt_text)
@@ -2260,14 +2382,14 @@ class WorkflowEngine:
             elif response.lower() in ("n", "no"):
                 return None
             else:
-                console.print(f"[yellow]Sending your feedback to {target.agent_role}...[/yellow]")
+                self._real_console.print(f"[yellow]Sending your feedback to {target.agent_role}...[/yellow]")
                 address_prompt = self._build_address_prompt(artifact_type, artifact, response)
                 agent_response = target.send(
                     address_prompt, task_description=f"Address user feedback on {artifact_type}",
                 )
                 if agent_response.success:
                     artifact = agent_response.content
-                    console.print(Panel(
+                    self._real_console.print(Panel(
                         Markdown(artifact), title=f"Updated {artifact_type.title()}", border_style="yellow",
                     ))
                     # Persist the revised artifact so resume loads the
@@ -2287,9 +2409,9 @@ class WorkflowEngine:
                                 },
                             )
                         except Exception as e:
-                            console.print(f"[dim red]Warning: Failed to persist revised artifact: {e}[/dim red]")
+                            self._console.print(f"[dim red]Warning: Failed to persist revised artifact: {e}[/dim red]")
                 else:
-                    console.print(f"[red]{target.agent_role} failed to address feedback.[/red]")
+                    self._console.print(f"[red]{target.agent_role} failed to address feedback.[/red]")
 
     # ════════════════════════════════════════════════════════════════
     # Phase parsing

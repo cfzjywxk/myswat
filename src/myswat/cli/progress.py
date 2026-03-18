@@ -18,6 +18,7 @@ from myswat.agents.base import AgentResponse, AgentRunner
 
 if TYPE_CHECKING:
     from myswat.agents.session_manager import SessionManager
+    from myswat.cli.workflow_display import WorkflowDisplay
     from myswat.memory.store import MemoryStore
 
 
@@ -288,13 +289,22 @@ def _run_with_task_monitor(
     work_item_ref: dict[str, int | None],
     cancel_targets: list[AgentRunner],
     cancel_event: threading.Event,
+    workflow_display: "WorkflowDisplay | None" = None,
 ) -> object | None:
-    """Run a long task while showing work-item progress."""
+    """Run a long task while showing work-item progress.
+
+    When *workflow_display* is provided the live display is driven by
+    structured events from the engine (no DB polling needed).  Otherwise
+    the legacy DB-polling display is used.
+    """
     result = [None]
     error = [None]
     start = time.monotonic()
+    use_event_display = workflow_display is not None
+
+    # -- DB-polling state (only used when workflow_display is None) --
     snapshot_lock = threading.Lock()
-    snapshot = {
+    snapshot: dict = {
         "work_item_id": None,
         "item": {},
         "state": {},
@@ -335,9 +345,12 @@ def _run_with_task_monitor(
             stop_polling.wait(_TASK_MONITOR_LOOP_INTERVAL)
 
     worker = threading.Thread(target=_run, daemon=True)
-    poller = threading.Thread(target=_poll_task_state, daemon=True)
     worker.start()
-    poller.start()
+
+    poller: threading.Thread | None = None
+    if not use_event_display:
+        poller = threading.Thread(target=_poll_task_state, daemon=True)
+        poller.start()
 
     fd = None
     old_settings = None
@@ -359,22 +372,35 @@ def _run_with_task_monitor(
             transient=True,
         ) as live:
             while worker.is_alive():
-                with snapshot_lock:
-                    current_id = snapshot["work_item_id"]
-                    item = dict(snapshot["item"])
-                    state = dict(snapshot["state"])
-                live.update(
-                    _build_task_monitor_display(
-                        proj=proj,
-                        work_item_id=current_id,
-                        item=item,
-                        state=state,
-                        label=label,
-                        frame_idx=frame_idx,
-                        elapsed=time.monotonic() - start,
-                        cancel_requested=cancel_event.is_set(),
+                elapsed = time.monotonic() - start
+
+                if use_event_display:
+                    live.update(
+                        workflow_display.build_live_renderable(
+                            proj_slug=proj["slug"],
+                            work_item_id=work_item_ref.get("id"),
+                            frame_idx=frame_idx,
+                            elapsed=elapsed,
+                            cancel_requested=cancel_event.is_set(),
+                        )
                     )
-                )
+                else:
+                    with snapshot_lock:
+                        current_id = snapshot["work_item_id"]
+                        item = dict(snapshot["item"])
+                        state = dict(snapshot["state"])
+                    live.update(
+                        _build_task_monitor_display(
+                            proj=proj,
+                            work_item_id=current_id,
+                            item=item,
+                            state=state,
+                            label=label,
+                            frame_idx=frame_idx,
+                            elapsed=elapsed,
+                            cancel_requested=cancel_event.is_set(),
+                        )
+                    )
                 frame_idx += 1
 
                 if use_cbreak and _check_esc() and not cancel_event.is_set():
@@ -391,20 +417,31 @@ def _run_with_task_monitor(
                 termios.tcsetattr(fd, termios.TCSAFLUSH, old_settings)
     finally:
         stop_polling.set()
-        poller.join(timeout=1)
+        if poller is not None:
+            poller.join(timeout=1)
         try:
             if use_cbreak and fd is not None and old_settings is not None:
                 termios.tcsetattr(fd, termios.TCSAFLUSH, old_settings)
         except Exception:
             pass
 
+    # Post-run snapshot
     try:
-        _print_task_monitor_snapshot(
-            console=console,
-            store=store,
-            proj=proj,
-            work_item_id=work_item_ref.get("id"),
-        )
+        if use_event_display:
+            console.print()
+            console.print(
+                workflow_display.build_final_snapshot(
+                    proj_slug=proj["slug"],
+                    work_item_id=work_item_ref.get("id"),
+                )
+            )
+        else:
+            _print_task_monitor_snapshot(
+                console=console,
+                store=store,
+                proj=proj,
+                work_item_id=work_item_ref.get("id"),
+            )
     except Exception:
         # Best-effort snapshot only; do not mask the task outcome.
         pass

@@ -649,6 +649,7 @@ def _run_testplan_review(
     should_cancel: Callable[[], bool] | None = None,
     on_work_item_created: Callable[[int], None] | None = None,
     register_cancel_target: Callable[[AgentRunner], None] | None = None,
+    on_event: Callable | None = None,
 ) -> None:
     from myswat.workflow.engine import WorkflowEngine, WorkMode
 
@@ -714,6 +715,7 @@ def _run_testplan_review(
         ask_user=_make_prompt_callback(prompt_session),
         auto_approve=False,
         should_cancel=should_cancel,
+        on_event=on_event,
     )
 
     try:
@@ -744,6 +746,7 @@ def _run_workflow(
     register_cancel_target: Callable[[AgentRunner], None] | None = None,
     mode: WorkMode = WorkMode.full,
     proposer_sm: SessionManager | None = None,
+    on_event: Callable | None = None,
 ) -> None:
     """Run a teamwork workflow, optionally reusing an architect chat session."""
     from myswat.workflow.engine import WorkflowEngine
@@ -874,6 +877,7 @@ def _run_workflow(
         ask_user=_make_prompt_callback(prompt_session),
         auto_approve=False,
         should_cancel=should_cancel,
+        on_event=on_event,
     )
 
     try:
@@ -966,9 +970,12 @@ def _run_testplan_review_interactive(
     task: str,
     prompt_session: PromptSession | None = None,
 ) -> None:
+    from myswat.cli.workflow_display import WorkflowDisplay
+
     work_item_ref: dict[str, int | None] = {"id": None}
     cancel_targets: list[AgentRunner] = []
     cancel_event = threading.Event()
+    display = WorkflowDisplay()
 
     def _worker():
         return _run_testplan_review(
@@ -982,6 +989,7 @@ def _run_testplan_review_interactive(
             should_cancel=cancel_event.is_set,
             on_work_item_created=lambda wid: work_item_ref.__setitem__("id", wid),
             register_cancel_target=cancel_targets.append,
+            on_event=display.handle_event,
         )
 
     _run_with_task_monitor(
@@ -993,6 +1001,7 @@ def _run_testplan_review_interactive(
         work_item_ref=work_item_ref,
         cancel_targets=cancel_targets,
         cancel_event=cancel_event,
+        workflow_display=display,
     )
 
 
@@ -1007,9 +1016,12 @@ def _run_workflow_interactive(
     proposer_sm: SessionManager | None = None,
     label: str | None = None,
 ) -> None:
+    from myswat.cli.workflow_display import WorkflowDisplay
+
     work_item_ref: dict[str, int | None] = {"id": None}
     cancel_targets: list[AgentRunner] = []
     cancel_event = threading.Event()
+    display = WorkflowDisplay()
 
     def _worker():
         return _run_workflow(
@@ -1024,6 +1036,7 @@ def _run_workflow_interactive(
             register_cancel_target=cancel_targets.append,
             mode=mode,
             proposer_sm=proposer_sm,
+            on_event=display.handle_event,
         )
 
     _run_with_task_monitor(
@@ -1035,6 +1048,7 @@ def _run_workflow_interactive(
         work_item_ref=work_item_ref,
         cancel_targets=cancel_targets,
         cancel_event=cancel_event,
+        workflow_display=display,
     )
 
 

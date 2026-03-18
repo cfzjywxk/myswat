@@ -22,6 +22,7 @@ from myswat.agents.factory import make_runner_from_row
 from myswat.agents.session_manager import SessionManager
 from myswat.cli.prompting import create_prompt_session, make_prompt_callback
 from myswat.cli.progress import _run_with_task_monitor
+from myswat.cli.workflow_display import WorkflowDisplay
 from myswat.config.settings import MySwatSettings
 from myswat.db.connection import TiDBPool
 from myswat.db.schema import run_migrations
@@ -466,6 +467,7 @@ def _run_workflow(
     prompt_session: PromptSession[str] | None = None
     if not background_worker and not auto_approve:
         prompt_session = _build_prompt_session(settings, f"work-{project_slug}")
+    display = WorkflowDisplay() if show_monitor else None
     engine = WorkflowEngine(
         store=store,
         dev_sm=dev_sm,
@@ -479,6 +481,7 @@ def _run_workflow(
         should_cancel=cancel_event.is_set,
         resume_stage=resume_stage,
         ask_user=make_prompt_callback(prompt_session),
+        on_event=display.handle_event if display else None,
     )
 
     final_status = "blocked"
@@ -500,6 +503,7 @@ def _run_workflow(
                 work_item_ref=work_item_ref,
                 cancel_targets=cancel_targets,
                 cancel_event=cancel_event,
+                workflow_display=display,
             )
         else:
             result = engine.run(requirement)

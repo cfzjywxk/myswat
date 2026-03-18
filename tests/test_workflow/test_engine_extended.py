@@ -3088,3 +3088,99 @@ class TestResumeStubPhases:
         assert summaries[0].startswith("Phase 1 (Phase 1)")  # stub
         assert summaries[1].startswith("Phase 2 (Two)")  # real, correct number
         assert summaries[2].startswith("Phase 3 (Phase 3)")  # stub
+
+
+class TestWorkflowEngineEvents:
+    """Regression tests for event-driven workflow output."""
+
+    @patch("myswat.workflow.engine.console", new_callable=MagicMock)
+    @patch.object(WorkflowEngine, "_generate_report", return_value="# Development Report")
+    @patch.object(
+        WorkflowEngine,
+        "_run_phase",
+        return_value=PhaseResult(
+            name="phase-A",
+            summary="done",
+            review_iterations=1,
+            review_passed=True,
+            committed=True,
+        ),
+    )
+    @patch.object(WorkflowEngine, "_parse_phases", return_value=["phase-A"])
+    def test_develop_mode_emits_stage_complete_for_final_report(
+        self,
+        _mock_parse_phases,
+        _mock_run_phase,
+        _mock_generate_report,
+        _mock_console,
+    ):
+        store = MagicMock()
+        events = []
+        dev_sm = make_fake_session_manager(agent_id=10, agent_role="developer")
+        qa_sm = make_fake_session_manager(agent_id=20, agent_role="qa-0")
+
+        engine = WorkflowEngine(
+            store=store,
+            dev_sm=dev_sm,
+            qa_sms=[qa_sm],
+            project_id=1,
+            work_item_id=1,
+            mode=WorkMode.develop,
+            on_event=events.append,
+        )
+
+        result = engine.run("Ship it")
+
+        assert result.success is True
+        assert any(
+            event.event_type == "stage_complete"
+            and event.stage == "report"
+            and event.message == "Report generated"
+            for event in events
+        )
+
+    @patch("myswat.workflow.engine.console", new_callable=MagicMock)
+    def test_review_loop_emits_failed_verdict_and_stage_failure_for_reviewer_crash(self, _mock_console):
+        store = MagicMock()
+        store.create_artifact.return_value = 42
+        store.create_review_cycle.return_value = 99
+        store.create_work_item_process_event.return_value = 1
+        events = []
+        dev_sm = make_fake_session_manager(agent_id=10, agent_role="developer")
+        qa_sm = make_fake_session_manager(
+            agent_id=20,
+            agent_role="qa-0",
+            responses=[_fail("qa crashed hard")],
+        )
+
+        engine = WorkflowEngine(
+            store=store,
+            dev_sm=dev_sm,
+            qa_sms=[qa_sm],
+            project_id=1,
+            work_item_id=1,
+            on_event=events.append,
+        )
+
+        artifact, iteration, passed = engine._run_review_loop(
+            artifact="draft design",
+            artifact_type="design",
+            context="Requirement",
+            abort_on_agent_failure=True,
+        )
+
+        assert artifact == "draft design"
+        assert iteration == 1
+        assert passed is False
+        assert any(
+            event.event_type == "review_verdict"
+            and event.metadata.get("verdict") == "failed"
+            and event.agent_role == "qa-0"
+            for event in events
+        )
+        assert any(
+            event.event_type == "stage_complete"
+            and event.metadata.get("failed") is True
+            and "review failed" in event.message
+            for event in events
+        )
