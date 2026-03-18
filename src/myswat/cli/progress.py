@@ -410,11 +410,20 @@ def _run_with_task_monitor(
                             runner.cancel()
                         except Exception:
                             pass
+                    break
 
                 worker.join(timeout=_TASK_MONITOR_LOOP_INTERVAL)
 
             if use_cbreak and fd is not None and old_settings is not None:
                 termios.tcsetattr(fd, termios.TCSAFLUSH, old_settings)
+    except KeyboardInterrupt:
+        if not cancel_event.is_set():
+            cancel_event.set()
+            for runner in cancel_targets:
+                try:
+                    runner.cancel()
+                except Exception:
+                    pass
     finally:
         stop_polling.set()
         if poller is not None:
@@ -503,15 +512,16 @@ def _send_with_timer(
 
                 if use_cbreak and _check_esc():
                     cancelled = True
-                    live.update(Text(" Cancelling...", style="bold yellow"))
                     sm._runner.cancel()
-                    worker.join(timeout=5)
                     break
 
                 worker.join(timeout=_TASK_MONITOR_LOOP_INTERVAL)
 
             if use_cbreak and fd is not None and old_settings is not None:
                 termios.tcsetattr(fd, termios.TCSAFLUSH, old_settings)
+    except KeyboardInterrupt:
+        cancelled = True
+        sm._runner.cancel()
     finally:
         try:
             if use_cbreak and fd is not None and old_settings is not None:

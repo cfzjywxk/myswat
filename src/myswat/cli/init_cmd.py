@@ -451,6 +451,7 @@ def _seed_team_workflows(store: MemoryStore, project_id: int) -> None:
         tags=["workflow", "delegation", "team"],
         relevance_score=1.0,
         confidence=1.0,
+        compute_embedding=False,
     )
     console.print("  [green]Stored team workflow knowledge.[/green]")
 
