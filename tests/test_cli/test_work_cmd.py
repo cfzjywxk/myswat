@@ -555,10 +555,14 @@ class TestRunWork:
         prompt_session.prompt.assert_called_with("Approve?", multiline=False)
 
     @patch("myswat.cli.work_cmd._launch_background_work")
-    def test_design_mode_rejected_for_background(self, mock_launch_background_work):
-        with pytest.raises(typer.BadParameter):
-            run_work("proj", "do stuff", background=True, mode=WorkMode.design)
-        mock_launch_background_work.assert_not_called()
+    def test_design_mode_launches_in_background(self, mock_launch_background_work):
+        run_work("proj", "do stuff", background=True, mode=WorkMode.design)
+        mock_launch_background_work.assert_called_once_with(
+            "proj",
+            "do stuff",
+            workdir=None,
+            mode=WorkMode.design,
+        )
 
     @patch("myswat.cli.work_cmd.subprocess.Popen")
     @patch("myswat.cli.work_cmd.MySwatSettings")

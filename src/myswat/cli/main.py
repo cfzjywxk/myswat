@@ -1,6 +1,7 @@
 """MySwat CLI — main entry point."""
 
 import json
+import time
 
 import typer
 
@@ -15,6 +16,14 @@ app = typer.Typer(
 )
 
 app.add_typer(memory_app, name="memory", help="Search and manage project knowledge")
+
+
+@app.command()
+def server():
+    """Run the persistent MySwat daemon."""
+    from myswat.cli.server_cmd import run_daemon_server
+
+    raise typer.Exit(run_daemon_server())
 
 
 @app.command()
@@ -88,6 +97,58 @@ def _resolve_work_mode(*, design: bool, develop: bool, test: bool) -> WorkMode:
         )
 
 
+def _is_terminal_work_status(status: str) -> bool:
+    return status in {"approved", "blocked", "cancelled", "completed", "paused"}
+
+
+def _follow_work_item_until_terminal(
+    *,
+    client,
+    project: str,
+    work_item_id: int,
+    poll_interval_seconds: float = 1.0,
+    console=None,
+) -> dict:
+    from rich.console import Console
+
+    console = console or Console()
+    seen_events = 0
+    last_stage = ""
+    last_status = ""
+    while True:
+        payload = client.get_work_item(project=project, work_item_id=work_item_id)
+        item = payload.get("work_item") or {}
+        metadata = item.get("metadata_json") if isinstance(item, dict) else {}
+        task_state = metadata.get("task_state") if isinstance(metadata, dict) else {}
+        process_log = task_state.get("process_log") if isinstance(task_state, dict) else []
+
+        if isinstance(process_log, list):
+            for event in process_log[seen_events:]:
+                if not isinstance(event, dict):
+                    continue
+                timestamp = event.get("at")
+                prefix = f"[{timestamp}] " if timestamp else ""
+                console.print(f"{prefix}{_describe_process_event(event, 180)}")
+            seen_events = len(process_log)
+
+        stage = str(task_state.get("current_stage") or "")
+        status = str(item.get("status") or "")
+        if status != last_status or stage != last_stage:
+            summary = str(task_state.get("latest_summary") or "")
+            status_line = f"status={status or '-'}"
+            if stage:
+                status_line += f" stage={stage}"
+            if summary:
+                status_line += f" summary={summary[:180]}"
+            console.print(f"[dim]{status_line}[/dim]")
+            last_status = status
+            last_stage = stage
+
+        if _is_terminal_work_status(status):
+            return item
+        time.sleep(max(0.1, poll_interval_seconds))
+
+
 @app.command()
 def work(
     requirement: str = typer.Argument(None, help="Requirement description (optional when --resume)"),
@@ -96,7 +157,7 @@ def work(
     background: bool = typer.Option(
         False,
         "--background",
-        help="Detach the workflow and keep it running after this terminal exits.",
+        help="Submit the workflow and return immediately without following progress.",
     ),
     design_mode: bool = typer.Option(False, "--design", "--plan", help="Run design + planning only."),
     develop_mode: bool = typer.Option(False, "--develop", "--dev", help="Run development only."),
@@ -108,8 +169,11 @@ def work(
     ),
     resume: int = typer.Option(None, "--resume", help="Resume a blocked/failed work item by ID."),
 ):
-    """Run the teamwork workflow in full or selected foreground mode."""
-    from myswat.cli.work_cmd import run_work
+    """Submit a teamwork workflow to the local MySwat daemon."""
+    from rich.console import Console
+
+    from myswat.config.settings import MySwatSettings
+    from myswat.server.control_client import DaemonClient, DaemonClientError
 
     mode = _resolve_work_mode(
         design=design_mode,
@@ -131,19 +195,67 @@ def work(
         if not requirement:
             raise typer.BadParameter("Requirement is required when not using --resume.")
 
-    if background and mode == WorkMode.design:
-        raise typer.BadParameter("Design mode cannot be combined with --background.")
+    if resume is not None:
+        raise typer.BadParameter("--resume is not supported through the daemon workflow path yet.")
+    if not auto_approve:
+        raise typer.BadParameter("--interactive-checkpoints is not supported through the daemon workflow path yet.")
 
-    run_work(
-        project,
-        requirement or "",
-        workdir=workdir,
-        background=background,
-        mode=mode,
-        auto_approve=auto_approve,
-        resume=resume,
-        mode_explicit=mode_explicit,
-    )
+    console = Console()
+    settings = MySwatSettings()
+    client = DaemonClient(settings)
+    try:
+        result = client.submit_work(
+            project=project,
+            requirement=requirement or "",
+            workdir=workdir,
+            mode=mode.value,
+        )
+    except DaemonClientError as exc:
+        console.print(f"[red]{exc}[/red]")
+        console.print(f"[dim]Start the daemon first: myswat server[/dim]")
+        raise typer.Exit(1)
+
+    console.print(f"[bold]Queued workflow:[/bold] {requirement}")
+    console.print(f"[dim]Work item: {result.get('work_item_id')}[/dim]")
+    workers = result.get("workers") or []
+    if isinstance(workers, list) and workers:
+        console.print(f"[dim]Workers: {', '.join(str(worker) for worker in workers)}[/dim]")
+    console.print(f"[dim]Server: {client.base_url}[/dim]")
+    console.print(f"[dim]Track progress: myswat status -p {project} --details[/dim]")
+
+    work_item_id = int(result.get("work_item_id") or 0)
+    if background or work_item_id <= 0:
+        return
+
+    console.print("[dim]Following workflow progress. Press Ctrl-C to cancel.[/dim]")
+    poll_interval_seconds = float(getattr(settings.workflow, "assignment_poll_interval_seconds", 1.0) or 1.0)
+    try:
+        final_item = _follow_work_item_until_terminal(
+            client=client,
+            project=project,
+            work_item_id=work_item_id,
+            poll_interval_seconds=poll_interval_seconds,
+            console=console,
+        )
+        console.print(f"[bold]Workflow finished with status:[/bold] {final_item.get('status')}")
+    except KeyboardInterrupt:
+        console.print("[yellow]Cancellation requested. Stopping workflow...[/yellow]")
+        try:
+            client.control_work(project=project, work_item_id=work_item_id, action="cancel")
+        except DaemonClientError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1)
+        try:
+            _follow_work_item_until_terminal(
+                client=client,
+                project=project,
+                work_item_id=work_item_id,
+                poll_interval_seconds=poll_interval_seconds,
+                console=console,
+            )
+        except Exception:
+            pass
+        raise typer.Exit(130)
 
 
 @app.command(name="work-background-worker", hidden=True)
@@ -166,15 +278,47 @@ def work_background_worker(
     )
 
 
+@app.command(name="worker", hidden=True)
+def worker(
+    project: str = typer.Option(..., "--project", "-p", help="Project slug"),
+    role: str = typer.Option(..., "--role", help="Agent role handled by this worker"),
+    server_url: str = typer.Option(..., "--server-url", help="MySwat daemon base URL"),
+    workdir: str = typer.Option(None, "--workdir", "-w", help="Working directory override"),
+):
+    """Internal worker entry point supervised by the MySwat daemon."""
+    from myswat.cli.worker_cmd import run_worker
+
+    run_worker(
+        project_slug=project,
+        role=role,
+        server_url=server_url,
+        workdir=workdir,
+    )
+
+
 @app.command()
 def stop(
     work_item_id: int = typer.Argument(..., help="Work item ID"),
     project: str = typer.Option(..., "--project", "-p", help="Project slug"),
 ):
-    """Request cancellation of a background workflow."""
+    """Request cancellation of a workflow."""
+    from rich.console import Console
+
+    from myswat.config.settings import MySwatSettings
+    from myswat.server.control_client import DaemonClient, DaemonClientError
+
     from myswat.cli.work_cmd import stop_work_item
 
-    stop_work_item(project, work_item_id)
+    console = Console()
+    settings = MySwatSettings()
+    client = DaemonClient(settings)
+    try:
+        result = client.control_work(project=project, work_item_id=work_item_id, action="cancel")
+    except DaemonClientError:
+        stop_work_item(project, work_item_id)
+        return
+
+    console.print(f"[green]Cancellation requested for work item {result.get('work_item_id')}.[/green]")
 
 
 def _format_history_timestamp(value) -> str:
@@ -274,9 +418,28 @@ def init(
     repo_path: str = typer.Option(None, "--repo", "-r", help="Path to git repo"),
     description: str = typer.Option(None, "--desc", "-d", help="Project description"),
 ):
-    """Initialize a new MySwat project with TiDB schema and default agents."""
-    from myswat.cli.init_cmd import run_init
-    run_init(name, repo_path, description)
+    """Initialize a project through the local MySwat daemon."""
+    from rich.console import Console
+
+    from myswat.config.settings import MySwatSettings
+    from myswat.server.control_client import DaemonClient, DaemonClientError
+
+    console = Console()
+    settings = MySwatSettings()
+    client = DaemonClient(settings)
+    try:
+        result = client.init_project(
+            name=name,
+            repo_path=repo_path,
+            description=description,
+        )
+    except DaemonClientError as exc:
+        console.print(f"[red]{exc}[/red]")
+        console.print(f"[dim]Start the daemon first: myswat server[/dim]")
+        raise typer.Exit(1)
+
+    console.print(f"[green]Project initialized through daemon.[/green]")
+    console.print(f"[dim]Project: {result.get('project') or name}[/dim]")
 
 
 @app.command()
@@ -288,8 +451,9 @@ def reset(
 ):
     """Drop the TiDB database and re-create the current schema from scratch.
 
-    WARNING: This destroys ALL data — projects, agents, sessions, knowledge,
-    work items, review cycles. Use only when you want a clean slate.
+    WARNING: This destroys ALL data — projects, agents, stage runs,
+    coordination events, sessions, knowledge, work items, and review cycles.
+    Use only when you want a clean slate.
     """
     from rich.console import Console
 
@@ -306,8 +470,8 @@ def reset(
             f"\n[bold red]WARNING: This will DROP the entire '{db_name}' database.[/bold red]"
         )
         console.print(
-            "[red]All projects, agents, sessions, knowledge, work items, and "
-            "review cycles will be permanently deleted.[/red]\n"
+            "[red]All projects, agents, stage runs, coordination events, sessions, "
+            "knowledge, work items, and review cycles will be permanently deleted.[/red]\n"
         )
         confirm = typer.prompt(f"Type '{db_name}' to confirm", default="")
         if confirm != db_name:

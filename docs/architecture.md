@@ -4,9 +4,14 @@
 
 | Component | Role |
 |-----------|------|
-| **CLI** (Typer) | `myswat init`, `chat`, `run`, `work`, `status`, `task`, `search`, `history`, `memory`, `gc`, `reset` |
-| **SessionManager** | Agent lifecycle, subprocess launch (codex/claude/kimi) |
-| **WorkflowEngine** | Mode dispatch: full, design, develop, test |
+| **CLI** (Typer) | Thin clients for `init`, `work`, `status`, plus legacy `chat` / `run` paths |
+| **MySwatDaemon** | Persistent local daemon that handles project init, work submission, and worker supervision |
+| **WorkflowKernel** | Stage-oriented orchestration for `work`: queue tasks, wait for results, advance stages |
+| **WorkflowRuntime** | Lightweight role/profile wrapper used by the kernel |
+| **MySwatToolService** | Canonical store-backed coordination surface for workflow and MCP tools |
+| **MySwat MCP Endpoint** | HTTP JSON-RPC MCP surface for runtime registration, task claim, artifact submission, and review verdicts |
+| **Managed Worker** | Internal `myswat worker --role ...` process that executes Codex/Claude/Kimi backends for one role |
+| **SessionManager** | Legacy chat/session lifecycle for transcript-oriented flows |
 | **MemoryRetriever** | 5-tier context builder for agent prompts |
 | **KnowledgeSearchEngine** | Search planning, lexical/vector/graph fusion |
 | **MemoryStore** | TiDB CRUD, source-aware upsert, lexical index, graph metadata |
@@ -74,6 +79,9 @@ Session active
 |-------|---------|
 | `projects` | Project registry with memory revision counter |
 | `agents` | Role configs per project |
+| `stage_runs` | Explicit workflow stage execution records |
+| `coordination_events` | Append-only handoff/status/review event stream |
+| `runtime_registrations` | Runtime capability and heartbeat records |
 | `sessions` | Dialog sessions with compaction watermark and context revision |
 | `session_turns` | Individual messages (recency-indexed) |
 | `knowledge` | Compacted/ingested knowledge with embeddings, source metadata, hashes, merge lineage |
@@ -84,3 +92,15 @@ Session active
 | `work_items` | Task tracking |
 | `artifacts` | Proposals/diffs under review |
 | `review_cycles` | Review iterations with structured verdicts |
+
+## Workflow State
+
+The primary state model for `myswat work` is now:
+
+- `work_items`
+- `stage_runs`
+- `coordination_events`
+- `artifacts`
+- `review_cycles`
+
+That means the `work` path no longer depends on transcript persistence or CLI session resume to coordinate multi-agent delivery. The daemon starts or reuses managed workers, the kernel queues stage and review assignments, and workers claim them through the MCP endpoint.

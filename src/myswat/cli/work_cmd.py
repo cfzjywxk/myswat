@@ -18,8 +18,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console
 
 from myswat.agents.base import AgentRunner
-from myswat.agents.factory import make_runner_from_row
-from myswat.agents.session_manager import SessionManager
+from myswat.agents.session_manager import SessionManager  # Legacy export kept for older tests.
 from myswat.cli.prompting import create_prompt_session, make_prompt_callback
 from myswat.cli.progress import TaskMonitorPromptBridge, _run_with_task_monitor
 from myswat.cli.workflow_display import WorkflowDisplay
@@ -28,8 +27,10 @@ from myswat.db.connection import TiDBPool
 from myswat.db.schema import ensure_schema
 from myswat.memory.learn_triggers import submit_workflow_summary_learn_request
 from myswat.memory.store import MemoryStore
-from myswat.workflow.engine import WorkflowEngine
+from myswat.server import MySwatToolService
+from myswat.workflow.kernel import WorkflowKernel as WorkflowEngine
 from myswat.workflow.modes import WorkMode
+from myswat.workflow.runtime import WorkflowRuntime
 
 console = Console()
 
@@ -295,6 +296,8 @@ def _run_workflow(
     auto_approve: bool = True,
     resume: int | None = None,
     mode_explicit: bool = False,
+    external_cancel_event: threading.Event | None = None,
+    emit_console_output: bool = True,
 ) -> int:
     settings, store, proj, effective_workdir = _load_project_context(project_slug, workdir)
 
@@ -350,45 +353,7 @@ def _run_workflow(
         console.print(f"[dim]Resuming work item {resume} from stage: {resume_stage or 'start'}[/dim]")
 
     dev_agent, qa_agents = _get_workflow_agents(store, proj["id"])
-    arch_agent = _get_architect_agent(store, proj["id"]) if mode == WorkMode.full else None
-    arch_sm: SessionManager | None = None
-    arch_runner: AgentRunner | None = None
-
-    if arch_agent:
-        arch_runner = make_runner_from_row(arch_agent, settings=settings)
-        arch_runner.workdir = effective_workdir
-        arch_sm = SessionManager(
-            store=store,
-            runner=arch_runner,
-            agent_row=arch_agent,
-            project_id=proj["id"],
-            settings=settings,
-        )
-
-    dev_runner = make_runner_from_row(dev_agent, settings=settings)
-    dev_runner.workdir = effective_workdir
-
-    dev_sm = SessionManager(
-        store=store,
-        runner=dev_runner,
-        agent_row=dev_agent,
-        project_id=proj["id"],
-        settings=settings,
-    )
-
-    qa_sms: list[SessionManager] = []
-    for qa_agent in qa_agents:
-        qa_runner = make_runner_from_row(qa_agent, settings=settings)
-        qa_runner.workdir = effective_workdir
-        qa_sms.append(
-            SessionManager(
-                store=store,
-                runner=qa_runner,
-                agent_row=qa_agent,
-                project_id=proj["id"],
-                settings=settings,
-            )
-        )
+    arch_agent = _get_architect_agent(store, proj["id"]) if mode in {WorkMode.full, WorkMode.design} else None
 
     if work_item_id is None:
         work_item_id = store.create_work_item(
@@ -430,37 +395,49 @@ def _run_workflow(
             to_role="workflow",
         )
 
-    if arch_sm is not None:
-        arch_sm.create_or_resume(
-            purpose=f"Workflow architect: {requirement[:80]}",
-            work_item_id=work_item_id,
+    arch_runtime = (
+        WorkflowRuntime(
+            agent_row=arch_agent,
         )
-    dev_sm.create_or_resume(purpose=f"Workflow dev: {requirement[:80]}", work_item_id=work_item_id)
-    workflow_session_id = getattr(getattr(dev_sm, "session", None), "id", None)
-    for qa_sm in qa_sms:
-        qa_sm.create_or_resume(purpose=f"Workflow QA: {requirement[:80]}", work_item_id=work_item_id)
-
-    console.print(f"[bold]Requirement:[/bold] {requirement}")
-    if arch_agent:
-        console.print(
-            f"[dim]Architect: {arch_agent['display_name']} ({arch_agent['cli_backend']}/{arch_agent['model_name']})[/dim]"
-        )
-    console.print(
-        f"[dim]Dev: {dev_agent['display_name']} ({dev_agent['cli_backend']}/{dev_agent['model_name']})[/dim]"
+        if arch_agent is not None
+        else None
     )
-    for qa_sm in qa_sms:
-        qa_row = qa_sm._agent_row
-        console.print(
-            f"[dim]QA:  {qa_row['display_name']} ({qa_row['cli_backend']}/{qa_row['model_name']})[/dim]"
+    dev_runtime = WorkflowRuntime(
+        agent_row=dev_agent,
+    )
+    qa_runtimes = [
+        WorkflowRuntime(
+            agent_row=qa_agent,
         )
-    console.print(f"[dim]Work item: {work_item_id}[/dim]\n")
-    _print_tracking_commands(project_slug, work_item_id)
+        for qa_agent in qa_agents
+    ]
+    workflow_session_id = None
+
+    if emit_console_output:
+        console.print(f"[bold]Requirement:[/bold] {requirement}")
+        if arch_agent:
+            console.print(
+                f"[dim]Architect: {arch_agent['display_name']} ({arch_agent['cli_backend']}/{arch_agent['model_name']})[/dim]"
+            )
+        console.print(
+            f"[dim]Dev: {dev_agent['display_name']} ({dev_agent['cli_backend']}/{dev_agent['model_name']})[/dim]"
+        )
+        for qa_runtime in qa_runtimes:
+            qa_row = qa_runtime._agent_row
+            console.print(
+                f"[dim]QA:  {qa_row['display_name']} ({qa_row['cli_backend']}/{qa_row['model_name']})[/dim]"
+            )
+        console.print(f"[dim]Work item: {work_item_id}[/dim]\n")
+        _print_tracking_commands(project_slug, work_item_id)
 
     cancel_event = threading.Event()
     cancel_targets: list[AgentRunner] = []
-    if arch_runner is not None:
-        cancel_targets.append(arch_runner)
-    cancel_targets.extend([dev_runner] + [qa_sm._runner for qa_sm in qa_sms])
+    def _should_cancel() -> bool:
+        if cancel_event.is_set():
+            return True
+        if external_cancel_event is not None and external_cancel_event.is_set():
+            return True
+        return False
     restore_signal_handlers = (
         _install_cancel_signal_handlers(cancel_event, cancel_targets)
         if background_worker
@@ -476,20 +453,37 @@ def _run_workflow(
         else None
     )
     display = WorkflowDisplay() if show_monitor else None
+    service = MySwatToolService(store)
+    poll_interval_value = getattr(settings.workflow, "assignment_poll_interval_seconds", 1.0)
+    try:
+        poll_interval_seconds = float(poll_interval_value)
+    except (TypeError, ValueError):
+        poll_interval_seconds = 1.0
+
+    timeout_value = getattr(settings.workflow, "assignment_timeout_seconds", 0)
+    try:
+        timeout_seconds_value = float(timeout_value)
+    except (TypeError, ValueError):
+        timeout_seconds_value = 0.0
     engine = WorkflowEngine(
         store=store,
-        dev_sm=dev_sm,
-        qa_sms=qa_sms,
-        arch_sm=arch_sm,
+        service=service,
+        dev=dev_runtime,
+        qas=qa_runtimes,
+        arch=arch_runtime,
         project_id=proj["id"],
         work_item_id=work_item_id,
-        max_review_iterations=settings.workflow.max_review_iterations,
         mode=mode,
+        max_review_iterations=settings.workflow.max_review_iterations,
         auto_approve=(background_worker or auto_approve),
-        should_cancel=cancel_event.is_set,
+        should_cancel=_should_cancel,
         resume_stage=resume_stage,
         ask_user=prompt_bridge.ask if prompt_bridge is not None else base_ask_user,
         on_event=display.handle_event if display else None,
+        assignment_poll_interval_seconds=poll_interval_seconds,
+        assignment_timeout_seconds=(
+            None if timeout_seconds_value <= 0 else timeout_seconds_value
+        ),
     )
 
     final_status = "blocked"
@@ -517,9 +511,13 @@ def _run_workflow(
         else:
             result = engine.run(requirement)
 
-        if cancel_event.is_set():
-            final_status = "blocked"
-            final_summary = "Workflow cancelled."
+        if _should_cancel():
+            current_item = store.get_work_item(work_item_id) or {}
+            requested_status = str(current_item.get("status") or "")
+            if requested_status not in {"cancelled", "paused"}:
+                requested_status = "cancelled"
+            final_status = requested_status
+            final_summary = "Workflow paused." if requested_status == "paused" else "Workflow cancelled."
         elif result.success:
             final_status = "completed"
             final_summary = "Workflow completed successfully."
@@ -552,12 +550,6 @@ def _run_workflow(
         if restore_signal_handlers is not None:
             restore_signal_handlers()
 
-        for sm in ([arch_sm] if arch_sm is not None else []) + [dev_sm] + qa_sms:
-            try:
-                sm.close()
-            except Exception:
-                pass
-
         if background_worker:
             _finalize_background_run(
                 store,
@@ -582,7 +574,8 @@ def _run_workflow(
         except Exception:
             pass
 
-    console.print("\n[dim]Sessions closed. All turns persisted to TiDB.[/dim]")
+    if emit_console_output:
+        console.print("\n[dim]Workflow state persisted to TiDB.[/dim]")
     return work_item_id
 
 
@@ -593,12 +586,9 @@ def _launch_background_work(
     workdir: str | None = None,
     mode: WorkMode = WorkMode.full,
 ) -> int:
-    if mode == WorkMode.design:
-        raise typer.BadParameter("Design mode cannot be combined with --background.")
-
     settings, store, proj, effective_workdir = _load_project_context(project_slug, workdir)
     dev_agent, _qa_agents = _get_workflow_agents(store, proj["id"])
-    arch_agent = _get_architect_agent(store, proj["id"]) if mode == WorkMode.full else None
+    arch_agent = _get_architect_agent(store, proj["id"]) if mode in {WorkMode.full, WorkMode.design} else None
 
     work_item_id = store.create_work_item(
         project_id=proj["id"],
@@ -718,8 +708,6 @@ def run_background_work_item(
     mode: WorkMode = WorkMode.full,
 ) -> None:
     """Entry point for the detached workflow worker."""
-    if mode == WorkMode.design:
-        raise typer.BadParameter("Design mode cannot be combined with --background.")
     _run_workflow(
         project_slug,
         requirement,
@@ -744,8 +732,6 @@ def run_work(
 ) -> None:
     """Run the full teamwork workflow."""
     if background:
-        if mode == WorkMode.design:
-            raise typer.BadParameter("Design mode cannot be combined with --background.")
         _launch_background_work(project_slug, requirement, workdir=workdir, mode=mode)
         return
 

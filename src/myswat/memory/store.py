@@ -21,6 +21,7 @@ from myswat.memory import embedder
 from myswat.models.knowledge import KnowledgeEntry
 from myswat.models.session import Session, SessionTurn
 from myswat.models.work_item import Artifact, ReviewCycle, WorkItem
+from myswat.models.workflow_runtime import CoordinationEvent, RuntimeRegistration, StageRun
 
 if TYPE_CHECKING:
     from myswat.agents.base import AgentRunner
@@ -942,6 +943,116 @@ class MemoryStore:
     def list_agents(self, project_id: int) -> list[dict]:
         return self._pool.fetch_all(
             "SELECT * FROM agents WHERE project_id = %s ORDER BY role", (project_id,),
+        )
+
+    # ─────────────────────── Runtime Registrations ───────────────────────
+
+    def register_runtime(
+        self,
+        *,
+        project_id: int,
+        runtime_name: str,
+        runtime_kind: str,
+        agent_role: str,
+        agent_id: int | None = None,
+        endpoint: str | None = None,
+        capabilities_json: dict[str, Any] | None = None,
+        metadata_json: dict[str, Any] | None = None,
+        lease_seconds: int = 300,
+    ) -> int:
+        lease_expires_at = datetime.now() + timedelta(seconds=max(lease_seconds, 30))
+        return self._pool.insert_returning_id(
+            "INSERT INTO runtime_registrations "
+            "(project_id, agent_id, agent_role, runtime_name, runtime_kind, endpoint, "
+            "status, capabilities_json, metadata_json, last_heartbeat_at, lease_expires_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, 'online', %s, %s, NOW(), %s)",
+            (
+                project_id,
+                agent_id,
+                agent_role,
+                runtime_name,
+                runtime_kind,
+                endpoint,
+                json.dumps(capabilities_json) if capabilities_json else None,
+                json.dumps(metadata_json) if metadata_json else None,
+                lease_expires_at,
+            ),
+        )
+
+    def get_runtime_registration(self, runtime_registration_id: int) -> RuntimeRegistration | None:
+        row = self._pool.fetch_one(
+            "SELECT * FROM runtime_registrations WHERE id = %s",
+            (runtime_registration_id,),
+        )
+        return RuntimeRegistration(**row) if row else None
+
+    def heartbeat_runtime(
+        self,
+        runtime_registration_id: int,
+        *,
+        lease_seconds: int = 300,
+        metadata_json: dict[str, Any] | None = None,
+    ) -> None:
+        runtime = self._pool.fetch_one(
+            "SELECT metadata_json FROM runtime_registrations WHERE id = %s",
+            (runtime_registration_id,),
+        )
+        merged_metadata = self._parse_json_field(runtime.get("metadata_json")) if runtime else None
+        metadata = dict(merged_metadata) if isinstance(merged_metadata, dict) else {}
+        if metadata_json:
+            metadata.update(metadata_json)
+        lease_expires_at = datetime.now() + timedelta(seconds=max(lease_seconds, 30))
+        self._pool.execute(
+            "UPDATE runtime_registrations SET status = 'online', last_heartbeat_at = NOW(), "
+            "lease_expires_at = %s, metadata_json = %s WHERE id = %s",
+            (
+                lease_expires_at,
+                json.dumps(metadata) if metadata else None,
+                runtime_registration_id,
+            ),
+        )
+
+    def list_runtime_registrations(
+        self,
+        project_id: int,
+        *,
+        agent_role: str | None = None,
+        status: str | None = None,
+    ) -> list[RuntimeRegistration]:
+        sql = "SELECT * FROM runtime_registrations WHERE project_id = %s"
+        args: list[Any] = [project_id]
+        if agent_role is not None:
+            sql += " AND agent_role = %s"
+            args.append(agent_role)
+        if status is not None:
+            sql += " AND status = %s"
+            args.append(status)
+        sql += " ORDER BY updated_at DESC, id DESC"
+        rows = self._pool.fetch_all(sql, tuple(args))
+        return [RuntimeRegistration(**row) for row in rows]
+
+    def update_runtime_status(
+        self,
+        runtime_registration_id: int,
+        *,
+        status: str,
+        metadata_json: dict[str, Any] | None = None,
+    ) -> None:
+        runtime = self._pool.fetch_one(
+            "SELECT metadata_json FROM runtime_registrations WHERE id = %s",
+            (runtime_registration_id,),
+        )
+        merged_metadata = self._parse_json_field(runtime.get("metadata_json")) if runtime else None
+        metadata = dict(merged_metadata) if isinstance(merged_metadata, dict) else {}
+        if metadata_json:
+            metadata.update(metadata_json)
+        self._pool.execute(
+            "UPDATE runtime_registrations SET status = %s, metadata_json = %s WHERE id = %s",
+            (
+                status,
+                json.dumps(metadata) if metadata else None,
+                runtime_registration_id,
+            ),
         )
 
     # ──────────────────────────── Sessions ────────────────────────────
@@ -2397,6 +2508,227 @@ class MemoryStore:
         self.update_work_item_metadata(item_id, metadata)
         return event
 
+    # ──────────────────────────── Stage Runs ────────────────────────────
+
+    def create_stage_run(
+        self,
+        *,
+        work_item_id: int,
+        stage_name: str,
+        stage_index: int = 0,
+        iteration: int = 1,
+        owner_agent_id: int | None = None,
+        owner_role: str | None = None,
+        status: str = "pending",
+        summary: str | None = None,
+        metadata_json: dict[str, Any] | None = None,
+    ) -> int:
+        return self._pool.insert_returning_id(
+            "INSERT INTO stage_runs "
+            "(work_item_id, stage_name, stage_index, iteration, owner_agent_id, owner_role, "
+            "status, summary, metadata_json) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                work_item_id,
+                stage_name,
+                stage_index,
+                iteration,
+                owner_agent_id,
+                owner_role,
+                status,
+                summary,
+                json.dumps(metadata_json) if metadata_json else None,
+            ),
+        )
+
+    def get_stage_run(self, stage_run_id: int) -> StageRun | None:
+        row = self._pool.fetch_one("SELECT * FROM stage_runs WHERE id = %s", (stage_run_id,))
+        return StageRun(**row) if row else None
+
+    def get_latest_stage_run(self, work_item_id: int, stage_name: str) -> StageRun | None:
+        row = self._pool.fetch_one(
+            "SELECT * FROM stage_runs WHERE work_item_id = %s AND stage_name = %s "
+            "ORDER BY stage_index DESC, iteration DESC, id DESC LIMIT 1",
+            (work_item_id, stage_name),
+        )
+        return StageRun(**row) if row else None
+
+    def list_stage_runs(self, work_item_id: int) -> list[StageRun]:
+        rows = self._pool.fetch_all(
+            "SELECT * FROM stage_runs WHERE work_item_id = %s "
+            "ORDER BY stage_index, iteration, id",
+            (work_item_id,),
+        )
+        return [StageRun(**row) for row in rows]
+
+    def update_stage_run(
+        self,
+        stage_run_id: int,
+        *,
+        status: str | None = None,
+        summary: str | None = None,
+        completed: bool = False,
+        claimed_by_runtime_id: int | None = None,
+        lease_expires_at: datetime | None = None,
+        output_artifact_id: int | None = None,
+        metadata_json: dict[str, Any] | None = None,
+    ) -> None:
+        row = self._pool.fetch_one("SELECT metadata_json FROM stage_runs WHERE id = %s", (stage_run_id,))
+        existing_metadata = self._parse_json_field(row.get("metadata_json")) if row else None
+        merged_metadata = dict(existing_metadata) if isinstance(existing_metadata, dict) else {}
+        if metadata_json:
+            merged_metadata.update(metadata_json)
+
+        assignments: list[str] = []
+        args: list[Any] = []
+        if status is not None:
+            assignments.append("status = %s")
+            args.append(status)
+        if summary is not None:
+            assignments.append("summary = %s")
+            args.append(summary)
+        if claimed_by_runtime_id is not None:
+            assignments.append("claimed_by_runtime_id = %s")
+            args.append(claimed_by_runtime_id)
+            assignments.append("claimed_at = NOW()")
+        if lease_expires_at is not None:
+            assignments.append("lease_expires_at = %s")
+            args.append(lease_expires_at)
+        if output_artifact_id is not None:
+            assignments.append("output_artifact_id = %s")
+            args.append(output_artifact_id)
+        if metadata_json is not None:
+            assignments.append("metadata_json = %s")
+            args.append(json.dumps(merged_metadata) if merged_metadata else None)
+        if completed:
+            assignments.append("completed_at = NOW()")
+        if not assignments:
+            return
+        args.append(stage_run_id)
+        self._pool.execute(
+            f"UPDATE stage_runs SET {', '.join(assignments)} WHERE id = %s",
+            tuple(args),
+        )
+
+    def claim_stage_run(
+        self,
+        *,
+        project_id: int,
+        owner_role: str,
+        runtime_registration_id: int,
+        lease_seconds: int = 1800,
+    ) -> StageRun | None:
+        now = datetime.now()
+        row = self._pool.fetch_one(
+            "SELECT sr.* FROM stage_runs sr "
+            "JOIN work_items wi ON sr.work_item_id = wi.id "
+            "WHERE wi.project_id = %s AND wi.status IN ('pending', 'in_progress', 'review') "
+            "AND sr.owner_role = %s "
+            "AND ("
+            "sr.status = 'pending' "
+            "OR (sr.status = 'claimed' AND (sr.lease_expires_at IS NULL OR sr.lease_expires_at < %s))"
+            ") "
+            "ORDER BY sr.stage_index, sr.iteration, sr.id LIMIT 1",
+            (project_id, owner_role, now),
+        )
+        if not row:
+            return None
+
+        lease_expires_at = now + timedelta(seconds=max(lease_seconds, 30))
+        updated = self._pool.execute(
+            "UPDATE stage_runs SET status = 'claimed', claimed_by_runtime_id = %s, "
+            "claimed_at = NOW(), lease_expires_at = %s "
+            "WHERE id = %s AND (status = 'pending' OR (status = 'claimed' AND (lease_expires_at IS NULL OR lease_expires_at < %s)))",
+            (runtime_registration_id, lease_expires_at, row["id"], now),
+        )
+        if updated != 1:
+            return None
+        return self.get_stage_run(int(row["id"]))
+
+    def cancel_open_stage_runs(
+        self,
+        work_item_id: int,
+        *,
+        summary: str,
+        status: str = "cancelled",
+    ) -> None:
+        self._pool.execute(
+            "UPDATE stage_runs SET status = %s, summary = %s, completed_at = NOW(), lease_expires_at = NULL "
+            "WHERE work_item_id = %s AND status NOT IN ('completed', 'blocked', 'cancelled', 'failed')",
+            (status, summary[:4000], work_item_id),
+        )
+
+    # ──────────────────────────── Coordination Events ────────────────────────────
+
+    def append_coordination_event(
+        self,
+        *,
+        work_item_id: int,
+        event_type: str,
+        summary: str,
+        stage_run_id: int | None = None,
+        stage_name: str | None = None,
+        title: str | None = None,
+        from_agent_id: int | None = None,
+        from_role: str | None = None,
+        to_agent_id: int | None = None,
+        to_role: str | None = None,
+        payload_json: dict[str, Any] | None = None,
+    ) -> CoordinationEvent:
+        event_id = self._pool.insert_returning_id(
+            "INSERT INTO coordination_events "
+            "(work_item_id, stage_run_id, stage_name, event_type, title, summary, "
+            "from_agent_id, from_role, to_agent_id, to_role, payload_json) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                work_item_id,
+                stage_run_id,
+                stage_name,
+                event_type,
+                title,
+                summary,
+                from_agent_id,
+                from_role,
+                to_agent_id,
+                to_role,
+                json.dumps(payload_json) if payload_json else None,
+            ),
+        )
+        row = self._pool.fetch_one("SELECT * FROM coordination_events WHERE id = %s", (event_id,))
+        if row:
+            return CoordinationEvent(**row)
+        return CoordinationEvent(
+            id=event_id,
+            work_item_id=work_item_id,
+            stage_run_id=stage_run_id,
+            stage_name=stage_name,
+            event_type=event_type,
+            title=title,
+            summary=summary,
+            from_agent_id=from_agent_id,
+            from_role=from_role,
+            to_agent_id=to_agent_id,
+            to_role=to_role,
+            payload_json=payload_json,
+        )
+
+    def list_coordination_events(
+        self,
+        work_item_id: int,
+        *,
+        stage_name: str | None = None,
+        limit: int = 20,
+    ) -> list[CoordinationEvent]:
+        sql = "SELECT * FROM coordination_events WHERE work_item_id = %s"
+        args: list[Any] = [work_item_id]
+        if stage_name:
+            sql += " AND stage_name = %s"
+            args.append(stage_name)
+        sql += " ORDER BY created_at DESC, id DESC LIMIT %s"
+        args.append(limit)
+        rows = self._pool.fetch_all(sql, tuple(args))
+        return [CoordinationEvent(**row) for row in rows]
+
     # ──────────────────────────── Artifacts ────────────────────────────
 
     def create_artifact(
@@ -2461,6 +2793,10 @@ class MemoryStore:
         proposer_agent_id: int, reviewer_agent_id: int,
         artifact_id: int,
         proposal_session_id: int | None = None,
+        stage_name: str | None = None,
+        reviewer_role: str | None = None,
+        status: str = "pending",
+        task_json: dict[str, Any] | None = None,
     ) -> int:
         """Create a review cycle (idempotent on duplicate artifact+reviewer).
 
@@ -2471,10 +2807,21 @@ class MemoryStore:
         try:
             return self._pool.insert_returning_id(
                 "INSERT INTO review_cycles (work_item_id, artifact_id, iteration, "
-                "proposer_agent_id, reviewer_agent_id, proposal_session_id) "
-                "VALUES (%s, %s, %s, %s, %s, %s)",
-                (work_item_id, artifact_id, iteration,
-                 proposer_agent_id, reviewer_agent_id, proposal_session_id),
+                "stage_name, proposer_agent_id, reviewer_agent_id, reviewer_role, "
+                "proposal_session_id, status, task_json) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    work_item_id,
+                    artifact_id,
+                    iteration,
+                    stage_name,
+                    proposer_agent_id,
+                    reviewer_agent_id,
+                    reviewer_role,
+                    proposal_session_id,
+                    status,
+                    json.dumps(task_json) if task_json else None,
+                ),
             )
         except pymysql.err.IntegrityError as e:
             if e.args and e.args[0] == 1062:  # Duplicate entry
@@ -2490,16 +2837,128 @@ class MemoryStore:
     def update_review_verdict(
         self, cycle_id: int, verdict: str, verdict_json: dict | None = None,
         review_session_id: int | None = None,
+        status: str | None = None,
+        claimed_by_runtime_id: int | None = None,
+        lease_expires_at: datetime | None = None,
     ) -> None:
+        assignments = [
+            "verdict = %s",
+            "verdict_json = %s",
+            "review_session_id = %s",
+        ]
+        args: list[Any] = [
+            verdict,
+            json.dumps(verdict_json) if verdict_json else None,
+            review_session_id,
+        ]
+        if status is not None:
+            assignments.append("status = %s")
+            args.append(status)
+        if claimed_by_runtime_id is not None:
+            assignments.append("claimed_by_runtime_id = %s")
+            args.append(claimed_by_runtime_id)
+            assignments.append("claimed_at = NOW()")
+        if lease_expires_at is not None:
+            assignments.append("lease_expires_at = %s")
+            args.append(lease_expires_at)
+        if status in {"completed", "blocked", "cancelled"}:
+            assignments.append("completed_at = NOW()")
+        args.append(cycle_id)
         self._pool.execute(
-            "UPDATE review_cycles SET verdict = %s, verdict_json = %s, "
-            "review_session_id = %s WHERE id = %s",
-            (verdict, json.dumps(verdict_json) if verdict_json else None,
-             review_session_id, cycle_id),
+            f"UPDATE review_cycles SET {', '.join(assignments)} WHERE id = %s",
+            tuple(args),
+        )
+
+    def get_review_cycle(self, cycle_id: int) -> dict | None:
+        row = self._pool.fetch_one(
+            "SELECT * FROM review_cycles WHERE id = %s",
+            (cycle_id,),
+        )
+        if row and row.get("task_json") is not None:
+            row["task_json"] = self._parse_json_field(row["task_json"])
+        if row and row.get("verdict_json") is not None:
+            row["verdict_json"] = self._parse_json_field(row["verdict_json"])
+        return row
+
+    def claim_review_cycle(
+        self,
+        *,
+        project_id: int,
+        reviewer_role: str,
+        runtime_registration_id: int,
+        lease_seconds: int = 1800,
+    ) -> dict | None:
+        now = datetime.now()
+        row = self._pool.fetch_one(
+            "SELECT rc.* FROM review_cycles rc "
+            "JOIN work_items wi ON rc.work_item_id = wi.id "
+            "WHERE wi.project_id = %s AND wi.status IN ('pending', 'in_progress', 'review') "
+            "AND rc.reviewer_role = %s "
+            "AND ("
+            "rc.status = 'pending' "
+            "OR (rc.status = 'claimed' AND (rc.lease_expires_at IS NULL OR rc.lease_expires_at < %s))"
+            ") "
+            "ORDER BY rc.created_at, rc.id LIMIT 1",
+            (project_id, reviewer_role, now),
+        )
+        if not row:
+            return None
+
+        lease_expires_at = now + timedelta(seconds=max(lease_seconds, 30))
+        updated = self._pool.execute(
+            "UPDATE review_cycles SET status = 'claimed', claimed_by_runtime_id = %s, "
+            "claimed_at = NOW(), lease_expires_at = %s "
+            "WHERE id = %s AND (status = 'pending' OR (status = 'claimed' AND (lease_expires_at IS NULL OR lease_expires_at < %s)))",
+            (runtime_registration_id, lease_expires_at, row["id"], now),
+        )
+        if updated != 1:
+            return None
+        return self.get_review_cycle(int(row["id"]))
+
+    def cancel_open_review_cycles(
+        self,
+        work_item_id: int,
+        *,
+        summary: str,
+        status: str = "cancelled",
+    ) -> None:
+        verdict_json = json.dumps(
+            {
+                "verdict": status,
+                "issues": [],
+                "summary": summary[:4000],
+            }
+        )
+        self._pool.execute(
+            "UPDATE review_cycles SET status = %s, verdict = %s, verdict_json = %s, "
+            "completed_at = NOW(), lease_expires_at = NULL "
+            "WHERE work_item_id = %s AND status NOT IN ('completed', 'blocked', 'cancelled')",
+            (status, status, verdict_json, work_item_id),
         )
 
     def get_review_cycles(self, work_item_id: int) -> list[dict]:
-        return self._pool.fetch_all(
+        rows = self._pool.fetch_all(
             "SELECT * FROM review_cycles WHERE work_item_id = %s ORDER BY created_at, id",
             (work_item_id,),
         )
+        for row in rows:
+            if row.get("task_json") is not None:
+                row["task_json"] = self._parse_json_field(row["task_json"])
+            if row.get("verdict_json") is not None:
+                row["verdict_json"] = self._parse_json_field(row["verdict_json"])
+        return rows
+
+    def get_review_cycles_by_ids(self, cycle_ids: list[int]) -> list[dict]:
+        if not cycle_ids:
+            return []
+        placeholders = ", ".join(["%s"] * len(cycle_ids))
+        rows = self._pool.fetch_all(
+            f"SELECT * FROM review_cycles WHERE id IN ({placeholders}) ORDER BY created_at, id",
+            tuple(cycle_ids),
+        )
+        for row in rows:
+            if row.get("task_json") is not None:
+                row["task_json"] = self._parse_json_field(row["task_json"])
+            if row.get("verdict_json") is not None:
+                row["verdict_json"] = self._parse_json_field(row["verdict_json"])
+        return rows

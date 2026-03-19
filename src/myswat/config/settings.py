@@ -57,8 +57,18 @@ class AgentSettings(BaseSettings):
 
 class WorkflowSettings(BaseSettings):
     max_review_iterations: int = 5
+    assignment_poll_interval_seconds: float = 1.0
+    assignment_timeout_seconds: int = 0
 
     model_config = {"env_prefix": "MYSWAT_WORKFLOW_"}
+
+
+class ServerSettings(BaseSettings):
+    host: str = "127.0.0.1"
+    port: int = 8765
+    request_timeout_seconds: int = 30
+
+    model_config = {"env_prefix": "MYSWAT_SERVER_"}
 
 
 class EmbeddingSettings(BaseSettings):
@@ -94,6 +104,7 @@ class MySwatSettings(BaseSettings):
     tidb: TiDBSettings = Field(default_factory=TiDBSettings)
     agents: AgentSettings = Field(default_factory=AgentSettings)
     workflow: WorkflowSettings = Field(default_factory=WorkflowSettings)
+    server: ServerSettings = Field(default_factory=ServerSettings)
     compaction: CompactionSettings = Field(default_factory=CompactionSettings)
     memory_worker: MemoryWorkerSettings = Field(default_factory=MemoryWorkerSettings)
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)

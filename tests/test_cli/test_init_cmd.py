@@ -428,6 +428,44 @@ class TestRunInit:
     @patch("myswat.cli.init_cmd.TiDBPool")
     @patch("myswat.cli.init_cmd.ensure_schema")
     @patch("myswat.cli.init_cmd.MemoryStore")
+    def test_new_project_creates_missing_repo_directory(
+        self,
+        mock_store_cls,
+        mock_mig,
+        mock_pool_cls,
+        mock_settings_cls,
+        mock_seed,
+        mock_seed_wf,
+        tmp_path,
+    ):
+        pool = MagicMock()
+        pool.health_check.return_value = True
+        mock_pool_cls.return_value = pool
+
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = None
+        mock_store.create_project.return_value = 1
+        mock_store_cls.return_value = mock_store
+
+        repo_path = tmp_path / "fib-demo"
+        assert not repo_path.exists()
+
+        run_init("fib-demo", str(repo_path), "Fibonacci demo")
+
+        assert repo_path.is_dir()
+        mock_store.create_project.assert_called_once_with(
+            slug="fib-demo",
+            name="fib-demo",
+            description="Fibonacci demo",
+            repo_path=str(repo_path.resolve()),
+        )
+
+    @patch("myswat.cli.init_cmd._seed_team_workflows")
+    @patch("myswat.cli.init_cmd._seed_default_agents")
+    @patch("myswat.cli.init_cmd.MySwatSettings")
+    @patch("myswat.cli.init_cmd.TiDBPool")
+    @patch("myswat.cli.init_cmd.ensure_schema")
+    @patch("myswat.cli.init_cmd.MemoryStore")
     def test_existing_project(self, mock_store_cls, mock_mig,
                                mock_pool_cls, mock_settings_cls, mock_seed,
                                mock_seed_wf):

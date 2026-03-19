@@ -8,7 +8,12 @@ from typing import TYPE_CHECKING
 from rich.console import Console
 
 from myswat.cli.progress import _collapse_text
-from myswat.large_payloads import maybe_externalize_list, maybe_externalize_summary
+from myswat.large_payloads import (
+    maybe_externalize_list,
+    maybe_externalize_summary,
+    resolve_externalized_text,
+    resolve_externalized_value,
+)
 from myswat.models.work_item import ReviewVerdict
 from myswat.workflow.prompts import DEVELOPER_INITIAL, DEVELOPER_REVISION, REVIEWER
 
@@ -30,38 +35,48 @@ def _parse_verdict(raw: str) -> ReviewVerdict:
             summary="Reviewer returned empty output; treating as changes_requested.",
         )
 
-    # Extract JSON from markdown code blocks
-    if "```json" in text:
-        text = text.split("```json")[1].split("```")[0].strip()
-    elif "```" in text:
-        # Try to find JSON block
-        parts = text.split("```")
-        for part in parts[1::2]:  # odd-indexed parts are inside code blocks
-            part = part.strip()
-            if part.startswith("{"):
-                text = part
-                break
+    def _strip_code_fences(value: str) -> str:
+        if "```json" in value:
+            return value.split("```json", 1)[1].split("```", 1)[0].strip()
+        if "```" in value:
+            parts = value.split("```")
+            for part in parts[1::2]:
+                part = part.strip()
+                if part.startswith("{"):
+                    return part
+        return value.strip()
 
-    # Try direct JSON parse
-    try:
-        data = json.loads(text)
+    def _parse_json_verdict(value: str) -> ReviewVerdict | None:
+        try:
+            data = resolve_externalized_value(json.loads(value))
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return None
         return ReviewVerdict(
             verdict=data.get("verdict", "changes_requested"),
-            issues=data.get("issues", []),
-            summary=data.get("summary", ""),
+            issues=[str(issue) for issue in data.get("issues", [])],
+            summary=str(data.get("summary", "")),
         )
-    except (json.JSONDecodeError, KeyError):
-        pass
+
+    text = _strip_code_fences(text)
+    parsed = _parse_json_verdict(text)
+    if parsed is not None:
+        return parsed
+
+    text = resolve_externalized_text(text).strip()
+    text = _strip_code_fences(text)
+    parsed = _parse_json_verdict(text)
+    if parsed is not None:
+        return parsed
 
     # Fallback: check for LGTM keywords in raw text
-    lower = raw.lower()
+    lower = text.lower()
     if "lgtm" in lower and "changes_requested" not in lower:
-        return ReviewVerdict(verdict="lgtm", issues=[], summary=raw[:200])
+        return ReviewVerdict(verdict="lgtm", issues=[], summary=text[:200])
 
     # Default: treat as changes_requested
     return ReviewVerdict(
         verdict="changes_requested",
-        issues=[raw[:500]],
+        issues=[text[:500]],
         summary="Could not parse structured verdict; treating as changes_requested.",
     )
 

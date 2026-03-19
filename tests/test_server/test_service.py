@@ -1,0 +1,462 @@
+"""Tests for the store-backed MCP service layer."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+from myswat.memory.store import MemoryStore
+from myswat.models.workflow_runtime import StageRun
+from myswat.server.contracts import (
+    ClaimNextAssignmentRequest,
+    CompleteStageTaskRequest,
+    CoordinationEventRecord,
+    DecisionPersistenceRequest,
+    KnowledgeSearchRequest,
+    RecentArtifactsRequest,
+    ReviewRequest,
+    ReviewVerdictSubmission,
+    RuntimeRegistrationRequest,
+    RuntimeStatusUpdateRequest,
+    StageRunStart,
+    StageRunUpdate,
+    StatusReport,
+)
+from myswat.server.service import MySwatToolService
+
+
+def test_search_knowledge_delegates_to_store():
+    store = Mock(spec=MemoryStore)
+    store.search_knowledge.return_value = [{"title": "txn"}]
+    service = MySwatToolService(store)
+
+    result = service.search_knowledge(KnowledgeSearchRequest(project_id=7, query="txn"))
+
+    assert result == [{"title": "txn"}]
+    store.search_knowledge.assert_called_once_with(
+        project_id=7,
+        query="txn",
+        agent_id=None,
+        category=None,
+        source_type=None,
+        limit=10,
+        use_vector=True,
+        use_fulltext=True,
+    )
+
+
+def test_get_recent_artifacts_delegates_to_store():
+    store = Mock(spec=MemoryStore)
+    store.get_recent_artifacts_for_project.return_value = [{"artifact_type": "patch"}]
+    service = MySwatToolService(store)
+
+    result = service.get_recent_artifacts(RecentArtifactsRequest(project_id=9, limit=2))
+
+    assert result == [{"artifact_type": "patch"}]
+    store.get_recent_artifacts_for_project.assert_called_once_with(project_id=9, limit=2)
+
+
+def test_register_runtime_creates_runtime_registration():
+    store = Mock(spec=MemoryStore)
+    store.register_runtime.return_value = 55
+    service = MySwatToolService(store)
+
+    result = service.register_runtime(
+        RuntimeRegistrationRequest(
+            project_id=11,
+            runtime_name="codex-daemon",
+            runtime_kind="mcp",
+            agent_role="developer",
+            agent_id=3,
+        )
+    )
+
+    assert result.runtime_registration_id == 55
+    store.register_runtime.assert_called_once()
+
+
+def test_update_runtime_status_delegates_to_store():
+    store = Mock(spec=MemoryStore)
+    service = MySwatToolService(store)
+
+    result = service.update_runtime_status(
+        RuntimeStatusUpdateRequest(
+            runtime_registration_id=55,
+            status="offline",
+            metadata_json={"stop_reason": "idle_exit"},
+        )
+    )
+
+    assert result == {"runtime_registration_id": 55, "status": "offline"}
+    store.update_runtime_status.assert_called_once_with(
+        55,
+        status="offline",
+        metadata_json={"stop_reason": "idle_exit"},
+    )
+
+
+def test_start_stage_run_creates_pending_stage_and_updates_work_item_state():
+    store = Mock(spec=MemoryStore)
+    store.create_stage_run.return_value = 55
+    service = MySwatToolService(store)
+
+    result = service.start_stage_run(
+        StageRunStart(
+            work_item_id=11,
+            stage_name="design",
+            stage_index=10,
+            iteration=1,
+            owner_agent_id=3,
+            owner_role="architect",
+            status="pending",
+            summary="Produce technical design",
+            task_prompt="Write a design",
+            task_focus="coordination",
+            artifact_type="design_doc",
+            artifact_title="Technical design",
+        )
+    )
+
+    assert result.stage_run_id == 55
+    store.create_stage_run.assert_called_once_with(
+        work_item_id=11,
+        stage_name="design",
+        stage_index=10,
+        iteration=1,
+        owner_agent_id=3,
+        owner_role="architect",
+        status="pending",
+        summary="Produce technical design",
+        metadata_json={
+            "task_prompt": "Write a design",
+            "task_focus": "coordination",
+            "artifact_type": "design_doc",
+            "artifact_title": "Technical design",
+        },
+    )
+    store.update_work_item_state.assert_called_once_with(
+        11,
+        current_stage="design",
+        latest_summary="Produce technical design",
+        updated_by_agent_id=3,
+    )
+
+
+def test_update_stage_run_delegates_to_store():
+    store = Mock(spec=MemoryStore)
+    service = MySwatToolService(store)
+
+    service.update_stage_run(
+        StageRunUpdate(
+            stage_run_id=55,
+            status="completed",
+            summary="done",
+            completed=True,
+            output_artifact_id=999,
+            metadata_json={"iterations": 2},
+        )
+    )
+
+    store.update_stage_run.assert_called_once_with(
+        55,
+        status="completed",
+        summary="done",
+        completed=True,
+        claimed_by_runtime_id=None,
+        lease_expires_at=None,
+        output_artifact_id=999,
+        metadata_json={"iterations": 2},
+    )
+
+
+def test_claim_next_assignment_returns_stage_assignment_bundle():
+    store = Mock(spec=MemoryStore)
+    store.claim_stage_run.return_value = StageRun(
+        id=55,
+        work_item_id=17,
+        stage_name="plan",
+        stage_index=30,
+        iteration=1,
+        owner_agent_id=3,
+        owner_role="developer",
+        status="claimed",
+        summary="Draft the plan",
+        metadata_json={
+            "task_prompt": "Write the implementation plan",
+            "task_focus": "workflow",
+            "artifact_type": "implementation_plan",
+            "artifact_title": "Implementation plan",
+        },
+        started_at=datetime.now(),
+    )
+    store.get_work_item.return_value = {"id": 17, "project_id": 1}
+    store.get_project.return_value = {"id": 1, "name": "proj", "repo_path": "/tmp/repo"}
+    store.get_work_item_state.return_value = {}
+    store.list_artifacts.return_value = []
+    store.list_coordination_events.return_value = []
+    store.search_knowledge.return_value = []
+    service = MySwatToolService(store)
+
+    result = service.claim_next_assignment(
+        ClaimNextAssignmentRequest(
+            project_id=1,
+            agent_role="developer",
+            runtime_registration_id=91,
+        )
+    )
+
+    assert result.assignment_kind == "stage"
+    assert result.stage_run_id == 55
+    assert result.prompt == "Write the implementation plan"
+    assert result.artifact_type == "implementation_plan"
+
+
+def test_claim_next_assignment_preserves_large_context_details_for_worker_externalization():
+    store = Mock(spec=MemoryStore)
+    long_summary = ("summary-body " * 260) + "SUMMARY-TAIL-MARKER"
+    long_artifact = ("artifact-body " * 260) + "ARTIFACT-TAIL-MARKER"
+    long_event = ("event-body " * 260) + "EVENT-TAIL-MARKER"
+    long_knowledge = ("knowledge-body " * 260) + "KNOWLEDGE-TAIL-MARKER"
+    store.claim_stage_run.return_value = StageRun(
+        id=56,
+        work_item_id=18,
+        stage_name="phase_1",
+        stage_index=40,
+        iteration=1,
+        owner_agent_id=3,
+        owner_role="developer",
+        status="claimed",
+        summary="Implement phase 1",
+        metadata_json={
+            "task_prompt": "Implement the Rust fibonacci generator",
+            "task_focus": "fibonacci generator",
+            "artifact_type": "phase_result",
+            "artifact_title": "Phase 1 result",
+        },
+        started_at=datetime.now(),
+    )
+    store.get_work_item.return_value = {"id": 18, "project_id": 1}
+    store.get_project.return_value = {"id": 1, "name": "proj", "repo_path": "/tmp/repo"}
+    store.get_work_item_state.return_value = {
+        "current_stage": "phase_1",
+        "latest_summary": long_summary,
+        "next_todos": ["finish implementation"],
+        "open_issues": ["none"],
+    }
+    store.list_artifacts.return_value = [
+        {
+            "artifact_type": "design_doc",
+            "title": "Technical design",
+            "iteration": 1,
+            "content": long_artifact,
+        }
+    ]
+    store.list_coordination_events.return_value = [
+        CoordinationEventRecord(
+            work_item_id=18,
+            stage_name="phase_1",
+            event_type="review_feedback",
+            summary=long_event,
+        )
+    ]
+    store.search_knowledge.return_value = [{"title": "design-note", "content": long_knowledge}]
+    service = MySwatToolService(store)
+
+    result = service.claim_next_assignment(
+        ClaimNextAssignmentRequest(
+            project_id=1,
+            agent_role="developer",
+            runtime_registration_id=92,
+        )
+    )
+
+    assert result.assignment_kind == "stage"
+    assert "SUMMARY-TAIL-MARKER" in result.system_context
+    assert "ARTIFACT-TAIL-MARKER" in result.system_context
+    assert "EVENT-TAIL-MARKER" in result.system_context
+    assert "KNOWLEDGE-TAIL-MARKER" in result.system_context
+
+
+def test_report_status_updates_task_state_and_process_log():
+    store = Mock(spec=MemoryStore)
+    store.append_work_item_process_event.return_value = {"type": "status_report"}
+    service = MySwatToolService(store)
+
+    result = service.report_status(
+        StatusReport(
+            work_item_id=11,
+            agent_id=3,
+            agent_role="developer",
+            stage="develop",
+            summary="Implemented phase 1 and started validation.",
+            next_todos=["add retry path"],
+            open_issues=["need QA on deadlock edge case"],
+            title="phase-1",
+        )
+    )
+
+    assert result == {"type": "status_report"}
+    store.update_work_item_state.assert_called_once_with(
+        11,
+        current_stage="develop",
+        latest_summary="Implemented phase 1 and started validation.",
+        next_todos=["add retry path"],
+        open_issues=["need QA on deadlock edge case"],
+        updated_by_agent_id=3,
+    )
+
+
+def test_complete_stage_task_persists_artifact_and_marks_stage_completed():
+    store = Mock(spec=MemoryStore)
+    store.create_artifact.return_value = 42
+    service = MySwatToolService(store)
+
+    result = service.complete_stage_task(
+        CompleteStageTaskRequest(
+            stage_run_id=55,
+            runtime_registration_id=91,
+            work_item_id=11,
+            agent_id=3,
+            agent_role="developer",
+            iteration=2,
+            stage_name="plan",
+            artifact_type="implementation_plan",
+            title="Implementation plan",
+            content="Phase 1: Do the work",
+            summary="Plan ready",
+        )
+    )
+
+    assert result.status == "completed"
+    assert result.artifact_id == 42
+    store.update_stage_run.assert_called_once_with(
+        55,
+        status="completed",
+        summary="Plan ready",
+        completed=True,
+        output_artifact_id=42,
+        metadata_json=None,
+    )
+
+
+def test_request_review_creates_pending_cycle_and_logs_event():
+    store = Mock(spec=MemoryStore)
+    store.create_review_cycle.return_value = 88
+    service = MySwatToolService(store)
+
+    result = service.request_review(
+        ReviewRequest(
+            work_item_id=17,
+            artifact_id=42,
+            iteration=2,
+            proposer_agent_id=3,
+            proposer_role="developer",
+            reviewer_agent_id=4,
+            reviewer_role="qa_main",
+            stage="review",
+            summary="Ready for QA review.",
+            task_prompt="Please review this artifact",
+            task_focus="rollback safety",
+        )
+    )
+
+    assert result.cycle_id == 88
+    store.create_review_cycle.assert_called_once_with(
+        work_item_id=17,
+        iteration=2,
+        proposer_agent_id=3,
+        reviewer_agent_id=4,
+        reviewer_role="qa_main",
+        artifact_id=42,
+        proposal_session_id=None,
+        stage_name="review",
+        status="pending",
+        task_json={
+            "task_prompt": "Please review this artifact",
+            "task_focus": "rollback safety",
+        },
+    )
+
+
+def test_publish_review_verdict_updates_cycle_and_work_item():
+    store = Mock(spec=MemoryStore)
+    store.append_work_item_process_event.return_value = {"type": "review_verdict"}
+    service = MySwatToolService(store)
+
+    result = service.publish_review_verdict(
+        ReviewVerdictSubmission(
+            cycle_id=88,
+            work_item_id=17,
+            reviewer_agent_id=4,
+            reviewer_role="qa_main",
+            verdict="changes_requested",
+            issues=["missing rollback coverage"],
+            summary="Need rollback coverage before LGTM.",
+            runtime_registration_id=91,
+            stage="review",
+        )
+    )
+
+    assert result == {"type": "review_verdict"}
+    store.update_review_verdict.assert_called_once_with(
+        cycle_id=88,
+        verdict="changes_requested",
+        verdict_json={
+            "verdict": "changes_requested",
+            "issues": ["missing rollback coverage"],
+            "summary": "Need rollback coverage before LGTM.",
+        },
+        review_session_id=None,
+        status="completed",
+        claimed_by_runtime_id=91,
+    )
+
+
+def test_append_coordination_event_updates_both_event_streams():
+    store = Mock(spec=MemoryStore)
+    appended = Mock()
+    appended.model_dump.return_value = {"event_type": "handoff"}
+    store.append_coordination_event.return_value = appended
+    service = MySwatToolService(store)
+
+    result = service.append_coordination_event(
+        CoordinationEventRecord(
+            work_item_id=17,
+            stage_run_id=55,
+            stage_name="plan_review",
+            event_type="handoff",
+            title="Hand off to QA",
+            summary="Developer submitted the reviewed plan to QA.",
+            from_agent_id=3,
+            from_role="developer",
+            to_agent_id=4,
+            to_role="qa_main",
+            payload_json={"artifact_id": 42},
+        )
+    )
+
+    assert result == {"event_type": "handoff"}
+
+
+def test_persist_decision_upserts_knowledge_and_logs_when_work_item_is_present():
+    store = Mock(spec=MemoryStore)
+    store.upsert_knowledge.return_value = (123, "created")
+    service = MySwatToolService(store)
+
+    result = service.persist_decision(
+        DecisionPersistenceRequest(
+            project_id=5,
+            work_item_id=17,
+            agent_id=4,
+            agent_role="architect",
+            title="Use staged review artifacts",
+            content="Keep artifacts and review cycles as the system of record.",
+            tags=["workflow", "review"],
+            stage="design",
+            search_metadata_json={"subsystem": "workflow"},
+        )
+    )
+
+    assert result.knowledge_id == 123
+    assert result.action == "created"

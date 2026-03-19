@@ -26,6 +26,16 @@ def _slugify(name: str) -> str:
     return slug.strip("-")
 
 
+def _prepare_repo_path(repo_path: str | None) -> str | None:
+    if not repo_path:
+        return None
+    path = Path(repo_path).expanduser()
+    if path.exists() and not path.is_dir():
+        raise typer.BadParameter(f"Repo path exists but is not a directory: {path}")
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path.resolve())
+
+
 def run_init(name: str, repo_path: str | None, description: str | None) -> None:
     """Initialize a new MySwat project with TiDB schema and default agents."""
     settings = MySwatSettings()
@@ -43,6 +53,7 @@ def run_init(name: str, repo_path: str | None, description: str | None) -> None:
 
     # Create project
     slug = _slugify(name)
+    prepared_repo_path = _prepare_repo_path(repo_path)
     store = MemoryStore(
         pool,
         tidb_embedding_model=settings.embedding.tidb_model,
@@ -55,7 +66,7 @@ def run_init(name: str, repo_path: str | None, description: str | None) -> None:
         project_id = existing["id"]
     else:
         project_id = store.create_project(
-            slug=slug, name=name, description=description, repo_path=repo_path,
+            slug=slug, name=name, description=description, repo_path=prepared_repo_path,
         )
         console.print(f"[green]Created project '{name}' (slug={slug}, id={project_id})[/green]")
 

@@ -10,7 +10,12 @@ import pytest
 from click.exceptions import Exit as ClickExit
 from rich.console import Console
 
-from myswat.cli.main import _display_mode, _print_teamwork_details, _infer_stage_labels
+from myswat.cli.main import (
+    _display_mode,
+    _follow_work_item_until_terminal,
+    _infer_stage_labels,
+    _print_teamwork_details,
+)
 from myswat.workflow.engine import WorkMode
 
 
@@ -661,6 +666,80 @@ class TestTaskCommand:
 # Typer command routing
 # ---------------------------------------------------------------------------
 class TestCommandRouting:
+    @patch("myswat.cli.main.time.sleep", return_value=None)
+    def test_follow_work_item_until_terminal_prints_progress_until_completed(self, _mock_sleep):
+        client = MagicMock()
+        client.get_work_item.side_effect = [
+            {
+                "work_item": {
+                    "id": 41,
+                    "status": "in_progress",
+                    "metadata_json": {
+                        "task_state": {
+                            "current_stage": "design",
+                            "latest_summary": "Produce technical design",
+                            "process_log": [
+                                {
+                                    "at": "2026-03-19T18:00:00",
+                                    "event_type": "daemon_queued",
+                                    "title": "Workflow queued",
+                                    "summary": "MySwat daemon accepted the work item.",
+                                    "from_role": "user",
+                                    "to_role": "myswat",
+                                }
+                            ],
+                        }
+                    },
+                }
+            },
+            {
+                "work_item": {
+                    "id": 41,
+                    "status": "completed",
+                    "metadata_json": {
+                        "task_state": {
+                            "current_stage": "report",
+                            "latest_summary": "Workflow completed successfully.",
+                            "process_log": [
+                                {
+                                    "at": "2026-03-19T18:00:00",
+                                    "event_type": "daemon_queued",
+                                    "title": "Workflow queued",
+                                    "summary": "MySwat daemon accepted the work item.",
+                                    "from_role": "user",
+                                    "to_role": "myswat",
+                                },
+                                {
+                                    "at": "2026-03-19T18:00:05",
+                                    "event_type": "workflow_completed",
+                                    "title": "Workflow completed",
+                                    "summary": "Final report generated.",
+                                    "from_role": "myswat",
+                                    "to_role": "user",
+                                },
+                            ],
+                        }
+                    },
+                }
+            },
+        ]
+        output = io.StringIO()
+        console = Console(file=output, force_terminal=False, width=120)
+
+        item = _follow_work_item_until_terminal(
+            client=client,
+            project="proj",
+            work_item_id=41,
+            poll_interval_seconds=0.01,
+            console=console,
+        )
+
+        assert item["status"] == "completed"
+        rendered = output.getvalue()
+        assert "Workflow queued" in rendered
+        assert "status=in_progress stage=design" in rendered
+        assert "status=completed stage=report" in rendered
+
     @patch("myswat.cli.chat_cmd.run_chat")
     def test_chat_command(self, mock_run_chat):
         from typer.testing import CliRunner
@@ -697,29 +776,40 @@ class TestCommandRouting:
         result = runner.invoke(app, ["run", "do stuff", "--project", "proj"])
         mock_run_review.assert_called_once()
 
-    @patch("myswat.cli.work_cmd.run_work")
-    def test_work_command(self, mock_run_work):
+    @patch("myswat.cli.main._follow_work_item_until_terminal")
+    @patch("myswat.server.control_client.DaemonClient")
+    def test_work_command(self, mock_client_cls, mock_follow):
         from typer.testing import CliRunner
         from myswat.cli.main import app
+
+        mock_client = MagicMock()
+        mock_client.base_url = "http://127.0.0.1:8765"
+        mock_client.submit_work.return_value = {"work_item_id": 41, "workers": ["developer", "qa_main"]}
+        mock_client_cls.return_value = mock_client
+        mock_follow.return_value = {"status": "completed"}
 
         runner = CliRunner()
         result = runner.invoke(app, ["work", "add feature", "--project", "proj"])
         assert result.exit_code == 0
-        mock_run_work.assert_called_once_with(
-            "proj",
-            "add feature",
+        mock_client.submit_work.assert_called_once_with(
             workdir=None,
-            background=False,
-            mode=WorkMode.full,
-            auto_approve=True,
-            resume=None,
-            mode_explicit=False,
+            mode="full",
+            project="proj",
+            requirement="add feature",
         )
+        mock_follow.assert_called_once()
 
-    @patch("myswat.cli.work_cmd.run_work")
-    def test_work_command_mode_aliases(self, mock_run_work):
+    @patch("myswat.cli.main._follow_work_item_until_terminal")
+    @patch("myswat.server.control_client.DaemonClient")
+    def test_work_command_mode_aliases(self, mock_client_cls, mock_follow):
         from typer.testing import CliRunner
         from myswat.cli.main import app
+
+        mock_client = MagicMock()
+        mock_client.base_url = "http://127.0.0.1:8765"
+        mock_client.submit_work.return_value = {"work_item_id": 42, "workers": ["developer", "qa_main"]}
+        mock_client_cls.return_value = mock_client
+        mock_follow.return_value = {"status": "completed"}
 
         runner = CliRunner()
         cases = [
@@ -731,22 +821,18 @@ class TestCommandRouting:
             ("--ga-test", WorkMode.test),
         ]
         for flag, expected_mode in cases:
-            mock_run_work.reset_mock()
+            mock_client.submit_work.reset_mock()
             result = runner.invoke(app, ["work", "add feature", "--project", "proj", flag])
             assert result.exit_code == 0
-            mock_run_work.assert_called_once_with(
-                "proj",
-                "add feature",
+            mock_client.submit_work.assert_called_once_with(
                 workdir=None,
-                background=False,
-                mode=expected_mode,
-                auto_approve=True,
-                resume=None,
-                mode_explicit=True,
+                mode=expected_mode.value,
+                project="proj",
+                requirement="add feature",
             )
 
-    @patch("myswat.cli.work_cmd.run_work")
-    def test_work_command_rejects_multiple_mode_flags(self, mock_run_work):
+    @patch("myswat.server.control_client.DaemonClient")
+    def test_work_command_rejects_multiple_mode_flags(self, mock_client_cls):
         from typer.testing import CliRunner
         from myswat.cli.main import app
 
@@ -757,93 +843,124 @@ class TestCommandRouting:
         )
         assert result.exit_code != 0
         assert result.exception is not None
-        mock_run_work.assert_not_called()
+        mock_client_cls.return_value.submit_work.assert_not_called()
 
-    @patch("myswat.cli.work_cmd.run_work")
-    def test_work_command_background(self, mock_run_work):
+    @patch("myswat.cli.main._follow_work_item_until_terminal")
+    @patch("myswat.server.control_client.DaemonClient")
+    def test_work_command_background(self, mock_client_cls, mock_follow):
         from typer.testing import CliRunner
         from myswat.cli.main import app
+
+        mock_client = MagicMock()
+        mock_client.base_url = "http://127.0.0.1:8765"
+        mock_client.submit_work.return_value = {"work_item_id": 42, "workers": ["developer", "qa_main"]}
+        mock_client_cls.return_value = mock_client
 
         runner = CliRunner()
         result = runner.invoke(app, ["work", "add feature", "--project", "proj", "--background"])
         assert result.exit_code == 0
-        mock_run_work.assert_called_once_with(
-            "proj",
-            "add feature",
+        mock_client.submit_work.assert_called_once_with(
             workdir=None,
-            background=True,
-            mode=WorkMode.full,
-            auto_approve=True,
-            resume=None,
-            mode_explicit=False,
+            mode="full",
+            project="proj",
+            requirement="add feature",
         )
+        mock_follow.assert_not_called()
 
-    @patch("myswat.cli.work_cmd.run_work")
-    def test_work_command_rejects_design_background(self, mock_run_work):
+    @patch("myswat.cli.main._follow_work_item_until_terminal")
+    @patch("myswat.server.control_client.DaemonClient")
+    def test_work_command_design_background_submits_design_mode(self, mock_client_cls, mock_follow):
         from typer.testing import CliRunner
         from myswat.cli.main import app
+
+        mock_client = MagicMock()
+        mock_client.base_url = "http://127.0.0.1:8765"
+        mock_client.submit_work.return_value = {"work_item_id": 43, "workers": ["architect", "developer", "qa_main"]}
+        mock_client_cls.return_value = mock_client
 
         runner = CliRunner()
         result = runner.invoke(app, ["work", "add feature", "--project", "proj", "--background", "--design"])
-        assert result.exit_code != 0
-        mock_run_work.assert_not_called()
+        assert result.exit_code == 0
+        mock_client.submit_work.assert_called_once_with(
+            workdir=None,
+            mode="design",
+            project="proj",
+            requirement="add feature",
+        )
+        mock_follow.assert_not_called()
 
-    @patch("myswat.cli.work_cmd.run_work")
-    def test_work_command_background_mode_threads(self, mock_run_work):
+    @patch("myswat.cli.main._follow_work_item_until_terminal")
+    @patch("myswat.server.control_client.DaemonClient")
+    def test_work_command_background_mode_threads(self, mock_client_cls, mock_follow):
         from typer.testing import CliRunner
         from myswat.cli.main import app
+
+        mock_client = MagicMock()
+        mock_client.base_url = "http://127.0.0.1:8765"
+        mock_client.submit_work.return_value = {"work_item_id": 44, "workers": ["developer", "qa_main"]}
+        mock_client_cls.return_value = mock_client
 
         runner = CliRunner()
         result = runner.invoke(app, ["work", "add feature", "--project", "proj", "--background", "--dev"])
         assert result.exit_code == 0
-        mock_run_work.assert_called_once_with(
-            "proj",
-            "add feature",
+        mock_client.submit_work.assert_called_once_with(
             workdir=None,
-            background=True,
-            mode=WorkMode.develop,
-            auto_approve=True,
-            resume=None,
-            mode_explicit=True,
+            mode="develop",
+            project="proj",
+            requirement="add feature",
         )
+        mock_follow.assert_not_called()
 
-    @patch("myswat.cli.work_cmd.run_work")
-    def test_work_command_auto_approve(self, mock_run_work):
+    @patch("myswat.cli.main._follow_work_item_until_terminal")
+    @patch("myswat.server.control_client.DaemonClient")
+    def test_work_command_auto_approve(self, mock_client_cls, mock_follow):
         from typer.testing import CliRunner
         from myswat.cli.main import app
+
+        mock_client = MagicMock()
+        mock_client.base_url = "http://127.0.0.1:8765"
+        mock_client.submit_work.return_value = {"work_item_id": 45, "workers": ["developer", "qa_main"]}
+        mock_client_cls.return_value = mock_client
+        mock_follow.return_value = {"status": "completed"}
 
         runner = CliRunner()
         result = runner.invoke(app, ["work", "add feature", "--project", "proj", "--auto-approve"])
         assert result.exit_code == 0
-        mock_run_work.assert_called_once_with(
-            "proj",
-            "add feature",
+        mock_client.submit_work.assert_called_once_with(
             workdir=None,
-            background=False,
-            mode=WorkMode.full,
-            auto_approve=True,
-            resume=None,
-            mode_explicit=False,
+            mode="full",
+            project="proj",
+            requirement="add feature",
         )
 
-    @patch("myswat.cli.work_cmd.run_work")
-    def test_work_command_interactive_checkpoints(self, mock_run_work):
+    @patch("myswat.server.control_client.DaemonClient")
+    def test_work_command_interactive_checkpoints(self, mock_client_cls):
         from typer.testing import CliRunner
         from myswat.cli.main import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["work", "add feature", "--project", "proj", "--interactive-checkpoints"])
-        assert result.exit_code == 0
-        mock_run_work.assert_called_once_with(
-            "proj",
-            "add feature",
-            workdir=None,
-            background=False,
-            mode=WorkMode.full,
-            auto_approve=False,
-            resume=None,
-            mode_explicit=False,
-        )
+        assert result.exit_code != 0
+        mock_client_cls.return_value.submit_work.assert_not_called()
+
+    @patch("myswat.cli.main._follow_work_item_until_terminal")
+    @patch("myswat.server.control_client.DaemonClient")
+    def test_work_command_ctrl_c_requests_cancel(self, mock_client_cls, mock_follow):
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
+
+        mock_client = MagicMock()
+        mock_client.base_url = "http://127.0.0.1:8765"
+        mock_client.submit_work.return_value = {"work_item_id": 46, "workers": ["developer", "qa_main"]}
+        mock_client.control_work.return_value = {"work_item_id": 46, "status": "cancelled"}
+        mock_client_cls.return_value = mock_client
+        mock_follow.side_effect = [KeyboardInterrupt(), {"status": "cancelled"}]
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["work", "add feature", "--project", "proj"])
+
+        assert result.exit_code == 130
+        mock_client.control_work.assert_called_once_with(project="proj", work_item_id=46, action="cancel")
 
     @patch("myswat.cli.work_cmd.run_background_work_item")
     def test_work_background_worker_command(self, mock_run_background_work_item):
@@ -873,14 +990,19 @@ class TestCommandRouting:
             mode=WorkMode.develop,
         )
 
-    @patch("myswat.cli.work_cmd.stop_work_item")
-    def test_stop_command(self, mock_stop_work_item):
+    @patch("myswat.server.control_client.DaemonClient")
+    def test_stop_command(self, mock_client_cls):
         from typer.testing import CliRunner
         from myswat.cli.main import app
 
+        mock_client = MagicMock()
+        mock_client.control_work.return_value = {"work_item_id": 42}
+        mock_client_cls.return_value = mock_client
+
         runner = CliRunner()
         result = runner.invoke(app, ["stop", "42", "--project", "proj"])
-        mock_stop_work_item.assert_called_once_with("proj", 42)
+        assert result.exit_code == 0
+        mock_client.control_work.assert_called_once_with(project="proj", work_item_id=42, action="cancel")
 
     def test_help_lists_project_introspection_commands(self):
         from typer.testing import CliRunner
@@ -912,11 +1034,20 @@ class TestCommandRouting:
         assert result.exit_code != 0
         assert "No such command 'learn'" in result.output
 
-    @patch("myswat.cli.init_cmd.run_init")
-    def test_init_command(self, mock_run_init):
+    @patch("myswat.server.control_client.DaemonClient")
+    def test_init_command(self, mock_client_cls):
         from typer.testing import CliRunner
         from myswat.cli.main import app
 
+        mock_client = MagicMock()
+        mock_client.init_project.return_value = {"project": "my-project"}
+        mock_client_cls.return_value = mock_client
+
         runner = CliRunner()
         result = runner.invoke(app, ["init", "my-project"])
-        mock_run_init.assert_called_once()
+        assert result.exit_code == 0
+        mock_client.init_project.assert_called_once_with(
+            name="my-project",
+            repo_path=None,
+            description=None,
+        )

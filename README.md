@@ -1,6 +1,6 @@
 <p align="center">
   <img src="assets/myswat.png" alt="myswat — ARCH, DEV, QA" width="480"/><br/>
-  <strong>Multi-AI agent conversation orchestrator for software development.</strong><br/><br/>
+  <strong>Multi-AI workflow orchestrator with an MCP coordination server.</strong><br/><br/>
   <img src="https://img.shields.io/badge/python-3.12+-blue?logo=python&logoColor=white" alt="Python 3.12+"/>
   <img src="https://img.shields.io/badge/backend-TiDB_Cloud-4479A1?logo=tidb&logoColor=white" alt="TiDB Cloud"/>
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"/>
@@ -11,7 +11,7 @@
 
 You have a codebase. You have AI agents that can write code and review it. But you're still the one copying outputs between them, deciding who goes next, and re-explaining context every session.
 
-**MySwat automates that.** It routes prompts between agents, persists everything to a shared knowledge base, and loops dev/QA review cycles until LGTM — while you stay in the architect seat.
+**MySwat automates that.** It persists shared workflow state to TiDB, exposes it through an MCP server, and loops dev/QA review cycles until LGTM while you stay in the architect seat.
 
 <p align="center">
   <img src="assets/workflow.svg" alt="myswat workflow — design, review, plan, dev, QA test, report" width="800"/>
@@ -21,9 +21,9 @@ You have a codebase. You have AI agents that can write code and review it. But y
 
 **You architect. Agents build and review. MySwat connects them.**
 
-- **Automated review loops** — developer proposes, QA reviews, iterate until LGTM. No manual copy-paste.
+- **Automated review loops** — developer proposes, QA reviews, iterate until LGTM through structured server-side state.
 - **Shared project memory** — every agent sees what others said and learned. Knowledge compounds across sessions, not just within one.
-- **Mix any AI backend** — Claude Opus for QA, GPT for dev, Kimi for a second opinion. Per-role configuration.
+- **Runtime-agnostic execution** — MySwat orchestrates stages and reviews; external runtimes claim assignments through MCP.
 - **Full workflow or pick stages** — run the whole pipeline (architect-led design → plan → develop → test → report), or just `--develop`/`--dev` or `--test`.
 - **Learns your project** — build commands, test tiers, invariants, conventions. Agents stop guessing.
 
@@ -36,8 +36,14 @@ You have a codebase. You have AI agents that can write code and review it. But y
 # Set up a project
 myswat init "my-project" --repo /path/to/repo
 
-# Run a task — full architect-led workflow
-myswat work -p my-project "Implement bloom filter for compaction"
+# Start the local MySwat daemon
+myswat server
+
+# In another shell, register a project through the daemon
+myswat init "fib-demo" --repo ~/src/requirements/fib-demo
+
+# Queue a task — the daemon will start managed workers lazily
+myswat work -p fib-demo "Implement bloom filter for compaction"
 
 # Or just chat
 myswat chat -p my-project
@@ -57,10 +63,10 @@ myswat search "bloom filter" -p my-project
   v
  MySwat ──────────────────────────────────────────────
   |                                                    |
-  |  1. Loads project knowledge from TiDB              |
-  |  2. Architect leads design + planning              |
-  |  3. Developer implements in phases                 |
-  |  4. QA reviews, tests, loops fixes if needed       |
+  |  1. Queues stage assignments in TiDB               |
+  |  2. External runtimes claim work through MCP       |
+  |  3. Agents submit artifacts and review verdicts    |
+  |  4. WorkflowKernel advances or loops stages        |
   |  5. Final report + persisted team knowledge        |
   |                                                    |
  ──────────────────────────────────────────────────────
@@ -77,7 +83,7 @@ myswat search "bloom filter" -p my-project
 
 Internal engine-only modes: `architect_design` and `testplan_design`. They power chat-led orchestration flows and are not user-facing CLI/delegation values.
 
-MySwat does **not** run builds or tests — the agents do that themselves via their terminal access. MySwat handles routing, context, and persistence.
+MySwat does **not** launch agent CLIs from the `work` command anymore. `myswat work` submits to the daemon, the daemon starts managed workers for configured roles when needed, and those workers use the server-side MCP tool surface to claim assignments and publish results.
 
 ## What Agents Remember
 
@@ -106,6 +112,7 @@ myswat search "transaction isolation" -p my-project
 - [Configuration](docs/configuration.md) — config file, environment variables, per-backend setup
 - [CLI Reference](docs/cli-reference.md) — all commands, work modes, chat commands
 - [Architecture](docs/architecture.md) — components, memory tiers, knowledge pipeline, TiDB schema
+- [MCP Server Redesign](docs/mcp-redesign.md) — implemented server-first workflow and MCP tool surface
 
 ## License
 

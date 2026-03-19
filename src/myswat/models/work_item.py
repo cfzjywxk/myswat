@@ -42,6 +42,13 @@ class Artifact(BaseModel):
     metadata_json: dict[str, Any] | None = None
     created_at: datetime | None = None
 
+    @field_validator("metadata_json", mode="before")
+    @classmethod
+    def parse_artifact_metadata(cls, v: Any) -> dict[str, Any] | None:
+        if isinstance(v, str):
+            return json.loads(v)
+        return v
+
 
 class ReviewVerdict(BaseModel):
     """Structured verdict from a reviewer — validated on parse."""
@@ -54,12 +61,27 @@ class ReviewCycle(BaseModel):
     id: int | None = None
     work_item_id: int
     artifact_id: int | None = None
+    stage_name: str | None = None
     iteration: int = 1
     proposer_agent_id: int
     reviewer_agent_id: int
+    reviewer_role: str | None = None
     proposal_session_id: int | None = None
     review_session_id: int | None = None
+    status: str = "pending"
     verdict: str = "pending"  # 'pending', 'changes_requested', 'lgtm'
+    task_json: dict[str, Any] | None = None
     verdict_json: ReviewVerdict | None = None
+    claimed_by_runtime_id: int | None = None
+    claimed_at: datetime | None = None
+    lease_expires_at: datetime | None = None
+    completed_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+    @field_validator("task_json", mode="before")
+    @classmethod
+    def parse_task_json(cls, v: Any) -> dict[str, Any] | None:
+        if isinstance(v, str):
+            return json.loads(v)
+        return v

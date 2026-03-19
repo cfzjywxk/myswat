@@ -75,11 +75,7 @@ def test_finalize_background_run_swallows_internal_errors():
 
 @patch("myswat.cli.work_cmd.submit_workflow_summary_learn_request")
 @patch("myswat.cli.work_cmd.WorkflowEngine")
-@patch("myswat.cli.work_cmd.SessionManager")
-@patch("myswat.cli.work_cmd.make_runner_from_row")
 def test_run_workflow_resume_parses_invalid_metadata_and_reuses_work_item(
-    mock_make_runner,
-    mock_sm_cls,
     mock_engine_cls,
     mock_submit,
 ):
@@ -100,12 +96,6 @@ def test_run_workflow_resume_parses_invalid_metadata_and_reuses_work_item(
         "architect": _agent_row("architect"),
         "qa_vice": None,
     }.get(role)
-    runners = [MagicMock(), MagicMock(), MagicMock()]
-    mock_make_runner.side_effect = runners
-    arch_sm = MagicMock()
-    dev_sm = MagicMock(session=SimpleNamespace(id=5), _agent_row=_agent_row("developer"))
-    qa_sm = MagicMock(_agent_row=_agent_row("qa_main", "kimi"))
-    mock_sm_cls.side_effect = [arch_sm, dev_sm, qa_sm]
     mock_engine_cls.return_value = MagicMock(run=MagicMock(return_value=SimpleNamespace(success=True)))
 
     with patch("myswat.cli.work_cmd._load_project_context", return_value=(settings, store, proj, "/tmp")):
@@ -119,16 +109,12 @@ def test_run_workflow_resume_parses_invalid_metadata_and_reuses_work_item(
         )
 
     assert work_item_id == 42
-    arch_sm.create_or_resume.assert_called_once()
+    store.create_work_item.assert_not_called()
     store.update_work_item_status.assert_any_call(42, "completed")
 
 
 @patch("myswat.cli.work_cmd.WorkflowEngine")
-@patch("myswat.cli.work_cmd.SessionManager")
-@patch("myswat.cli.work_cmd.make_runner_from_row")
 def test_run_workflow_existing_work_item_must_exist(
-    mock_make_runner,
-    mock_sm_cls,
     mock_engine_cls,
 ):
     settings = _settings()
@@ -139,8 +125,6 @@ def test_run_workflow_existing_work_item_must_exist(
         "qa_main": _agent_row("qa_main", "kimi"),
         "qa_vice": None,
     }.get(role)
-    mock_make_runner.side_effect = [MagicMock(), MagicMock()]
-    mock_sm_cls.side_effect = [MagicMock(session=SimpleNamespace(id=1)), MagicMock(_agent_row=_agent_row("qa_main", "kimi"))]
 
     with patch("myswat.cli.work_cmd._load_project_context", return_value=(settings, store, proj, "/tmp")):
         with pytest.raises(ClickExit):
@@ -159,11 +143,7 @@ def test_run_workflow_existing_work_item_must_exist(
 @patch("myswat.cli.work_cmd.submit_workflow_summary_learn_request")
 @patch("myswat.cli.work_cmd._run_with_task_monitor")
 @patch("myswat.cli.work_cmd.WorkflowEngine")
-@patch("myswat.cli.work_cmd.SessionManager")
-@patch("myswat.cli.work_cmd.make_runner_from_row")
 def test_run_workflow_marks_cancelled_and_ignores_close_failures(
-    mock_make_runner,
-    mock_sm_cls,
     mock_engine_cls,
     mock_task_monitor,
     mock_submit,
@@ -178,14 +158,6 @@ def test_run_workflow_marks_cancelled_and_ignores_close_failures(
         "architect": None,
     }.get(role)
     store.create_work_item.return_value = 77
-    dev_runner = MagicMock()
-    qa_runner = MagicMock()
-    mock_make_runner.side_effect = [dev_runner, qa_runner]
-    dev_sm = MagicMock(session=SimpleNamespace(id=11))
-    qa_sm = MagicMock(_agent_row=_agent_row("qa_main", "kimi"))
-    dev_sm.close.side_effect = RuntimeError("close dev")
-    qa_sm.close.side_effect = RuntimeError("close qa")
-    mock_sm_cls.side_effect = [dev_sm, qa_sm]
     mock_engine_cls.return_value = MagicMock()
 
     def _monitor(**kwargs):
@@ -210,11 +182,7 @@ def test_run_workflow_marks_cancelled_and_ignores_close_failures(
 @patch("myswat.cli.work_cmd.submit_workflow_summary_learn_request")
 @patch("myswat.workflow.error_handler.handle_workflow_error")
 @patch("myswat.cli.work_cmd.WorkflowEngine")
-@patch("myswat.cli.work_cmd.SessionManager")
-@patch("myswat.cli.work_cmd.make_runner_from_row")
 def test_run_workflow_exception_path_ignores_status_update_failure(
-    mock_make_runner,
-    mock_sm_cls,
     mock_engine_cls,
     mock_handle_error,
     mock_submit,
@@ -230,11 +198,6 @@ def test_run_workflow_exception_path_ignores_status_update_failure(
     }.get(role)
     store.create_work_item.return_value = 12
     store.update_work_item_status.side_effect = [None, RuntimeError("db down")]
-    mock_make_runner.side_effect = [MagicMock(), MagicMock()]
-    dev_sm = MagicMock(session=SimpleNamespace(id=11))
-    qa_sm = MagicMock(_agent_row=_agent_row("qa_main", "kimi"))
-    dev_sm.close.side_effect = RuntimeError("close dev")
-    mock_sm_cls.side_effect = [dev_sm, qa_sm]
     mock_engine_cls.return_value = MagicMock(run=MagicMock(side_effect=RuntimeError("boom")))
 
     with patch("myswat.cli.work_cmd._load_project_context", return_value=(settings, store, proj, "/tmp")):
@@ -250,14 +213,48 @@ def test_run_workflow_exception_path_ignores_status_update_failure(
     assert mock_submit.called
 
 
-def test_run_background_work_item_rejects_design_mode():
-    with pytest.raises(typer.BadParameter, match="Design mode cannot be combined with --background"):
-        run_background_work_item("proj", "req", work_item_id=1, mode=WorkMode.design)
+@patch("myswat.cli.work_cmd._run_workflow")
+def test_run_background_work_item_allows_design_mode(mock_run_workflow):
+    run_background_work_item("proj", "req", work_item_id=1, mode=WorkMode.design)
+    mock_run_workflow.assert_called_once_with(
+        "proj",
+        "req",
+        workdir=None,
+        work_item_id=1,
+        show_monitor=False,
+        background_worker=True,
+        mode=WorkMode.design,
+        auto_approve=True,
+    )
 
 
-def test_launch_background_work_rejects_design_mode():
-    with pytest.raises(typer.BadParameter, match="Design mode cannot be combined with --background"):
-        _launch_background_work("proj", "req", mode=WorkMode.design)
+@patch("myswat.cli.work_cmd.subprocess.Popen")
+def test_launch_background_work_allows_design_mode_and_assigns_architect(mock_popen, tmp_path):
+    settings = _settings()
+    settings.config_path = tmp_path / "config.toml"
+    store = MagicMock()
+    proj = _proj()
+    store.get_agent.side_effect = lambda _pid, role: {
+        "architect": {**_agent_row("architect"), "id": 7},
+        "developer": {**_agent_row("developer"), "id": 9},
+        "qa_main": _agent_row("qa_main", "kimi"),
+        "qa_vice": None,
+    }.get(role)
+    store.create_work_item.return_value = 21
+
+    proc = MagicMock()
+    proc.pid = 555
+    mock_popen.return_value = proc
+
+    with patch("myswat.cli.work_cmd._load_project_context", return_value=(settings, store, proj, "/tmp")):
+        work_item_id = _launch_background_work("proj", "req", mode=WorkMode.design)
+
+    assert work_item_id == 21
+    assert store.create_work_item.call_args.kwargs["item_type"] == "design"
+    assert store.create_work_item.call_args.kwargs["assigned_agent_id"] == 7
+    command = mock_popen.call_args.args[0]
+    mode_index = command.index("--mode")
+    assert command[mode_index + 1] == "design"
 
 
 @patch("myswat.cli.work_cmd.MySwatSettings")

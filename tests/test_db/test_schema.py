@@ -82,4 +82,7 @@ class TestEnsureSchema:
 
         assert "CREATE TABLE IF NOT EXISTS projects" in sql
         assert "CREATE TABLE IF NOT EXISTS artifacts" in sql
+        assert "CREATE TABLE IF NOT EXISTS stage_runs" in sql
+        assert "CREATE TABLE IF NOT EXISTS coordination_events" in sql
+        assert "CREATE TABLE IF NOT EXISTS runtime_registrations" in sql
         assert "CREATE TABLE IF NOT EXISTS learn_requests" in sql

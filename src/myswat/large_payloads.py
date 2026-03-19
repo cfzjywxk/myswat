@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import tempfile
 from pathlib import Path
+from typing import Any
 
 MAX_INLINE_CHARS = 1000
 
@@ -146,3 +147,16 @@ def resolve_externalized_text(text: str | None) -> str:
     except OSError:
         return content
     return resolved or content
+
+
+def resolve_externalized_value(value: Any):
+    if isinstance(value, str):
+        return resolve_externalized_text(value)
+    if isinstance(value, list):
+        return [resolve_externalized_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: resolve_externalized_value(item)
+            for key, item in value.items()
+        }
+    return value
