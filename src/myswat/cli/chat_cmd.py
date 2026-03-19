@@ -119,44 +119,6 @@ def _strip_wrapping_quotes(text: str) -> str:
     return stripped
 
 
-def _detect_direct_delegation_request(role: str, text: str) -> tuple[str, str] | None:
-    normalized = _strip_wrapping_quotes(text)
-    lowered = normalized.lower()
-    team_requested = any(
-        phrase in lowered
-        for phrase in (
-            "with your team",
-            "through your team",
-            "using your team",
-            "use your team",
-            "delegate to your team",
-        )
-    )
-    if not team_requested:
-        return None
-
-    if role == "architect":
-        wants_full = (
-            ("design" in lowered and "implement" in lowered)
-            or "end-to-end" in lowered
-            or "take it from here" in lowered
-            or "deliver" in lowered
-        )
-        if wants_full:
-            return normalized, WorkMode.full.value
-        if "design" in lowered:
-            return normalized, WorkMode.design.value
-        if any(keyword in lowered for keyword in ("implement", "build", "fix", "add")):
-            return normalized, DEFAULT_DELEGATION_MODE
-
-    if role in {"qa_main", "qa_vice"} and (
-        "test plan" in lowered or "testing approach" in lowered
-    ):
-        return normalized, "testplan"
-
-    return None
-
-
 def run_chat(
     project_slug: str,
     role: str = "developer",
@@ -223,7 +185,8 @@ def run_chat(
     def _handle_delegation(
         delegation_task: str,
         delegation_mode: str,
-        source_note: str | None = None,
+        banner_override: str | None = None,
+        detail_override: str | None = None,
     ) -> None:
         nonlocal sm
 
@@ -287,12 +250,11 @@ def run_chat(
             return
 
         console.print(
-            f"\n[bold cyan]{delegation_spec.banner}:[/bold cyan] {delegation_task[:160]}"
+            f"\n[bold cyan]{banner_override or delegation_spec.banner}:[/bold cyan] {delegation_task[:160]}"
         )
-        if source_note:
-            console.print(f"[dim]{source_note}[/dim]")
-        elif delegation_spec.detail:
-            console.print(f"[dim]{delegation_spec.detail}[/dim]")
+        detail = detail_override if detail_override is not None else delegation_spec.detail
+        if detail:
+            console.print(f"[dim]{detail}[/dim]")
         if delegation_spec.save_session_before_run and sm:
             with console.status("[dim]Saving session to TiDB...[/dim]", spinner="dots"):
                 sm.close()
@@ -442,16 +404,6 @@ def run_chat(
             sm = _switch_agent(current_role, settings)
             if sm is None:
                 continue
-
-        direct_delegation = _detect_direct_delegation_request(current_role, user_input)
-        if direct_delegation:
-            delegation_task, delegation_mode = direct_delegation
-            _handle_delegation(
-                delegation_task,
-                delegation_mode,
-                source_note="User explicitly asked to run this with the team, so skipping the architect round-trip.",
-            )
-            continue
 
         response, elapsed = _send_with_timer(console, sm, user_input)
 

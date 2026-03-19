@@ -1425,7 +1425,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    def test_architect_direct_team_request_skips_round_trip_and_starts_full_workflow(
+    def test_architect_team_request_is_sent_to_architect_instead_of_python_auto_routing(
         self,
         mock_sm_cls,
         mock_store_cls,
@@ -1454,6 +1454,14 @@ class TestRunChat:
         sm.agent_id = 9
         mock_sm_cls.return_value = sm
 
+        mock_send_timer.return_value = (
+            AgentResponse(
+                content="I will think through the approach first.",
+                exit_code=0,
+            ),
+            2.0,
+        )
+
         prompt_session = MagicMock()
         prompt_session.prompt.side_effect = [
             '"Design and implement the auth module with your team"',
@@ -1463,10 +1471,9 @@ class TestRunChat:
 
         run_chat("proj", role="architect")
 
-        mock_send_timer.assert_not_called()
-        mock_full_workflow.assert_called_once()
-        assert mock_full_workflow.call_args.args[2] is sm
-        assert mock_full_workflow.call_args.args[5] == "Design and implement the auth module with your team"
+        mock_send_timer.assert_called_once()
+        assert mock_send_timer.call_args.args[2] == "Design and implement the auth module with your team"
+        mock_full_workflow.assert_not_called()
 
     @patch("myswat.cli.chat_cmd.console.print")
     @patch("myswat.cli.chat_cmd._run_workflow_interactive")

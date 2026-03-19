@@ -933,6 +933,12 @@ class MemoryStore:
             (project_id, role),
         )
 
+    def update_agent_system_prompt(self, agent_id: int, system_prompt: str | None) -> None:
+        self._pool.execute(
+            "UPDATE agents SET system_prompt = %s WHERE id = %s",
+            (system_prompt, agent_id),
+        )
+
     def list_agents(self, project_id: int) -> list[dict]:
         return self._pool.fetch_all(
             "SELECT * FROM agents WHERE project_id = %s ORDER BY role", (project_id,),

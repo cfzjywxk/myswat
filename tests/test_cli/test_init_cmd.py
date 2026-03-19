@@ -136,7 +136,16 @@ class TestSeedDefaultAgents:
     @patch("myswat.cli.init_cmd._is_cli_available", return_value=True)
     def test_skips_existing_agents(self, mock_available):
         store = MagicMock()
-        store.get_agent.return_value = {"id": 1}
+        existing_prompts = {
+            "architect": ARCHITECT_SYSTEM_PROMPT,
+            "developer": DEVELOPER_SYSTEM_PROMPT,
+            "qa_main": QA_MAIN_SYSTEM_PROMPT,
+        }
+
+        def get_agent_side(pid, role):
+            return {"id": 1, "system_prompt": existing_prompts[role]}
+
+        store.get_agent.side_effect = get_agent_side
         settings = MagicMock()
         settings.agents.architect_model = "gpt-5"
         settings.agents.developer_model = "gpt-5"
@@ -152,6 +161,37 @@ class TestSeedDefaultAgents:
 
         _seed_default_agents(store, settings, 1)
         store.create_agent.assert_not_called()
+        store.update_agent_system_prompt.assert_not_called()
+
+    @patch("myswat.cli.init_cmd._is_cli_available", return_value=True)
+    def test_updates_existing_agent_prompt_when_seed_prompt_changes(self, mock_available):
+        store = MagicMock()
+
+        def get_agent_side(pid, role):
+            if role == "architect":
+                return {"id": 11, "system_prompt": "old architect prompt"}
+            if role == "developer":
+                return {"id": 12, "system_prompt": DEVELOPER_SYSTEM_PROMPT}
+            return {"id": 13, "system_prompt": QA_MAIN_SYSTEM_PROMPT}
+
+        store.get_agent.side_effect = get_agent_side
+        settings = MagicMock()
+        settings.agents.architect_model = "gpt-5"
+        settings.agents.developer_model = "gpt-5"
+        settings.agents.qa_main_model = "claude-opus-4-6"
+        settings.agents.qa_vice_enabled = False
+        settings.agents.qa_vice_model = "kimi"
+        settings.agents.codex_path = "codex"
+        settings.agents.claude_path = "claude"
+        settings.agents.kimi_path = "kimi"
+        settings.agents.codex_default_flags = ["--json"]
+        settings.agents.claude_default_flags = ["--print"]
+        settings.agents.kimi_default_flags = ["--print"]
+
+        _seed_default_agents(store, settings, 1)
+
+        store.create_agent.assert_not_called()
+        store.update_agent_system_prompt.assert_called_once_with(11, ARCHITECT_SYSTEM_PROMPT)
 
     @patch("myswat.cli.init_cmd._is_cli_available", return_value=True)
     def test_partial_existing(self, mock_available):
@@ -159,7 +199,7 @@ class TestSeedDefaultAgents:
 
         def get_agent_side(pid, role):
             if role == "architect":
-                return {"id": 1}
+                return {"id": 1, "system_prompt": ARCHITECT_SYSTEM_PROMPT}
             return None
 
         store.get_agent.side_effect = get_agent_side
@@ -178,6 +218,7 @@ class TestSeedDefaultAgents:
 
         _seed_default_agents(store, settings, 1)
         assert store.create_agent.call_count == 2
+        store.update_agent_system_prompt.assert_not_called()
 
     @patch("myswat.cli.init_cmd._is_cli_available", return_value=True)
     def test_uses_configured_backends(self, mock_available):
@@ -323,6 +364,15 @@ class TestTeamWorkflowsKnowledge:
     def test_includes_usage_examples(self):
         # Each mode section should have "Use when:" with example phrases
         assert TEAM_WORKFLOWS_KNOWLEDGE.count("Use when:") >= 4
+
+    def test_guides_agents_to_choose_mode_from_design_state(self):
+        assert "Existing spec/design/requirements doc to implement from" in TEAM_WORKFLOWS_KNOWLEDGE
+        assert "Team needs to review/finalize the design first" in TEAM_WORKFLOWS_KNOWLEDGE
+
+    def test_prompt_examples_cover_develop_vs_design_vs_full(self):
+        assert "implement the feature described in auth_design.md with your team" in ARCHITECT_SYSTEM_PROMPT
+        assert "finalize the cache design with your team" in ARCHITECT_SYSTEM_PROMPT
+        assert "we do not have a settled design yet; design and implement the storage layer with your team" in ARCHITECT_SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------

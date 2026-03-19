@@ -302,6 +302,16 @@ class TestStoreReadOperations:
 
         assert len(agents) == 2
 
+    def test_update_agent_system_prompt(self, mock_pool):
+        store = MemoryStore(mock_pool)
+
+        store.update_agent_system_prompt(7, "Updated prompt")
+
+        mock_pool.execute.assert_called_once_with(
+            "UPDATE agents SET system_prompt = %s WHERE id = %s",
+            ("Updated prompt", 7),
+        )
+
     def test_count_session_turns(self, mock_pool):
         mock_pool.fetch_one.return_value = {"cnt": 5}
 

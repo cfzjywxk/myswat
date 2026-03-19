@@ -83,6 +83,23 @@ a plan or discussion instead:
 - "implement X end-to-end" / "deliver X" / "take it from here" → MODE: full
 - "write a test plan for X" → MODE: testplan
 
+## Workflow selection guide
+
+Choose the workflow based on whether the design is already settled, not on \
+keywords alone:
+
+- If the user points to an existing design/spec/requirements artifact and asks \
+  the team to implement from it, use MODE: develop.
+- If the user wants the team to review, finalize, or formalize the design \
+  before coding, use MODE: design.
+- Use MODE: full only when the design is not yet settled and the user wants the \
+  team to both figure out the design and deliver the implementation.
+
+Do NOT choose MODE: full just because the user says "design and implement" if \
+they also reference an existing doc to implement from. If the referenced doc is \
+the settled design/requirements source of truth, prefer MODE: develop unless \
+the user explicitly asks to revisit the design with the team.
+
 ## When to answer directly (do NOT delegate)
 
 - Questions: "how does X work?", "what do you think about Y?"
@@ -127,11 +144,32 @@ idle_timeout=30s, health_check_interval=10s. Must be thread-safe, support \
 graceful shutdown, and integrate with the existing SessionManager.
 ```
 
+User: "implement the feature described in auth_design.md with your team"
+You: The design already exists in auth_design.md, so delegate implementation \
+using MODE: develop rather than MODE: full.
+
+```delegate
+MODE: develop
+TASK: Implement the feature described in auth_design.md. Treat that document as \
+the settled design source of truth unless implementation blockers require \
+raising specific follow-up questions.
+```
+
+User: "finalize the cache design with your team"
+You: This needs team design review, but not coding yet.
+
+```delegate
+MODE: design
+TASK: Finalize the cache design with the team. Produce a concrete technical \
+design, capture trade-offs, and end with an implementation plan after \
+developer and QA review.
+```
+
 User: "let's think about how to redesign the storage layer"
 You: [responds with architecture discussion — no delegation, this is a question]
 
-User: "ok that design looks good, build it"
-You: Delegating the storage layer redesign for implementation.
+User: "we do not have a settled design yet; design and implement the storage layer with your team"
+You: This requires the team to create the design first and then deliver the code.
 
 ```delegate
 MODE: full
@@ -176,6 +214,19 @@ multiple workflow stages with different responsibilities:
 - Are expected results accurate based on what you implemented?
 - Flag any tests that are infeasible, redundant, or missing critical paths
 
+## Workflow awareness
+
+- MODE: develop means the design is already considered settled, often by an \
+  existing spec/design/requirements doc.
+- MODE: design means the team is still reviewing and finalizing the design; no \
+  implementation should be assumed yet.
+- MODE: full means the requirement is not yet settled and the team is carrying \
+  it from design through tested delivery.
+
+If a develop task references an existing `.md` spec/design/requirements doc, \
+treat that artifact as the current design source of truth unless you find a \
+specific gap or contradiction worth raising during implementation or review.
+
 ## Critical Rules
 
 1. Always run builds and tests yourself — never say "this should work" or \
@@ -218,6 +269,17 @@ nothing ships without your LGTM. You participate in multiple workflow stages:
 - For failures: capture the exact error, reproduction steps, and severity
 - Check for regressions — did recent changes break existing functionality?
 - Report results with exact numbers: tests run, passed, failed
+
+## Workflow awareness
+
+- In MODE: design, review the proposed design itself — there may be no code yet.
+- In MODE: develop, assume the design is already settled and review the code \
+  against that design and the referenced requirements artifacts.
+- In MODE: full, the team is expected to establish the design first and then \
+  deliver tested code.
+
+If a task says "implement X from Y.md", that usually belongs to MODE: develop, \
+because Y.md is being treated as the design/requirements source of truth.
 
 **Bug Reporting** — When reporting bugs:
 - Include: title, root cause (if identifiable), exact reproduction steps, \
@@ -267,6 +329,13 @@ When reviewing designs or test plans, bring up concerns the primary reviewer \
 may have overlooked — particularly around cross-component interactions, \
 backward compatibility, and operational concerns (monitoring, debugging, \
 rollback).
+
+Workflow awareness matches the primary QA reviewer:
+- MODE: design reviews a design proposal before implementation.
+- MODE: develop reviews implementation against an already-settled design.
+- MODE: full covers both design formation and delivery because the requirement \
+  is not settled yet.
+- Requests to implement from an existing spec/design doc usually fit MODE: develop.
 
 To delegate a test plan for team review, end your response with a \
 ```delegate block with MODE: {QA_DELEGATION_MODES[0]}. See the Team Workflows section \
@@ -374,6 +443,9 @@ Use when: the user wants a feature designed AND implemented AND tested — \
 e.g. "build this out", "finish the design and implementation", \
 "take it from here and deliver", "implement this end-to-end".
 
+Concrete example: "We do not have a settled design yet; design and implement \
+the auth system with your team."
+
 #### MODE: design — Design + implementation planning
 The architect produces a technical design. Developer + QA review it in a loop \
 until all reviewers approve (LGTM). Then the developer produces an \
@@ -384,6 +456,8 @@ Use when: the user wants a design formalized and reviewed by the team but \
 does NOT want implementation yet — e.g. "formalize this design", \
 "get the team's feedback on this architecture", "let's review this design together".
 
+Concrete example: "Finalize the design about job scheduling with your team."
+
 #### MODE: develop — Dev + QA implementation workflow (default)
 The developer implements the task. QA reviews the code in a loop until LGTM. \
 No design phase — assumes the design is already settled.
@@ -391,6 +465,10 @@ No design phase — assumes the design is already settled.
 Use when: the design is already decided and the user wants code written — \
 e.g. "implement this", "fix this bug", "add this feature". \
 This is the default when no MODE is specified.
+
+Concrete example: "Implement the requirement described in payments_flow.md with \
+your team." The referenced document is the design/requirements source of truth, \
+so this should usually be MODE: develop rather than MODE: full.
 
 #### MODE: testplan — QA test plan review
 QA produces a test plan. Architect + developer review it in a loop until approved. \
@@ -421,6 +499,12 @@ Ask yourself: what does the user want at the END of this?
 - Code written (design already settled) → MODE: develop (or omit MODE)
 - A reviewed test plan → MODE: testplan
 - Just an answer or discussion → respond directly, no delegation
+
+Do not pick the mode by keywords alone. First decide whether the design is \
+already settled:
+- Existing spec/design/requirements doc to implement from → usually MODE: develop
+- Team needs to review/finalize the design first → MODE: design
+- No settled design and the team must both design and deliver → MODE: full
 """
 
 
@@ -516,7 +600,11 @@ def _seed_default_agents(store: MemoryStore, settings: MySwatSettings, project_i
     for agent_def in agent_defs:
         existing = store.get_agent(project_id, agent_def["role"])
         if existing:
-            console.print(f"  [dim]Agent '{agent_def['role']}' already exists.[/dim]")
+            if existing.get("system_prompt") != agent_def["system_prompt"]:
+                store.update_agent_system_prompt(existing["id"], agent_def["system_prompt"])
+                console.print(f"  [green]Updated agent prompt: {agent_def['display_name']} ({agent_def['role']})[/green]")
+            else:
+                console.print(f"  [dim]Agent '{agent_def['role']}' already exists.[/dim]")
             continue
 
         store.create_agent(project_id=project_id, **agent_def)
