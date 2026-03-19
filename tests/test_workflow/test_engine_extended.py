@@ -2882,7 +2882,7 @@ class TestResumeDesignModeSkipsCompletedStages:
     """Issue 2: design mode must respect resume_stage."""
 
     def test_resume_from_plan_approved_skips_review(self):
-        """resume_stage=plan_approved should skip design + plan and finalize."""
+        """resume_stage=plan_approved should skip review reruns and re-ask the user checkpoint."""
         store = MagicMock()
         store.create_artifact.return_value = 42
         store.create_review_cycle.return_value = 99
@@ -2926,6 +2926,79 @@ class TestResumeDesignModeSkipsCompletedStages:
         assert dev.send.call_count == 1
         assert result.plan is not None
         assert result.design_review_passed is True  # skipped = assumed passed
+
+
+class TestResumeFullModeUserCheckpoints:
+    """Full workflow resume should restore user checkpoints instead of skipping them."""
+
+    @patch.object(WorkflowEngine, "_run_ga_test_phase", return_value=GATestResult(passed=True))
+    @patch.object(WorkflowEngine, "_run_phase", return_value=PhaseResult(name="phase-1", summary="done", review_iterations=1, committed=True))
+    @patch.object(WorkflowEngine, "_parse_phases", return_value=["phase-1"])
+    @patch.object(WorkflowEngine, "_run_review_loop", return_value=("reviewed plan", 1, True))
+    @patch.object(WorkflowEngine, "_run_planning", return_value="generated plan")
+    @patch.object(WorkflowEngine, "_user_checkpoint", side_effect=["approved design", "approved plan"])
+    def test_resume_from_arch_design_approved_reasks_design_checkpoint(
+        self, m_checkpoint, m_plan, m_review, m_phases, m_phase, m_ga,
+    ):
+        store = MagicMock()
+        store.create_artifact.return_value = 42
+        store.create_review_cycle.return_value = 99
+        store.get_latest_artifact_by_type.side_effect = lambda wi, at: (
+            {"content": _arch_design_doc()} if at == "design_doc"
+            else None
+        )
+        arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=[], session_id=300)
+        engine, dev, qas = _make_engine(
+            store=store,
+            mode=WorkMode.full,
+            resume_stage="arch_design_approved",
+            arch_sm=arch,
+        )
+
+        result = engine.run("req")
+
+        assert result.success is True
+        assert result.design_review_passed is True
+        assert m_checkpoint.call_count == 2
+        assert "Proceed to planning" in m_checkpoint.call_args_list[0].args[2]
+        m_plan.assert_called_once()
+        m_review.assert_called_once()
+        assert dev.send.call_count == 1
+        assert "final summary" in dev.send.call_args.args[0].lower()
+        qas[0].send.assert_not_called()
+
+    @patch.object(WorkflowEngine, "_run_ga_test_phase", return_value=GATestResult(passed=True))
+    @patch.object(WorkflowEngine, "_run_phase", return_value=PhaseResult(name="phase-1", summary="done", review_iterations=1, committed=True))
+    @patch.object(WorkflowEngine, "_parse_phases", return_value=["phase-1"])
+    @patch.object(WorkflowEngine, "_user_checkpoint", return_value="approved plan")
+    def test_resume_from_plan_approved_reasks_plan_checkpoint(
+        self, m_checkpoint, m_phases, m_phase, m_ga,
+    ):
+        store = MagicMock()
+        store.create_artifact.return_value = 42
+        store.create_review_cycle.return_value = 99
+        store.get_latest_artifact_by_type.side_effect = lambda wi, at: (
+            {"content": _arch_design_doc()} if at == "design_doc"
+            else {"content": "loaded plan"} if at == "proposal"
+            else None
+        )
+        arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=[], session_id=300)
+        engine, dev, qas = _make_engine(
+            store=store,
+            mode=WorkMode.full,
+            resume_stage="plan_approved",
+            arch_sm=arch,
+        )
+
+        result = engine.run("req")
+
+        assert result.success is True
+        assert result.plan_review_passed is True
+        assert m_checkpoint.call_count == 1
+        assert "Start development" in m_checkpoint.call_args.args[2]
+        assert dev.send.call_count == 1
+        assert "final summary" in dev.send.call_args.args[0].lower()
+        qas[0].send.assert_not_called()
 
 
 class TestResumeDevelopMode:

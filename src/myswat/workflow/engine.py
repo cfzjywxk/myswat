@@ -284,6 +284,32 @@ class WorkflowEngine:
         return bool(self._should_cancel and self._should_cancel())
 
     @staticmethod
+    def _checkpoint_stage_name(artifact_type: str) -> str:
+        mapping = {
+            "arch_design": "arch_design_user_checkpoint",
+            "design": "design_user_checkpoint",
+            "plan": "plan_user_checkpoint",
+            "test_plan": "test_plan_user_checkpoint",
+        }
+        return mapping.get(artifact_type, f"{artifact_type}_user_checkpoint")
+
+    def _persist_user_checkpoint_state(
+        self,
+        *,
+        artifact: str,
+        artifact_type: str,
+        next_todo: str,
+        updated_by_agent_id: int | None,
+    ) -> None:
+        self._persist_task_state(
+            current_stage=self._checkpoint_stage_name(artifact_type),
+            latest_summary=artifact[:4000],
+            next_todos=[next_todo],
+            open_issues=[],
+            updated_by_agent_id=updated_by_agent_id,
+        )
+
+    @staticmethod
     def _validate_reviewable_design(artifact_type: str, content: str) -> str | None:
         if artifact_type not in {"design", "arch_design"}:
             return None
@@ -550,8 +576,8 @@ class WorkflowEngine:
     def _resume_entry_point(self) -> str:
         """Map the persisted current_stage to a high-level resume point.
 
-        Returns one of: "start", "design", "design_review", "plan",
-        "plan_review", "phases", "ga_test", "done".
+        Returns one of: "start", "design", "design_review", "design_checkpoint",
+        "plan", "plan_review", "plan_checkpoint", "phases", "ga_test", "done".
         """
         if not self._resume_stage:
             return "start"
@@ -574,9 +600,9 @@ class WorkflowEngine:
         if s.startswith("phase_"):
             return "phases"
 
-        # Plan approved → skip to phases
-        if s in ("plan_approved", "proposal_approved"):
-            return "phases"
+        # Reviewer-approved plan still needs the user checkpoint on resume.
+        if s in ("plan_approved", "proposal_approved", "plan_user_checkpoint"):
+            return "plan_checkpoint"
 
         # Plan review-loop states (proposal_review, proposal_revision_ready, etc.)
         if s.startswith("proposal_") or (
@@ -588,9 +614,14 @@ class WorkflowEngine:
         if s in ("plan_draft", "plan_draft_blocked"):
             return "plan"
 
-        # Design approved → skip to plan
-        if s in ("design_approved", "arch_design_approved"):
-            return "plan"
+        # Reviewer-approved design still needs the user checkpoint on resume.
+        if s in (
+            "design_approved",
+            "arch_design_approved",
+            "design_user_checkpoint",
+            "arch_design_user_checkpoint",
+        ):
+            return "design_checkpoint"
 
         # Design review-loop states (not design_draft/design_draft_blocked)
         if (
@@ -847,6 +878,12 @@ class WorkflowEngine:
             title="Reviewed Design",
             border_style="green",
             label="reviewed-design",
+        )
+        self._persist_user_checkpoint_state(
+            artifact=design,
+            artifact_type="arch_design",
+            next_todo="User approve reviewed design to finish the workflow",
+            updated_by_agent_id=self._arch.agent_id,
         )
         design = self._user_checkpoint(
             design,
@@ -1142,18 +1179,30 @@ class WorkflowEngine:
                     )
                 result.final_report = self._generate_report(result, [])
                 return self._sync_result_failure_state(result)
+        elif entry == "design_checkpoint":
+            result.design_review_passed = True
+        else:
+            result.design_review_passed = True
 
-            # User checkpoint: approved design
+        if entry in ("start", "design", "design_review", "design_checkpoint"):
             checkpoint_title = "Reviewed Design" if self._arch else "QA-Approved Design"
+            checkpoint_artifact_type = "arch_design" if self._arch else "design"
+            checkpoint_owner = (self._arch or self._dev)
             self._print_markdown_panel(
                 design,
                 title=checkpoint_title,
                 border_style="green",
                 label="approved-design",
             )
+            self._persist_user_checkpoint_state(
+                artifact=design,
+                artifact_type=checkpoint_artifact_type,
+                next_todo="User approve reviewed design to proceed to planning",
+                updated_by_agent_id=checkpoint_owner.agent_id,
+            )
             design = self._user_checkpoint(
                 design,
-                "arch_design" if self._arch else "design",
+                checkpoint_artifact_type,
                 "Design reviewed by the team. Proceed to planning? [Y/n/or type feedback] ",
                 proposer=self._arch,
             )
@@ -1163,16 +1212,14 @@ class WorkflowEngine:
                     current_stage="design_rejected_by_user",
                     latest_summary=result.design[:4000],
                     next_todos=["Review rejected design and user feedback"],
-                    updated_by_agent_id=(self._arch or self._dev).agent_id,
+                    updated_by_agent_id=checkpoint_owner.agent_id,
                 )
                 result.final_report = "Workflow stopped by user after design review."
                 return result
             result.design = design
-        else:
-            result.design_review_passed = True
 
         # ── Stage 3: Implementation planning ──
-        if entry in ("start", "design", "design_review", "plan"):
+        if entry in ("start", "design", "design_review", "design_checkpoint", "plan"):
             self._emit("stage_start", "Implementation Planning", stage="planning")
             self._console.print(Panel("[bold]Stage 3: Implementation Planning[/bold]", border_style="blue"))
             plan = self._run_planning(design, requirement)
@@ -1190,7 +1237,7 @@ class WorkflowEngine:
             result.plan = plan
 
         # ── Stage 4: Plan review ──
-        if entry in ("start", "design", "design_review", "plan", "plan_review"):
+        if entry in ("start", "design", "design_review", "design_checkpoint", "plan", "plan_review"):
             self._emit("stage_start", "Plan Review", stage="plan_review")
             self._console.print(Panel("[bold]Stage 4: Plan Review[/bold]", border_style="blue"))
             plan, iters, plan_review_passed = self._run_review_loop(
@@ -1205,12 +1252,31 @@ class WorkflowEngine:
                 result.final_report = "Workflow cancelled during plan review."
                 return result
 
-            # User checkpoint: approved plan
+        elif entry == "plan_checkpoint":
+            result.plan_review_passed = True
+        else:
+            result.plan_review_passed = True
+
+        if entry in (
+            "start",
+            "design",
+            "design_review",
+            "design_checkpoint",
+            "plan",
+            "plan_review",
+            "plan_checkpoint",
+        ):
             self._print_markdown_panel(
                 plan,
                 title="QA-Approved Plan",
                 border_style="green",
                 label="approved-plan",
+            )
+            self._persist_user_checkpoint_state(
+                artifact=plan,
+                artifact_type="plan",
+                next_todo="User approve reviewed plan to start development",
+                updated_by_agent_id=self._dev.agent_id,
             )
             plan = self._user_checkpoint(
                 plan, "plan", "Plan approved by QA. Start development? [Y/n/or type feedback] "
@@ -1219,11 +1285,18 @@ class WorkflowEngine:
                 self._console.print("[yellow]Workflow stopped by user.[/yellow]")
                 return result
             result.plan = plan
-        else:
-            result.plan_review_passed = True
 
         # ── Stage 5: Phased development ──
-        if entry in ("start", "design", "design_review", "plan", "plan_review", "phases"):
+        if entry in (
+            "start",
+            "design",
+            "design_review",
+            "design_checkpoint",
+            "plan",
+            "plan_review",
+            "plan_checkpoint",
+            "phases",
+        ):
             self._emit("stage_start", "Development", stage="development")
             self._console.print(Panel("[bold]Stage 5: Development[/bold]", border_style="blue"))
             phases = self._parse_phases(plan)
@@ -1356,12 +1429,23 @@ class WorkflowEngine:
             if self._cancelled():
                 result.final_report = "Design workflow cancelled during design review."
                 return result
+        elif entry == "design_checkpoint":
+            result.design_review_passed = True
+        else:
+            result.design_review_passed = True
 
+        if entry in ("start", "design", "design_review", "design_checkpoint"):
             self._print_markdown_panel(
                 design,
                 title="Reviewed Design",
                 border_style="green",
                 label="reviewed-design",
+            )
+            self._persist_user_checkpoint_state(
+                artifact=design,
+                artifact_type="design",
+                next_todo="User approve reviewed design to proceed to planning",
+                updated_by_agent_id=self._dev.agent_id,
             )
             design = self._user_checkpoint(
                 design,
@@ -1373,11 +1457,9 @@ class WorkflowEngine:
                 result.final_report = "Design workflow stopped by user after design review."
                 return result
             result.design = design
-        else:
-            result.design_review_passed = True
 
         # Stage 3: Planning
-        if entry in ("start", "design", "design_review", "plan"):
+        if entry in ("start", "design", "design_review", "design_checkpoint", "plan"):
             self._emit("stage_start", "Implementation Planning", stage="planning")
             self._console.print(Panel("[bold]Stage 3: Implementation Planning[/bold]", border_style="blue"))
             plan = self._run_planning(design, requirement)
@@ -1395,8 +1477,7 @@ class WorkflowEngine:
             result.plan = plan
 
         # Stage 4: Plan review
-        # entry "phases"/"ga_test" means plan was already approved in design mode
-        if entry not in ("phases", "ga_test"):
+        if entry in ("start", "design", "design_review", "design_checkpoint", "plan", "plan_review"):
             self._emit("stage_start", "Plan Review", stage="plan_review")
             self._console.print(Panel("[bold]Stage 4: Plan Review[/bold]", border_style="blue"))
             plan, iters, plan_review_passed = self._run_review_loop(
@@ -1410,12 +1491,31 @@ class WorkflowEngine:
             if self._cancelled():
                 result.final_report = "Design workflow cancelled during plan review."
                 return result
+        elif entry == "plan_checkpoint":
+            result.plan_review_passed = True
+        else:
+            result.plan_review_passed = True
 
+        if entry in (
+            "start",
+            "design",
+            "design_review",
+            "design_checkpoint",
+            "plan",
+            "plan_review",
+            "plan_checkpoint",
+        ):
             self._print_markdown_panel(
                 plan,
                 title="Reviewed Plan",
                 border_style="green",
                 label="reviewed-plan",
+            )
+            self._persist_user_checkpoint_state(
+                artifact=plan,
+                artifact_type="plan",
+                next_todo="User approve reviewed plan to finish the design workflow",
+                updated_by_agent_id=self._dev.agent_id,
             )
             plan = self._user_checkpoint(
                 plan,
@@ -1427,8 +1527,6 @@ class WorkflowEngine:
                 result.final_report = "Design workflow stopped by user after plan review."
                 return result
             result.plan = plan
-        else:
-            result.plan_review_passed = True
 
         self._emit("stage_start", "Final Report", stage="report")
         self._console.print(Panel("[bold]Stage 5: Final Report[/bold]", border_style="blue"))

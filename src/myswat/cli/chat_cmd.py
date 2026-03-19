@@ -20,6 +20,7 @@ from myswat.agents.factory import make_runner_from_row
 from myswat.agents.session_manager import SessionManager
 from myswat.cli.prompting import create_prompt_session, make_prompt_callback
 from myswat.cli.progress import (
+    TaskMonitorPromptBridge,
     _build_live_display,
     _check_esc,
     _describe_process_event,
@@ -685,6 +686,7 @@ def _run_testplan_review(
     on_work_item_created: Callable[[int], None] | None = None,
     register_cancel_target: Callable[[AgentRunner], None] | None = None,
     on_event: Callable | None = None,
+    ask_user: Callable[[str], str] | None = None,
 ) -> None:
     from myswat.workflow.engine import WorkflowEngine, WorkMode
 
@@ -747,7 +749,7 @@ def _run_testplan_review(
         work_item_id=work_item_id,
         max_review_iterations=settings.workflow.max_review_iterations,
         mode=WorkMode.testplan_design,
-        ask_user=_make_prompt_callback(prompt_session),
+        ask_user=ask_user or _make_prompt_callback(prompt_session),
         auto_approve=False,
         should_cancel=should_cancel,
         on_event=on_event,
@@ -782,6 +784,7 @@ def _run_workflow(
     mode: WorkMode = WorkMode.full,
     proposer_sm: SessionManager | None = None,
     on_event: Callable | None = None,
+    ask_user: Callable[[str], str] | None = None,
 ) -> None:
     """Run a teamwork workflow, optionally reusing an architect chat session."""
     from myswat.workflow.engine import WorkflowEngine
@@ -909,7 +912,7 @@ def _run_workflow(
         work_item_id=work_item_id,
         max_review_iterations=settings.workflow.max_review_iterations,
         mode=mode,
-        ask_user=_make_prompt_callback(prompt_session),
+        ask_user=ask_user or _make_prompt_callback(prompt_session),
         auto_approve=False,
         should_cancel=should_cancel,
         on_event=on_event,
@@ -1011,6 +1014,8 @@ def _run_testplan_review_interactive(
     cancel_targets: list[AgentRunner] = []
     cancel_event = threading.Event()
     display = WorkflowDisplay()
+    base_ask_user = _make_prompt_callback(prompt_session)
+    prompt_bridge = TaskMonitorPromptBridge(base_ask_user)
 
     def _worker():
         return _run_testplan_review(
@@ -1025,6 +1030,7 @@ def _run_testplan_review_interactive(
             on_work_item_created=lambda wid: work_item_ref.__setitem__("id", wid),
             register_cancel_target=cancel_targets.append,
             on_event=display.handle_event,
+            ask_user=prompt_bridge.ask,
         )
 
     _run_with_task_monitor(
@@ -1037,6 +1043,7 @@ def _run_testplan_review_interactive(
         cancel_targets=cancel_targets,
         cancel_event=cancel_event,
         workflow_display=display,
+        prompt_bridge=prompt_bridge,
     )
 
 
@@ -1057,6 +1064,8 @@ def _run_workflow_interactive(
     cancel_targets: list[AgentRunner] = []
     cancel_event = threading.Event()
     display = WorkflowDisplay()
+    base_ask_user = _make_prompt_callback(prompt_session)
+    prompt_bridge = TaskMonitorPromptBridge(base_ask_user)
 
     def _worker():
         return _run_workflow(
@@ -1072,6 +1081,7 @@ def _run_workflow_interactive(
             mode=mode,
             proposer_sm=proposer_sm,
             on_event=display.handle_event,
+            ask_user=prompt_bridge.ask,
         )
 
     _run_with_task_monitor(
@@ -1084,6 +1094,7 @@ def _run_workflow_interactive(
         cancel_targets=cancel_targets,
         cancel_event=cancel_event,
         workflow_display=display,
+        prompt_bridge=prompt_bridge,
     )
 
 

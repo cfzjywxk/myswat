@@ -21,7 +21,7 @@ from myswat.agents.base import AgentRunner
 from myswat.agents.factory import make_runner_from_row
 from myswat.agents.session_manager import SessionManager
 from myswat.cli.prompting import create_prompt_session, make_prompt_callback
-from myswat.cli.progress import _run_with_task_monitor
+from myswat.cli.progress import TaskMonitorPromptBridge, _run_with_task_monitor
 from myswat.cli.workflow_display import WorkflowDisplay
 from myswat.config.settings import MySwatSettings
 from myswat.db.connection import TiDBPool
@@ -469,6 +469,12 @@ def _run_workflow(
     prompt_session: PromptSession[str] | None = None
     if not background_worker and not auto_approve:
         prompt_session = _build_prompt_session(settings, f"work-{project_slug}")
+    base_ask_user = make_prompt_callback(prompt_session)
+    prompt_bridge = (
+        TaskMonitorPromptBridge(base_ask_user)
+        if show_monitor and not (background_worker or auto_approve)
+        else None
+    )
     display = WorkflowDisplay() if show_monitor else None
     engine = WorkflowEngine(
         store=store,
@@ -482,7 +488,7 @@ def _run_workflow(
         auto_approve=(background_worker or auto_approve),
         should_cancel=cancel_event.is_set,
         resume_stage=resume_stage,
-        ask_user=make_prompt_callback(prompt_session),
+        ask_user=prompt_bridge.ask if prompt_bridge is not None else base_ask_user,
         on_event=display.handle_event if display else None,
     )
 
@@ -506,6 +512,7 @@ def _run_workflow(
                 cancel_targets=cancel_targets,
                 cancel_event=cancel_event,
                 workflow_display=display,
+                prompt_bridge=prompt_bridge,
             )
         else:
             result = engine.run(requirement)

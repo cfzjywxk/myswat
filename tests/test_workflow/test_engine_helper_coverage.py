@@ -18,6 +18,27 @@ from myswat.workflow.engine import (
 from tests.conftest import make_fake_session_manager
 
 
+def _arch_design_doc() -> str:
+    return """
+    # Technical Design
+
+    ## Problem statement and goals
+    Build a reviewed technical design artifact that is concrete enough for developer and QA review.
+
+    ## Architecture overview and approach
+    The architect provides a written design document with explicit sections and a stable structure for later implementation.
+
+    ## Key decisions and trade-offs
+    The design favors clarity and reviewability over terse notes so reviewers can reason about correctness and testability.
+
+    ## Component interfaces and data flow
+    The proposal defines the public API, the internal responsibilities, and how inputs move through the main components.
+
+    ## Dependencies and risks
+    The design documents important constraints, risks, and review concerns before implementation starts.
+    """
+
+
 def _make_engine(
     *,
     mode: WorkMode = WorkMode.full,
@@ -57,7 +78,8 @@ def _make_engine(
     [
         ("ga_test_executing", "ga_test"),
         ("proposal_review", "plan_review"),
-        ("arch_design_approved", "plan"),
+        ("arch_design_approved", "design_checkpoint"),
+        ("plan_approved", "plan_checkpoint"),
         ("arch_design_review", "design_review"),
         ("design_draft_blocked", "design"),
         ("code_review", "phases"),
@@ -142,7 +164,7 @@ def test_dispatch_mode_rejects_unknown_mode():
 
 
 def test_architect_design_mode_cancelled_during_technical_design():
-    arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=["design"], session_id=300)
+    arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=[_arch_design_doc()], session_id=300)
     engine, store, _, _ = _make_engine(mode=WorkMode.architect_design, arch_sm=arch)
     result = WorkflowResult(requirement="req")
 

@@ -10,6 +10,7 @@ from rich.text import Text
 
 from myswat.agents.base import AgentResponse
 from myswat.cli.progress import (
+    TaskMonitorPromptBridge,
     _build_live_display,
     _build_task_monitor_display,
     _check_esc,
@@ -37,6 +38,22 @@ class _FakeLive:
 
     def update(self, renderable):
         self.updates.append(renderable)
+
+
+class _ControlledLive(_FakeLive):
+    instances = []
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.stop_calls = 0
+        self.start_calls = []
+        self.__class__.instances.append(self)
+
+    def stop(self):
+        self.stop_calls += 1
+
+    def start(self, refresh=False):
+        self.start_calls.append(refresh)
 
 
 class _SyncThread:
@@ -231,6 +248,40 @@ def test_print_task_monitor_snapshot_renders_snapshot():
     assert any(isinstance(arg, Text) and "Snapshot" in arg.plain for arg in printed)
 
 
+def test_task_monitor_prompt_bridge_falls_back_to_direct_prompt_when_inactive():
+    prompt_cb = MagicMock(return_value="y")
+    bridge = TaskMonitorPromptBridge(prompt_cb)
+
+    assert bridge.ask("Approve?") == "y"
+    prompt_cb.assert_called_once_with("Approve?")
+
+
+def test_task_monitor_prompt_bridge_service_round_trip():
+    prompt_cb = MagicMock(return_value="approved")
+    bridge = TaskMonitorPromptBridge(prompt_cb)
+    bridge.activate()
+
+    result_holder = {}
+
+    def _worker():
+        result_holder["value"] = bridge.ask("Proceed?")
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+
+    for _ in range(20):
+        if bridge.has_pending_request():
+            break
+        threading.Event().wait(0.01)
+
+    assert bridge.service_pending_request() is True
+    worker.join(timeout=1)
+
+    assert result_holder["value"] == "approved"
+    prompt_cb.assert_called_once_with("Proceed?")
+    bridge.deactivate()
+
+
 def test_run_with_task_monitor_propagates_worker_error():
     console = MagicMock()
     store = MagicMock()
@@ -278,6 +329,37 @@ def test_run_with_task_monitor_cancels_targets_on_escape():
 
     assert result is None
     runner.cancel.assert_called_once()
+
+
+def test_run_with_task_monitor_services_prompt_bridge_requests():
+    console = MagicMock()
+    store = MagicMock()
+    prompt_cb = MagicMock(return_value="y")
+    bridge = TaskMonitorPromptBridge(prompt_cb)
+    _ControlledLive.instances.clear()
+
+    with patch("myswat.cli.progress.Live", _ControlledLive):
+        with patch("myswat.cli.progress.sys.stdin.fileno", return_value=0):
+            with patch("myswat.cli.progress.termios.tcgetattr", return_value=object()):
+                with patch("myswat.cli.progress.termios.tcsetattr") as mock_tcsetattr:
+                    with patch("myswat.cli.progress.tty.setcbreak"):
+                        result = _run_with_task_monitor(
+                            console=console,
+                            store=store,
+                            proj={"slug": "proj"},
+                            label="Running workflow",
+                            worker_fn=lambda: bridge.ask("Approve?"),
+                            work_item_ref={"id": None},
+                            cancel_targets=[],
+                            cancel_event=threading.Event(),
+                            prompt_bridge=bridge,
+                        )
+
+    assert result == "y"
+    prompt_cb.assert_called_once_with("Approve?")
+    assert _ControlledLive.instances
+    assert _ControlledLive.instances[0].stop_calls >= 1
+    assert mock_tcsetattr.call_count >= 1
 
 
 def test_send_with_timer_propagates_send_error():

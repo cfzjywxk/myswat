@@ -32,6 +32,69 @@ _TASK_MONITOR_STORE_POLL_SECONDS = 1.0
 _SEND_CANCEL_GRACE_SECONDS = 5.0
 
 
+class TaskMonitorPromptBridge:
+    """Route workflow checkpoint prompts from a worker thread to the main thread."""
+
+    def __init__(self, prompt_callback: Callable[[str], str]) -> None:
+        self._prompt_callback = prompt_callback
+        self._lock = threading.Lock()
+        self._request_ready = threading.Event()
+        self._response_ready = threading.Event()
+        self._active = False
+        self._prompt_text = ""
+        self._response_text = ""
+
+    def activate(self) -> None:
+        with self._lock:
+            self._active = True
+
+    def deactivate(self, default_response: str = "n") -> None:
+        with self._lock:
+            self._active = False
+            if self._request_ready.is_set():
+                self._response_text = default_response
+                self._request_ready.clear()
+                self._response_ready.set()
+
+    def ask(self, prompt_text: str) -> str:
+        with self._lock:
+            active = self._active
+        if not active:
+            return self._prompt_callback(prompt_text)
+
+        with self._lock:
+            self._prompt_text = prompt_text
+            self._response_text = ""
+            self._response_ready.clear()
+            self._request_ready.set()
+
+        self._response_ready.wait()
+        with self._lock:
+            response = self._response_text
+            self._prompt_text = ""
+        return response
+
+    def has_pending_request(self) -> bool:
+        return self._request_ready.is_set()
+
+    def service_pending_request(self) -> bool:
+        with self._lock:
+            if not self._request_ready.is_set():
+                return False
+            prompt_text = self._prompt_text
+
+        try:
+            response = self._prompt_callback(prompt_text)
+        except Exception:
+            response = "n"
+
+        with self._lock:
+            self._response_text = response
+            self._request_ready.clear()
+            self._response_ready.set()
+        return True
+
+
 def _check_esc() -> bool:
     """Non-blocking check if ESC key was pressed."""
     try:
@@ -291,6 +354,7 @@ def _run_with_task_monitor(
     cancel_targets: list[AgentRunner],
     cancel_event: threading.Event,
     workflow_display: "WorkflowDisplay | None" = None,
+    prompt_bridge: TaskMonitorPromptBridge | None = None,
 ) -> object | None:
     """Run a long task while showing work-item progress.
 
@@ -345,6 +409,9 @@ def _run_with_task_monitor(
 
             stop_polling.wait(_TASK_MONITOR_LOOP_INTERVAL)
 
+    if prompt_bridge is not None:
+        prompt_bridge.activate()
+
     worker = threading.Thread(target=_run, daemon=True)
     worker.start()
 
@@ -373,6 +440,18 @@ def _run_with_task_monitor(
             transient=True,
         ) as live:
             while worker.is_alive():
+                if prompt_bridge is not None and prompt_bridge.has_pending_request():
+                    if use_cbreak and fd is not None and old_settings is not None:
+                        termios.tcsetattr(fd, termios.TCSAFLUSH, old_settings)
+                    if hasattr(live, "stop"):
+                        live.stop()
+                    prompt_bridge.service_pending_request()
+                    if worker.is_alive() and hasattr(live, "start"):
+                        live.start(refresh=True)
+                    if use_cbreak and fd is not None:
+                        tty.setcbreak(fd)
+                    continue
+
                 elapsed = time.monotonic() - start
 
                 if use_event_display:
@@ -429,6 +508,8 @@ def _run_with_task_monitor(
         stop_polling.set()
         if poller is not None:
             poller.join(timeout=1)
+        if prompt_bridge is not None:
+            prompt_bridge.deactivate()
         try:
             if use_cbreak and fd is not None and old_settings is not None:
                 termios.tcsetattr(fd, termios.TCSAFLUSH, old_settings)
