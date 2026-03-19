@@ -27,6 +27,7 @@ from __future__ import annotations
 import io
 import inspect
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
@@ -82,6 +83,7 @@ console = Console()
 
 # Maximum bugs before aborting GA test phase
 MAX_GA_BUGS = 5
+_DELEGATE_BLOCK_RE = re.compile(r"```delegate\b", re.IGNORECASE)
 
 
 @dataclass
@@ -280,6 +282,69 @@ class WorkflowEngine:
 
     def _cancelled(self) -> bool:
         return bool(self._should_cancel and self._should_cancel())
+
+    @staticmethod
+    def _validate_reviewable_design(artifact_type: str, content: str) -> str | None:
+        if artifact_type not in {"design", "arch_design"}:
+            return None
+
+        text = (content or "").strip()
+        if not text:
+            return "The design draft is empty."
+
+        if _DELEGATE_BLOCK_RE.search(text):
+            return "The response is a `delegate` block, not a concrete technical design proposal."
+
+        if artifact_type != "arch_design":
+            return None
+
+        normalized = text.lower()
+        required_topics = {
+            "problem/goals": ("problem statement", "goal", "goals", "objective", "scope"),
+            "architecture/approach": ("architecture", "architectural", "overview", "approach"),
+            "decisions/trade-offs": ("trade-off", "tradeoff", "decision", "decisions"),
+            "interfaces/data flow": ("interface", "interfaces", "api", "component", "components", "data flow"),
+            "dependencies/risks": ("dependency", "dependencies", "risk", "risks", "constraint", "constraints"),
+        }
+        matched_topics = [
+            label
+            for label, terms in required_topics.items()
+            if any(term in normalized for term in terms)
+        ]
+        if len(text) < 400 or len(matched_topics) < 4:
+            missing_topics = [label for label in required_topics if label not in matched_topics]
+            missing_text = ", ".join(missing_topics[:3]) or "core design sections"
+            return (
+                "The architect response is not reviewable as a technical design yet; "
+                f"it is missing core design content such as {missing_text}."
+            )
+
+        return None
+
+    def _record_invalid_design_failure(
+        self,
+        *,
+        artifact_type: str,
+        content: str,
+        owner: "SessionManager",
+        stage: str,
+        title: str,
+    ) -> None:
+        issue = self._validate_reviewable_design(artifact_type, content)
+        if issue is None:
+            return
+        summary = f"[{owner.agent_role}] produced a non-reviewable {artifact_type}: {issue}"
+        self._emit("agent_error", issue, stage=stage, agent_role=owner.agent_role)
+        self._console.print(f"[red]{issue}[/red]")
+        self._record_blocked_failure(
+            stage=stage,
+            summary=summary,
+            updated_by_agent_id=owner.agent_id,
+            from_role=owner.agent_role,
+            to_role="myswat",
+            event_type="proposal_failure",
+            title=title,
+        )
 
     def _append_process_event(
         self,
@@ -715,6 +780,18 @@ class WorkflowEngine:
 
         self._emit("agent_done", "Design draft submitted", stage="design", agent_role=self._arch.agent_role)
         design = response.content
+        issue = self._validate_reviewable_design("arch_design", design)
+        if issue is not None:
+            result.design = design
+            self._record_invalid_design_failure(
+                artifact_type="arch_design",
+                content=design,
+                owner=self._arch,
+                stage="design_draft_blocked",
+                title="Technical design draft invalid",
+            )
+            result.final_report = self._generate_report(result, [])
+            return self._sync_result_failure_state(result)
         result.design = design
         self._persist_task_state(
             current_stage="design_draft",
@@ -985,6 +1062,18 @@ class WorkflowEngine:
                     return self._sync_result_failure_state(result)
                 self._emit("agent_done", "Design draft submitted", stage="design", agent_role=self._arch.agent_role)
                 design = response.content
+                issue = self._validate_reviewable_design("arch_design", design)
+                if issue is not None:
+                    result.design = design
+                    self._record_invalid_design_failure(
+                        artifact_type="arch_design",
+                        content=design,
+                        owner=self._arch,
+                        stage="design_draft_blocked",
+                        title="Technical design draft invalid",
+                    )
+                    result.final_report = self._generate_report(result, [])
+                    return self._sync_result_failure_state(result)
                 result.design = design
                 self._persist_task_state(
                     current_stage="design_draft",
@@ -2537,6 +2626,23 @@ class WorkflowEngine:
                         to_role="myswat",
                         event_type="revision_failure",
                         title=f"{artifact_type} revision failed",
+                    )
+                    return current, iteration, False
+                break
+
+            issue = self._validate_reviewable_design(artifact_type, response.content)
+            if issue is not None:
+                summary = f"[{prop.agent_role}] produced a non-reviewable {artifact_type} revision: {issue}"
+                self._console.print(f"[red]{issue}[/red]")
+                if abort_on_agent_failure:
+                    self._record_blocked_failure(
+                        stage=f"{sp}_revision_blocked",
+                        summary=summary,
+                        updated_by_agent_id=prop.agent_id,
+                        from_role=prop.agent_role,
+                        to_role="myswat",
+                        event_type="revision_failure",
+                        title=f"{artifact_type} revision invalid",
                     )
                     return current, iteration, False
                 break

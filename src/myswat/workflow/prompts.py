@@ -195,17 +195,24 @@ DEV_ADDRESS_DESIGN_COMMENTS = """Address the following review comments on your t
 ARCH_TECH_DESIGN = """You are the project architect. Based on the prior discussion, produce a formal
 technical design proposal.
 
+You are already inside an active workflow stage. Do NOT delegate this task and do NOT emit a
+```delegate block. Write the actual design document in this response.
+Only hand design review to the team after you have produced a concrete, reviewable proposal.
+
 ## Requirement
 {requirement}
 
 ## Your Deliverable
 Produce a complete technical design including:
 1. Problem statement and goals
-2. Architecture overview and approach
-3. Key design decisions and trade-offs
-4. Component interfaces and data flow
-5. Dependencies and risks
-6. Open questions (if any)
+2. Scope, constraints, and assumptions
+3. Architecture overview and approach
+4. Key design decisions and trade-offs
+5. Component interfaces and data flow
+6. Failure handling and operational considerations (if applicable)
+7. Dependencies and risks
+8. Testing/validation strategy and acceptance criteria
+9. Open questions (if any)
 
 Be thorough — this design will be reviewed by the development and QA teams.
 """
@@ -222,7 +229,8 @@ ARCH_ADDRESS_DESIGN_COMMENTS = """Address the following review comments on your 
 1. Address each comment specifically.
 2. Update the design where needed.
 3. Explain your reasoning for any disagreements.
-4. Provide the complete updated design.
+4. Provide the complete updated design document, not instructions about what someone else should write.
+5. Do NOT delegate this task and do NOT emit a ```delegate block.
 """
 
 DESIGN_REVIEW = """Review the following technical design proposal.

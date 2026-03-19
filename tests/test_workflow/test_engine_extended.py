@@ -53,6 +53,27 @@ def _changes_json(issues: list[str] | None = None) -> str:
     })
 
 
+def _arch_design_doc() -> str:
+    return """
+    # Technical Design
+
+    ## Problem statement and goals
+    Build a reviewed technical design artifact that is concrete enough for developer and QA review.
+
+    ## Architecture overview and approach
+    The architect provides a written design document with explicit sections and a stable structure for later implementation.
+
+    ## Key decisions and trade-offs
+    The design favors clarity and reviewability over terse notes so reviewers can reason about correctness and testability.
+
+    ## Component interfaces and data flow
+    The proposal defines the public API, the internal responsibilities, and how inputs move through the main components.
+
+    ## Dependencies and risks
+    The design documents important constraints, risks, and review concerns before implementation starts.
+    """
+
+
 def _make_engine(
     *,
     dev_responses=None,
@@ -352,7 +373,7 @@ class TestRunArchitectDesignMode:
     @patch.object(WorkflowEngine, "_user_checkpoint", return_value="approved design")
     @patch.object(WorkflowEngine, "_run_review_loop", return_value=("reviewed design", 2, True))
     def test_happy_path(self, m_review, m_checkpoint, m_report):
-        arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=["the design"], session_id=300)
+        arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=[_arch_design_doc()], session_id=300)
         dev = make_fake_session_manager(agent_id=10, agent_role="developer", responses=[], session_id=100)
         qa = make_fake_session_manager(agent_id=20, agent_role="qa-0", responses=[], session_id=101)
         store = MagicMock()
@@ -433,11 +454,39 @@ class TestRunArchitectDesignMode:
         assert "design draft failed" in result.failure_summary
         assert result.final_report
 
+    @patch.object(WorkflowEngine, "_run_review_loop")
+    def test_delegate_block_draft_is_rejected_before_review(self, m_review):
+        arch = make_fake_session_manager(
+            agent_id=30,
+            agent_role="architect",
+            responses=["```delegate\nMODE: design\nTASK: write the design\n```"],
+            session_id=300,
+        )
+        dev = make_fake_session_manager(agent_id=10, agent_role="developer", responses=[], session_id=100)
+        qa = make_fake_session_manager(agent_id=20, agent_role="qa-0", responses=[], session_id=101)
+        store = MagicMock()
+        engine = WorkflowEngine(
+            store=store,
+            dev_sm=dev,
+            qa_sms=[qa],
+            arch_sm=arch,
+            project_id=1,
+            work_item_id=1,
+            mode=WorkMode.architect_design,
+        )
+
+        result = engine.run("design a cache")
+
+        assert result.success is False
+        assert result.blocked is True
+        assert "delegate" in result.failure_summary
+        m_review.assert_not_called()
+
     @patch.object(WorkflowEngine, "_generate_report", return_value="# Architect Report")
     @patch.object(WorkflowEngine, "_user_checkpoint", return_value=None)
     @patch.object(WorkflowEngine, "_run_review_loop", return_value=("reviewed design", 1, True))
     def test_user_stop_after_review(self, m_review, m_checkpoint, m_report):
-        arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=["the design"], session_id=300)
+        arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=[_arch_design_doc()], session_id=300)
         dev = make_fake_session_manager(agent_id=10, agent_role="developer", responses=[], session_id=100)
         qa = make_fake_session_manager(agent_id=20, agent_role="qa-0", responses=[], session_id=101)
         store = MagicMock()
@@ -472,7 +521,7 @@ class TestRunArchitectDesignMode:
         )
         result = WorkflowResult(requirement="req")
 
-        with patch.object(arch, "send", return_value=_ok("the design")):
+        with patch.object(arch, "send", return_value=_ok(_arch_design_doc())):
             with patch.object(engine, "_run_review_loop", return_value=("reviewed design", 1, True)):
                 with patch.object(engine, "_cancelled", side_effect=[False, True]):
                     result = engine._run_architect_design_mode("req", result)
@@ -495,7 +544,7 @@ class TestRunFullArchitectLed:
         self, m_plan, m_review, m_checkpoint, m_phases,
         m_phase, m_ga, m_report,
     ):
-        arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=["the design"], session_id=300)
+        arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=[_arch_design_doc()], session_id=300)
         dev = make_fake_session_manager(agent_id=10, agent_role="developer", responses=[], session_id=100)
         qa = make_fake_session_manager(agent_id=20, agent_role="qa-0", responses=[], session_id=101)
         store = MagicMock()
@@ -551,9 +600,32 @@ class TestRunFullArchitectLed:
         assert result.blocked is True
         assert "design draft failed" in result.failure_summary
 
+    @patch.object(WorkflowEngine, "_run_review_loop")
+    def test_full_mode_delegate_block_draft_is_rejected_before_review(self, m_review):
+        arch = make_fake_session_manager(
+            agent_id=30,
+            agent_role="architect",
+            responses=["```delegate\nMODE: design\nTASK: write the design\n```"],
+            session_id=300,
+        )
+        dev = make_fake_session_manager(agent_id=10, agent_role="developer", responses=[], session_id=100)
+        qa = make_fake_session_manager(agent_id=20, agent_role="qa-0", responses=[], session_id=101)
+        store = MagicMock()
+        engine = WorkflowEngine(
+            store=store, dev_sm=dev, qa_sms=[qa], arch_sm=arch,
+            project_id=1, work_item_id=1, mode=WorkMode.full,
+        )
+
+        result = engine.run("build a widget")
+
+        assert result.success is False
+        assert result.blocked is True
+        assert "delegate" in result.failure_summary
+        m_review.assert_not_called()
+
     @patch.object(WorkflowEngine, "_run_review_loop", return_value=("reviewed design", 1, False))
     def test_design_review_failure_persists_state_and_report_says_not_approved(self, m_review):
-        arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=["the design"], session_id=300)
+        arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=[_arch_design_doc()], session_id=300)
         dev = make_fake_session_manager(agent_id=10, agent_role="developer", responses=[], session_id=100)
         qa = make_fake_session_manager(agent_id=20, agent_role="qa-0", responses=[], session_id=101)
         store = MagicMock()
@@ -580,7 +652,7 @@ class TestRunFullArchitectLed:
     @patch.object(WorkflowEngine, "_user_checkpoint", return_value=None)
     @patch.object(WorkflowEngine, "_run_review_loop", return_value=("reviewed design", 1, True))
     def test_user_rejects_design_persists_rejection(self, m_review, m_checkpoint, m_report):
-        arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=["the design"], session_id=300)
+        arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=[_arch_design_doc()], session_id=300)
         dev = make_fake_session_manager(agent_id=10, agent_role="developer", responses=[], session_id=100)
         qa = make_fake_session_manager(agent_id=20, agent_role="qa-0", responses=[], session_id=101)
         store = MagicMock()

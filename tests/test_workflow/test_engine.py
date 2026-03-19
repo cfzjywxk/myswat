@@ -176,6 +176,51 @@ class TestExtractJsonBlock:
 
 
 # ===================================================================
+# 1b. reviewable design validation
+# ===================================================================
+
+class TestValidateReviewableDesign:
+    """Tests for WorkflowEngine._validate_reviewable_design."""
+
+    def test_rejects_delegate_block_for_arch_design(self, engine):
+        result = engine._validate_reviewable_design(
+            "arch_design",
+            "```delegate\nMODE: design\nTASK: write the design\n```",
+        )
+        assert result is not None
+        assert "delegate" in result
+
+    def test_rejects_obviously_incomplete_arch_design(self, engine):
+        result = engine._validate_reviewable_design(
+            "arch_design",
+            "Use fast doubling in Rust. It should be fast and memory efficient.",
+        )
+        assert result is not None
+        assert "not reviewable" in result
+
+    def test_accepts_substantive_arch_design(self, engine):
+        design = """
+        # Fibonacci Design
+
+        ## Problem statement and goals
+        Build a high-performance Fibonacci library for Rust users who need both single-value lookup and streaming generation.
+
+        ## Architecture overview and approach
+        The crate exposes a pure library API with a fast-doubling path for direct lookup and an iterative generator for sequential access.
+
+        ## Key decisions and trade-offs
+        Fast doubling minimizes asymptotic latency for `fib(n)`, while the iterator keeps sequential generation branch-light and allocation-free.
+
+        ## Component interfaces and data flow
+        A `fib(n)` entry point dispatches to the fast path, while `FibIter` advances from cached prior values through a simple state machine.
+
+        ## Dependencies and risks
+        The initial implementation avoids external dependencies on the hot path and documents overflow constraints for fixed-width integers.
+        """
+        assert engine._validate_reviewable_design("arch_design", design) is None
+
+
+# ===================================================================
 # 2. _parse_phases
 # ===================================================================
 

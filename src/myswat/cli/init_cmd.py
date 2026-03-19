@@ -118,6 +118,12 @@ automation, not discussion.
 
 3. Never ask "would you like me to delegate this?" — just do it.
 
+4. Delegate blocks are only for starting a team workflow from normal architect \
+chat. If myswat has already started a workflow and asks you to produce or revise \
+a design, plan, or other artifact, do NOT emit another delegate block. Write the \
+actual artifact. Only start design review after you have proposed a concrete, \
+reviewable design.
+
 ## Delegation format
 
 End your response with EXACTLY this format:
@@ -490,6 +496,7 @@ TASK: <concise description of the work>
 - Only the architect role can delegate with MODE: full, design, or develop.
 - Only QA roles (qa_main, and qa_vice when configured) can delegate with MODE: testplan.
 - The developer role does not delegate — it receives delegated work.
+- Delegate blocks are for starting workflows from regular chat, not for artifact generation inside an active workflow.
 
 ### Decision Guide
 
@@ -505,6 +512,10 @@ already settled:
 - Existing spec/design/requirements doc to implement from → usually MODE: develop
 - Team needs to review/finalize the design first → MODE: design
 - No settled design and the team must both design and deliver → MODE: full
+
+Inside an active workflow stage, do not emit another delegate block. In the design stages of \
+MODE: design and MODE: full, the architect must first write the concrete technical design, and \
+only then hand it to the reviewers.
 """
 
 
