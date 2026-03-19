@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from datetime import datetime, timedelta
 from typing import Any
@@ -21,6 +22,7 @@ from myswat.server.contracts import (
     ProjectLookupRequest,
     ProjectLookupResult,
     RecentArtifactsRequest,
+    ReviewCycleLeaseRenewalRequest,
     ReviewRequest,
     ReviewRequestResult,
     ReviewVerdictEnvelope,
@@ -31,6 +33,7 @@ from myswat.server.contracts import (
     RuntimeRegistrationResult,
     RuntimeStatusUpdateRequest,
     StageRunCompletion,
+    StageRunLeaseRenewalRequest,
     StageRunResult,
     StageRunStart,
     StageRunUpdate,
@@ -40,11 +43,74 @@ from myswat.server.contracts import (
 )
 
 
+class _CoordinationNotifier:
+    """Condition-based notifier for in-process orchestrator waits."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._stage_tokens: dict[int, int] = {}
+        self._review_tokens: dict[int, int] = {}
+
+    def snapshot_stage(self, stage_run_id: int) -> int:
+        with self._condition:
+            return self._stage_tokens.get(stage_run_id, 0)
+
+    def wait_for_stage_change(
+        self,
+        *,
+        stage_run_id: int,
+        observed_token: int,
+        timeout_seconds: float | None,
+    ) -> int:
+        def _changed() -> bool:
+            return self._stage_tokens.get(stage_run_id, 0) != observed_token
+
+        with self._condition:
+            if not _changed():
+                self._condition.wait_for(_changed, timeout=timeout_seconds)
+            return self._stage_tokens.get(stage_run_id, 0)
+
+    def notify_stage(self, stage_run_id: int) -> None:
+        with self._condition:
+            self._stage_tokens[stage_run_id] = self._stage_tokens.get(stage_run_id, 0) + 1
+            self._condition.notify_all()
+
+    def snapshot_reviews(self, cycle_ids: list[int]) -> dict[int, int]:
+        with self._condition:
+            return {cycle_id: self._review_tokens.get(cycle_id, 0) for cycle_id in cycle_ids}
+
+    def wait_for_review_change(
+        self,
+        *,
+        cycle_ids: list[int],
+        observed_tokens: dict[int, int],
+        timeout_seconds: float | None,
+    ) -> dict[int, int]:
+        cycle_ids = list(cycle_ids)
+
+        def _changed() -> bool:
+            return any(
+                self._review_tokens.get(cycle_id, 0) != observed_tokens.get(cycle_id, 0)
+                for cycle_id in cycle_ids
+            )
+
+        with self._condition:
+            if not _changed():
+                self._condition.wait_for(_changed, timeout=timeout_seconds)
+            return {cycle_id: self._review_tokens.get(cycle_id, 0) for cycle_id in cycle_ids}
+
+    def notify_review(self, cycle_id: int) -> None:
+        with self._condition:
+            self._review_tokens[cycle_id] = self._review_tokens.get(cycle_id, 0) + 1
+            self._condition.notify_all()
+
+
 class MySwatToolService:
     """Canonical coordination surface for workflow orchestration and MCP tools."""
 
     def __init__(self, store: MemoryStore) -> None:
         self._store = store
+        self._notifier = _CoordinationNotifier()
 
     @staticmethod
     def _stage_or_none(stage: str) -> str | None:
@@ -54,6 +120,22 @@ class MySwatToolService:
     @staticmethod
     def _sleep_interval(seconds: float) -> float:
         return max(0.05, seconds)
+
+    @staticmethod
+    def _remaining_timeout(started_at: float, timeout_seconds: float | None) -> float | None:
+        if timeout_seconds is None:
+            return None
+        remaining = timeout_seconds - (time.monotonic() - started_at)
+        return max(0.0, remaining)
+
+    def notify_work_item_coordination_changed(self, work_item_id: int) -> None:
+        for stage_run in self._store.list_stage_runs(work_item_id):
+            if stage_run.id is not None:
+                self._notifier.notify_stage(int(stage_run.id))
+        for review_cycle in self._store.get_review_cycles(work_item_id):
+            cycle_id = int(review_cycle.get("id") or 0)
+            if cycle_id > 0:
+                self._notifier.notify_review(cycle_id)
 
     def resolve_project(self, request: ProjectLookupRequest) -> ProjectLookupResult:
         project = self._store.get_project_by_slug(request.project_slug)
@@ -284,13 +366,26 @@ class MySwatToolService:
             output_artifact_id=request.output_artifact_id,
             metadata_json=request.metadata_json,
         )
+        self._notifier.notify_stage(request.stage_run_id)
+
+    def renew_stage_run_lease(self, request: StageRunLeaseRenewalRequest) -> None:
+        renewed = self._store.renew_stage_run_lease(
+            request.stage_run_id,
+            runtime_registration_id=request.runtime_registration_id,
+            lease_seconds=request.lease_seconds,
+        )
+        if not renewed:
+            raise ValueError(
+                "Stage run lease renewal failed: "
+                f"stage_run_id={request.stage_run_id} runtime_registration_id={request.runtime_registration_id}"
+            )
 
     def wait_for_stage_run_completion(
         self,
         request: StageRunWaitRequest,
     ) -> StageRunCompletion:
         started_at = time.monotonic()
-        poll = self._sleep_interval(request.poll_interval_seconds)
+        observed_token = self._notifier.snapshot_stage(request.stage_run_id)
         while True:
             stage_run = self._store.get_stage_run(request.stage_run_id)
             if not stage_run:
@@ -321,12 +416,14 @@ class MySwatToolService:
                     metadata_json=stage_run.metadata_json,
                 )
 
-            if (
-                request.timeout_seconds is not None
-                and time.monotonic() - started_at > request.timeout_seconds
-            ):
+            remaining = self._remaining_timeout(started_at, request.timeout_seconds)
+            if remaining is not None and remaining <= 0:
                 raise TimeoutError(f"Timed out waiting for stage run {request.stage_run_id}")
-            time.sleep(poll)
+            observed_token = self._notifier.wait_for_stage_change(
+                stage_run_id=request.stage_run_id,
+                observed_token=observed_token,
+                timeout_seconds=remaining,
+            )
 
     def claim_next_assignment(
         self,
@@ -487,6 +584,7 @@ class MySwatToolService:
             from_role=request.agent_role,
             payload_json={"artifact_id": artifact_id},
         )
+        self._notifier.notify_stage(request.stage_run_id)
         return StageRunCompletion(
             stage_run_id=request.stage_run_id,
             work_item_id=request.work_item_id,
@@ -521,6 +619,7 @@ class MySwatToolService:
             from_agent_id=request.agent_id,
             from_role=request.agent_role,
         )
+        self._notifier.notify_stage(request.stage_run_id)
         return StageRunCompletion(
             stage_run_id=request.stage_run_id,
             work_item_id=request.work_item_id,
@@ -569,7 +668,7 @@ class MySwatToolService:
         request: ReviewWaitRequest,
     ) -> list[ReviewVerdictEnvelope]:
         started_at = time.monotonic()
-        poll = self._sleep_interval(request.poll_interval_seconds)
+        observed_tokens = self._notifier.snapshot_reviews(request.cycle_ids)
         while True:
             cycles = self._store.get_review_cycles_by_ids(request.cycle_ids)
             if len(cycles) == len(request.cycle_ids):
@@ -596,12 +695,14 @@ class MySwatToolService:
                 if terminal:
                     return verdicts
 
-            if (
-                request.timeout_seconds is not None
-                and time.monotonic() - started_at > request.timeout_seconds
-            ):
+            remaining = self._remaining_timeout(started_at, request.timeout_seconds)
+            if remaining is not None and remaining <= 0:
                 raise TimeoutError("Timed out waiting for review verdicts")
-            time.sleep(poll)
+            observed_tokens = self._notifier.wait_for_review_change(
+                cycle_ids=request.cycle_ids,
+                observed_tokens=observed_tokens,
+                timeout_seconds=remaining,
+            )
 
     def publish_review_verdict(self, request: ReviewVerdictSubmission) -> dict[str, Any]:
         verdict_json = {
@@ -624,13 +725,27 @@ class MySwatToolService:
             open_issues=request.issues if request.verdict == "changes_requested" else [],
             updated_by_agent_id=request.reviewer_agent_id,
         )
-        return self._store.append_work_item_process_event(
+        event = self._store.append_work_item_process_event(
             request.work_item_id,
             event_type="review_verdict",
             summary=request.summary or f"Review verdict: {request.verdict}",
             from_role=request.reviewer_role,
             updated_by_agent_id=request.reviewer_agent_id,
         )
+        self._notifier.notify_review(request.cycle_id)
+        return event
+
+    def renew_review_cycle_lease(self, request: ReviewCycleLeaseRenewalRequest) -> None:
+        renewed = self._store.renew_review_cycle_lease(
+            request.cycle_id,
+            runtime_registration_id=request.runtime_registration_id,
+            lease_seconds=request.lease_seconds,
+        )
+        if not renewed:
+            raise ValueError(
+                "Review cycle lease renewal failed: "
+                f"cycle_id={request.cycle_id} runtime_registration_id={request.runtime_registration_id}"
+            )
 
     def append_coordination_event(self, request: CoordinationEventRecord) -> dict[str, Any]:
         event = self._store.append_coordination_event(

@@ -125,6 +125,12 @@ class _WorkflowCoordinationService:
     def heartbeat_runtime(self, request) -> None:
         self.runtime_status[int(request.runtime_registration_id)] = "online"
 
+    def renew_stage_run_lease(self, request) -> None:
+        return
+
+    def renew_review_cycle_lease(self, request) -> None:
+        return
+
     def update_runtime_status(self, request) -> dict:
         self.runtime_status[int(request.runtime_registration_id)] = str(request.status)
         return {

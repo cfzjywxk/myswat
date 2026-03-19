@@ -176,7 +176,7 @@ def test_run_workflow_marks_cancelled_and_ignores_close_failures(
         )
 
     assert work_item_id == 77
-    store.update_work_item_status.assert_any_call(77, "blocked")
+    store.update_work_item_status.assert_any_call(77, "cancelled")
 
 
 @patch("myswat.cli.work_cmd.submit_workflow_summary_learn_request")

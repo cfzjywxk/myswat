@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -23,6 +25,7 @@ from myswat.server.service import MySwatToolService
 from myswat.workflow.modes import WorkMode
 
 _ACTIVE_WORK_ITEM_STATUSES = frozenset({"pending", "in_progress", "review"})
+_TERMINAL_WORK_ITEM_STATUSES = frozenset({"approved", "blocked", "cancelled", "completed", "paused"})
 
 
 def _source_root() -> Path:
@@ -51,6 +54,15 @@ class ManagedWorkflow:
     requested_status: str | None = None
 
 
+@dataclass
+class ManagedWorkerProcess:
+    process: subprocess.Popen
+    workdir: str | None = None
+
+
+_WORKER_SUPERVISION_INTERVAL_SECONDS = 2.0
+
+
 class MySwatDaemon:
     def __init__(self, settings: MySwatSettings | None = None) -> None:
         self._settings = settings or MySwatSettings()
@@ -64,9 +76,11 @@ class MySwatDaemon:
         self._service = MySwatToolService(self._store)
         self._dispatcher = MySwatMCPDispatcher(self._service)
         self._lock = threading.Lock()
-        self._workers: dict[tuple[str, str], subprocess.Popen] = {}
+        self._workers: dict[tuple[str, str], ManagedWorkerProcess] = {}
         self._workflows: dict[int, threading.Thread] = {}
         self._workflow_controls: dict[int, ManagedWorkflow] = {}
+        self._supervisor_stop_event = threading.Event()
+        self._supervisor_thread: threading.Thread | None = None
 
     @property
     def base_url(self) -> str:
@@ -76,6 +90,22 @@ class MySwatDaemon:
         runtime_dir = self._settings.config_path.expanduser().parent / "workers" / project_slug
         runtime_dir.mkdir(parents=True, exist_ok=True)
         return runtime_dir / f"{role}.log"
+
+    def _project_runtime_paths(self, project_slug: str) -> list[Path]:
+        runtime_root = self._settings.config_path.expanduser().parent
+        return [
+            runtime_root / "workers" / project_slug,
+            runtime_root / "runs" / project_slug,
+        ]
+
+    def _cleanup_project_runtime_files(self, project_slug: str) -> list[str]:
+        removed: list[str] = []
+        for path in self._project_runtime_paths(project_slug):
+            if not path.exists():
+                continue
+            shutil.rmtree(path, ignore_errors=True)
+            removed.append(str(path))
+        return removed
 
     def _worker_roles_for_mode(self, project_id: int, mode: WorkMode) -> list[str]:
         roles: list[str] = []
@@ -93,7 +123,7 @@ class MySwatDaemon:
     def _start_worker(self, *, project_slug: str, role: str, workdir: str | None) -> None:
         key = (project_slug, role)
         existing = self._workers.get(key)
-        if existing is not None and existing.poll() is None:
+        if existing is not None and existing.process.poll() is None:
             return
 
         log_path = self._worker_log_path(project_slug, role)
@@ -123,7 +153,7 @@ class MySwatDaemon:
             )
         finally:
             log_file.close()
-        self._workers[key] = proc
+        self._workers[key] = ManagedWorkerProcess(process=proc, workdir=workdir)
 
     def _stop_worker_process(self, proc: subprocess.Popen) -> None:
         if proc.poll() is not None:
@@ -140,8 +170,8 @@ class MySwatDaemon:
     def _stop_project_workers(self, project_slug: str) -> None:
         with self._lock:
             to_stop = [
-                (key, proc)
-                for key, proc in self._workers.items()
+                (key, worker.process)
+                for key, worker in self._workers.items()
                 if key[0] == project_slug
             ]
             for key, _proc in to_stop:
@@ -159,6 +189,81 @@ class MySwatDaemon:
                 status="offline",
                 metadata_json={"stop_reason": "project_worker_recycled"},
             )
+
+    def _mark_dead_worker_runtime_offline(
+        self,
+        *,
+        project_id: int,
+        role: str,
+        pid: int | None,
+        exit_code: int,
+    ) -> None:
+        for runtime in self._store.list_runtime_registrations(
+            project_id,
+            agent_role=role,
+            status="online",
+        ):
+            metadata_json = dict(runtime.metadata_json or {})
+            runtime_pid = metadata_json.get("pid")
+            if pid is not None and runtime_pid is not None and int(runtime_pid) != pid:
+                continue
+            metadata_json.update(
+                {
+                    "stop_reason": "worker_process_exited",
+                    "stopped_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "exit_code": exit_code,
+                }
+            )
+            self._store.update_runtime_status(
+                int(runtime.id or 0),
+                status="offline",
+                metadata_json=metadata_json,
+            )
+
+    def _supervise_workers_once(self) -> None:
+        with self._lock:
+            dead_workers = [
+                (key, worker)
+                for key, worker in self._workers.items()
+                if worker.process.poll() is not None
+            ]
+            for key, _worker in dead_workers:
+                self._workers.pop(key, None)
+
+        for (project_slug, role), worker in dead_workers:
+            exit_code = int(worker.process.poll() or 0)
+            project = self._store.get_project_by_slug(project_slug)
+            if project:
+                self._mark_dead_worker_runtime_offline(
+                    project_id=int(project["id"]),
+                    role=role,
+                    pid=worker.process.pid,
+                    exit_code=exit_code,
+                )
+            if self._find_active_work_item(project_slug) is not None:
+                with self._lock:
+                    self._start_worker(project_slug=project_slug, role=role, workdir=worker.workdir)
+
+    def _ensure_worker_supervisor_started(self) -> None:
+        with self._lock:
+            existing = self._supervisor_thread
+            if existing is not None and existing.is_alive():
+                return
+            self._supervisor_stop_event.clear()
+            thread = threading.Thread(
+                target=self._supervisor_loop,
+                name="myswat-worker-supervisor",
+                daemon=True,
+            )
+            self._supervisor_thread = thread
+        thread.start()
+
+    def _supervisor_loop(self) -> None:
+        while not self._supervisor_stop_event.wait(_WORKER_SUPERVISION_INTERVAL_SECONDS):
+            try:
+                self._supervise_workers_once()
+            except Exception:
+                continue
 
     def _project_has_live_workflows(
         self,
@@ -272,6 +377,10 @@ class MySwatDaemon:
                     auto_approve=True,
                     external_cancel_event=cancel_event,
                     emit_console_output=False,
+                    settings=self._settings,
+                    store=self._store,
+                    project_row=self._store.get_project_by_slug(project_slug),
+                    service=self._service,
                 )
             finally:
                 with self._lock:
@@ -392,6 +501,9 @@ class MySwatDaemon:
         )
         self._store.cancel_open_stage_runs(work_item_id, summary=summary)
         self._store.cancel_open_review_cycles(work_item_id, summary=summary)
+        service = getattr(self, "_service", None)
+        if service is not None:
+            service.notify_work_item_coordination_changed(work_item_id)
 
         with self._lock:
             control = self._workflow_controls.get(work_item_id)
@@ -406,7 +518,91 @@ class MySwatDaemon:
             "status": target_status,
         }
 
+    def handle_cleanup_project(
+        self,
+        *,
+        project: str,
+        wait_timeout_seconds: float = 10.0,
+    ) -> dict:
+        project_row = self._store.get_project_by_slug(project)
+        if not project_row:
+            raise ValueError(f"Project not found: {project}")
+
+        project_id = int(project_row["id"])
+        summary = "Project cleanup requested."
+        work_items = self._store.list_work_items(project_id)
+        work_item_ids = [int(item.get("id") or 0) for item in work_items if int(item.get("id") or 0) > 0]
+
+        for item in work_items:
+            work_item_id = int(item.get("id") or 0)
+            if work_item_id <= 0:
+                continue
+            if str(item.get("status") or "") not in _TERMINAL_WORK_ITEM_STATUSES:
+                current_state = self._store.get_work_item_state(work_item_id) or {}
+                self._store.update_work_item_status(work_item_id, "cancelled")
+                self._store.update_work_item_state(
+                    work_item_id,
+                    current_stage=current_state.get("current_stage"),
+                    latest_summary=summary,
+                    next_todos=[],
+                    open_issues=[],
+                )
+                self._store.append_work_item_process_event(
+                    work_item_id,
+                    event_type="project_cleanup_cancelled",
+                    title="Project cleanup cancelled workflow",
+                    summary=summary,
+                    from_role="myswat",
+                    to_role="workflow",
+                )
+            self._store.cancel_open_stage_runs(work_item_id, summary=summary)
+            self._store.cancel_open_review_cycles(work_item_id, summary=summary)
+            self._service.notify_work_item_coordination_changed(work_item_id)
+
+        with self._lock:
+            tracked_workflows = [
+                (work_item_id, self._workflows.get(work_item_id), control)
+                for work_item_id, control in self._workflow_controls.items()
+                if control.project_slug == project
+            ]
+            for _work_item_id, _thread, control in tracked_workflows:
+                control.requested_status = "cancelled"
+                control.cancel_event.set()
+
+        self._stop_project_workers(project)
+
+        deadline = time.monotonic() + max(0.0, wait_timeout_seconds)
+        for _work_item_id, thread, _control in tracked_workflows:
+            if thread is None:
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(remaining)
+
+        alive_workflows = [
+            work_item_id
+            for work_item_id, thread, _control in tracked_workflows
+            if thread is not None and thread.is_alive()
+        ]
+        if alive_workflows:
+            raise RuntimeError(
+                "Project cleanup blocked waiting for workflows to stop: "
+                + ", ".join(str(work_item_id) for work_item_id in alive_workflows)
+            )
+
+        deleted = self._store.delete_project(project_id)
+        removed_runtime_paths = self._cleanup_project_runtime_files(project)
+        return {
+            "ok": True,
+            "project": project,
+            "work_item_ids": work_item_ids,
+            "deleted": deleted,
+            "removed_runtime_paths": removed_runtime_paths,
+        }
+
     def serve_forever(self) -> None:
+        self._ensure_worker_supervisor_started()
         daemon = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -471,6 +667,12 @@ class MySwatDaemon:
                             project=str(payload.get("project") or ""),
                             work_item_id=int(payload.get("work_item_id") or 0),
                             action=str(payload.get("action") or "cancel"),
+                        )
+                        self._write_json(200, result)
+                        return
+                    if parsed.path == "/api/project-cleanup":
+                        result = daemon.handle_cleanup_project(
+                            project=str(payload.get("project") or ""),
                         )
                         self._write_json(200, result)
                         return

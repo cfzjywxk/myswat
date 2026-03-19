@@ -9,6 +9,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from myswat.server.contracts import ReviewVerdictEnvelope
 from myswat.server.mcp_stdio import (
     MySwatMCPDispatcher,
     _read_message,
@@ -50,6 +51,8 @@ def test_list_tools_includes_assignment_tools():
     assert "register_runtime" in names
     assert "claim_next_assignment" in names
     assert "complete_stage_task" in names
+    assert "renew_stage_run_lease" in names
+    assert "renew_review_cycle_lease" in names
 
 
 def test_call_tool_validates_and_dispatches():
@@ -87,6 +90,54 @@ def test_call_tool_normalizes_none_result_to_empty_structured_content():
 
     assert result["structuredContent"] == {}
     service.heartbeat_runtime.assert_called_once()
+
+
+def test_call_tool_dispatches_stage_lease_renewal():
+    service = Mock()
+    service.renew_stage_run_lease.return_value = None
+    dispatcher = MySwatMCPDispatcher(service)
+
+    result = dispatcher.call_tool(
+        "renew_stage_run_lease",
+        {
+            "stage_run_id": 41,
+            "runtime_registration_id": 7,
+            "lease_seconds": 120,
+        },
+    )
+
+    assert result["structuredContent"] == {}
+    service.renew_stage_run_lease.assert_called_once()
+
+
+def test_call_tool_serializes_lists_of_pydantic_models():
+    service = Mock()
+    service.wait_for_review_verdicts.return_value = [
+        ReviewVerdictEnvelope(
+            cycle_id=9,
+            reviewer_role="qa_main",
+            verdict="lgtm",
+            summary="Looks good.",
+        )
+    ]
+    dispatcher = MySwatMCPDispatcher(service)
+
+    result = dispatcher.call_tool(
+        "wait_for_review_verdicts",
+        {
+            "cycle_ids": [9],
+        },
+    )
+
+    assert result["structuredContent"] == [
+        {
+            "cycle_id": 9,
+            "reviewer_role": "qa_main",
+            "verdict": "lgtm",
+            "issues": [],
+            "summary": "Looks good.",
+        }
+    ]
 
 
 def test_call_tool_rejects_unknown_tool():

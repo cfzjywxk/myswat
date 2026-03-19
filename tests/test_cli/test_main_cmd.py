@@ -1004,6 +1004,27 @@ class TestCommandRouting:
         assert result.exit_code == 0
         mock_client.control_work.assert_called_once_with(project="proj", work_item_id=42, action="cancel")
 
+    @patch("myswat.server.control_client.DaemonClient")
+    def test_cleanup_command(self, mock_client_cls):
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
+
+        mock_client = MagicMock()
+        mock_client.cleanup_project.return_value = {
+            "project": "proj",
+            "deleted": {"projects": 1, "agents": 3},
+            "removed_runtime_paths": ["/tmp/workers/proj"],
+        }
+        mock_client_cls.return_value = mock_client
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["cleanup", "--project", "proj", "--yes"])
+
+        assert result.exit_code == 0
+        mock_client.cleanup_project.assert_called_once_with(project="proj")
+        assert "Project 'proj' removed." in result.output
+        assert "projects=1" in result.output
+
     def test_help_lists_project_introspection_commands(self):
         from typer.testing import CliRunner
         from myswat.cli.main import app
@@ -1013,7 +1034,7 @@ class TestCommandRouting:
 
         assert result.exit_code == 0
         commands = set(re.findall(r"│\s+([a-z][a-z0-9-]*)\s+", result.output))
-        for visible_name in ("chat", "work", "status", "search", "history", "task", "memory", "gc", "stop", "init", "reset"):
+        for visible_name in ("chat", "work", "status", "search", "history", "task", "memory", "gc", "stop", "init", "cleanup", "reset"):
             assert visible_name in commands
 
     def test_feed_command_removed(self):

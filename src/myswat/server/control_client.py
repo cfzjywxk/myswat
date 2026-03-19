@@ -105,3 +105,12 @@ class DaemonClient:
                 "action": action,
             },
         )
+
+    def cleanup_project(self, *, project: str) -> dict:
+        return self._request(
+            method="POST",
+            path="/api/project-cleanup",
+            payload={
+                "project": project,
+            },
+        )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from typing import Any
 
@@ -23,6 +24,10 @@ from myswat.large_payloads import (
 from myswat.memory.store import MemoryStore
 from myswat.server.mcp_http_client import MCPHTTPClient
 from myswat.workflow.review_loop import _parse_verdict
+
+_RUNTIME_LEASE_SECONDS = 300
+_ASSIGNMENT_LEASE_SECONDS = 300
+_KEEPALIVE_INTERVAL_SECONDS = 60.0
 
 
 def _build_default_runtime_name(project_slug: str, role: str) -> str:
@@ -96,6 +101,125 @@ def _resolve_runner_response_content(text: str) -> str:
     return rendered
 
 
+def _assignment_keepalive_call(
+    *,
+    assignment: dict[str, Any],
+    mcp: MCPHTTPClient,
+    runtime_registration_id: int,
+) -> None:
+    kind = str(assignment.get("assignment_kind") or "")
+    mcp.call_tool(
+        "heartbeat_runtime",
+        {
+            "runtime_registration_id": runtime_registration_id,
+            "lease_seconds": _RUNTIME_LEASE_SECONDS,
+        },
+    )
+    if kind == "stage":
+        mcp.call_tool(
+            "renew_stage_run_lease",
+            {
+                "stage_run_id": int(assignment["stage_run_id"]),
+                "runtime_registration_id": runtime_registration_id,
+                "lease_seconds": _ASSIGNMENT_LEASE_SECONDS,
+            },
+        )
+        return
+    if kind == "review":
+        mcp.call_tool(
+            "renew_review_cycle_lease",
+            {
+                "cycle_id": int(assignment["review_cycle_id"]),
+                "runtime_registration_id": runtime_registration_id,
+                "lease_seconds": _ASSIGNMENT_LEASE_SECONDS,
+            },
+        )
+        return
+    raise RuntimeError(f"Unsupported keepalive assignment kind: {kind}")
+
+
+class _AssignmentKeepalive:
+    def __init__(
+        self,
+        *,
+        assignment: dict[str, Any],
+        mcp: MCPHTTPClient,
+        runtime_registration_id: int,
+    ) -> None:
+        self._assignment = assignment
+        self._mcp = mcp
+        self._runtime_registration_id = runtime_registration_id
+        self._stop_event = threading.Event()
+        self._error_lock = threading.Lock()
+        self._error: Exception | None = None
+        assignment_kind = str(assignment.get("assignment_kind") or "unknown")
+        assignment_id = int(
+            assignment.get("stage_run_id")
+            or assignment.get("review_cycle_id")
+            or 0
+        )
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"myswat-worker-keepalive-{assignment_kind}-{assignment_id}",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> Exception | None:
+        self._stop_event.set()
+        self._thread.join()
+        with self._error_lock:
+            return self._error
+
+    def _record_error(self, exc: Exception) -> None:
+        with self._error_lock:
+            if self._error is None:
+                self._error = exc
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(_KEEPALIVE_INTERVAL_SECONDS):
+            try:
+                _assignment_keepalive_call(
+                    assignment=self._assignment,
+                    mcp=self._mcp,
+                    runtime_registration_id=self._runtime_registration_id,
+                )
+            except Exception as exc:
+                self._record_error(exc)
+                return
+
+
+def _invoke_runner_with_keepalive(
+    *,
+    assignment: dict[str, Any],
+    runner: Any,
+    prompt: str,
+    system_context: str | None,
+    mcp: MCPHTTPClient,
+    runtime_registration_id: int,
+) -> Any:
+    keepalive = _AssignmentKeepalive(
+        assignment=assignment,
+        mcp=mcp,
+        runtime_registration_id=runtime_registration_id,
+    )
+    keepalive.start()
+    runner_error: Exception | None = None
+    response: Any = None
+    try:
+        response = runner.invoke(prompt, system_context=system_context)
+    except Exception as exc:
+        runner_error = exc
+    keepalive_error = keepalive.stop()
+    if runner_error is not None:
+        raise runner_error
+    if keepalive_error is not None:
+        raise keepalive_error
+    return response
+
+
 def _handle_stage_assignment(
     *,
     assignment: dict[str, Any],
@@ -110,7 +234,14 @@ def _handle_stage_assignment(
         role=role,
     )
     runner.reset_session()
-    response = runner.invoke(prompt, system_context=system_context)
+    response = _invoke_runner_with_keepalive(
+        assignment=assignment,
+        runner=runner,
+        prompt=prompt,
+        system_context=system_context,
+        mcp=mcp,
+        runtime_registration_id=runtime_registration_id,
+    )
     resolved_content = _resolve_runner_response_content(response.content)
 
     stage_run_id = int(assignment["stage_run_id"])
@@ -163,7 +294,14 @@ def _handle_review_assignment(
         role=role,
     )
     runner.reset_session()
-    response = runner.invoke(prompt, system_context=system_context)
+    response = _invoke_runner_with_keepalive(
+        assignment=assignment,
+        runner=runner,
+        prompt=prompt,
+        system_context=system_context,
+        mcp=mcp,
+        runtime_registration_id=runtime_registration_id,
+    )
     resolved_content = _resolve_runner_response_content(response.content)
 
     work_item_id = int(assignment["work_item_id"])
@@ -255,6 +393,7 @@ def run_worker(
                 "heartbeat_runtime",
                 {
                     "runtime_registration_id": runtime_registration_id,
+                    "lease_seconds": _RUNTIME_LEASE_SECONDS,
                 },
             )
             assignment = mcp.call_tool(
@@ -263,6 +402,7 @@ def run_worker(
                     "project_id": int(project["id"]),
                     "agent_role": role,
                     "runtime_registration_id": runtime_registration_id,
+                    "lease_seconds": _ASSIGNMENT_LEASE_SECONDS,
                 },
             )
             kind = assignment.get("assignment_kind")

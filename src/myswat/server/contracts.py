@@ -131,6 +131,12 @@ class StageRunUpdate(BaseModel):
     metadata_json: dict[str, Any] | None = None
 
 
+class StageRunLeaseRenewalRequest(BaseModel):
+    stage_run_id: int
+    runtime_registration_id: int
+    lease_seconds: int = 300
+
+
 class StageRunWaitRequest(BaseModel):
     stage_run_id: int
     poll_interval_seconds: float = 1.0
@@ -195,11 +201,17 @@ class ReviewVerdictSubmission(BaseModel):
     runtime_registration_id: int | None = None
 
 
+class ReviewCycleLeaseRenewalRequest(BaseModel):
+    cycle_id: int
+    runtime_registration_id: int
+    lease_seconds: int = 300
+
+
 class ClaimNextAssignmentRequest(BaseModel):
     project_id: int
     agent_role: str
     runtime_registration_id: int
-    lease_seconds: int = 1800
+    lease_seconds: int = 300
 
 
 class AssignmentEnvelope(BaseModel):

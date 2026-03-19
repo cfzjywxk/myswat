@@ -18,10 +18,16 @@ from myswat.server.contracts import (
     KnowledgeSearchRequest,
     ProjectLookupRequest,
     RecentArtifactsRequest,
+    ReviewCycleLeaseRenewalRequest,
+    ReviewRequest,
     ReviewVerdictSubmission,
+    ReviewWaitRequest,
     RuntimeHeartbeatRequest,
     RuntimeRegistrationRequest,
     RuntimeStatusUpdateRequest,
+    StageRunStart,
+    StageRunLeaseRenewalRequest,
+    StageRunWaitRequest,
     StatusReport,
     WorkItemSnapshotRequest,
 )
@@ -36,13 +42,22 @@ class MCPTool:
     handler: Callable[[BaseModel], Any]
 
 
-def _result_payload(result: Any) -> dict[str, Any]:
+def _normalize_structured(result: Any) -> Any:
     if isinstance(result, BaseModel):
-        structured = result.model_dump()
-    elif hasattr(result, "model_dump"):
-        structured = result.model_dump()
-    else:
-        structured = result
+        return result.model_dump()
+    if hasattr(result, "model_dump"):
+        return result.model_dump()
+    if isinstance(result, list):
+        return [_normalize_structured(item) for item in result]
+    if isinstance(result, tuple):
+        return [_normalize_structured(item) for item in result]
+    if isinstance(result, dict):
+        return {key: _normalize_structured(value) for key, value in result.items()}
+    return result
+
+
+def _result_payload(result: Any) -> dict[str, Any]:
+    structured = _normalize_structured(result)
     if structured is None:
         structured = {}
     text = json.dumps(structured, ensure_ascii=False, indent=2, default=str)
@@ -112,6 +127,24 @@ class MySwatMCPDispatcher:
                 schema_model=StatusReport,
                 handler=self._service.report_status,
             ),
+            "start_stage_run": MCPTool(
+                name="start_stage_run",
+                description="Internal orchestrator tool to queue a stage run.",
+                schema_model=StageRunStart,
+                handler=self._service.start_stage_run,
+            ),
+            "wait_for_stage_run_completion": MCPTool(
+                name="wait_for_stage_run_completion",
+                description="Internal orchestrator tool to wait for a queued stage run.",
+                schema_model=StageRunWaitRequest,
+                handler=self._service.wait_for_stage_run_completion,
+            ),
+            "renew_stage_run_lease": MCPTool(
+                name="renew_stage_run_lease",
+                description="Refresh the lease for a claimed stage run owned by a runtime.",
+                schema_model=StageRunLeaseRenewalRequest,
+                handler=self._service.renew_stage_run_lease,
+            ),
             "submit_artifact": MCPTool(
                 name="submit_artifact",
                 description="Persist an artifact for a workflow stage.",
@@ -135,6 +168,24 @@ class MySwatMCPDispatcher:
                 description="Publish a structured review verdict for a claimed review task.",
                 schema_model=ReviewVerdictSubmission,
                 handler=self._service.publish_review_verdict,
+            ),
+            "renew_review_cycle_lease": MCPTool(
+                name="renew_review_cycle_lease",
+                description="Refresh the lease for a claimed review cycle owned by a runtime.",
+                schema_model=ReviewCycleLeaseRenewalRequest,
+                handler=self._service.renew_review_cycle_lease,
+            ),
+            "request_review": MCPTool(
+                name="request_review",
+                description="Internal orchestrator tool to queue a review cycle.",
+                schema_model=ReviewRequest,
+                handler=self._service.request_review,
+            ),
+            "wait_for_review_verdicts": MCPTool(
+                name="wait_for_review_verdicts",
+                description="Internal orchestrator tool to wait for review verdicts.",
+                schema_model=ReviewWaitRequest,
+                handler=self._service.wait_for_review_verdicts,
             ),
             "persist_decision": MCPTool(
                 name="persist_decision",

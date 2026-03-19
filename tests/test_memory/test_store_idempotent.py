@@ -385,6 +385,67 @@ class TestStoreReadOperations:
         assert deleted == 3
         assert mock_pool.execute.call_count == 4
 
+    def test_delete_project_removes_related_rows_in_transaction(self, mock_pool):
+        class _FakeCursor:
+            def __init__(self) -> None:
+                self.executed: list[tuple[str, tuple | None]] = []
+                self.rowcount = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def execute(self, sql, args=None) -> int:
+                self.executed.append((sql, args))
+                self.rowcount = 1
+                return self.rowcount
+
+        class _FakeConnection:
+            def __init__(self, cursor) -> None:
+                self._cursor = cursor
+                self.autocommit_calls: list[bool] = []
+                self.committed = False
+                self.rolled_back = False
+
+            def autocommit(self, value: bool) -> None:
+                self.autocommit_calls.append(value)
+
+            def cursor(self):
+                return self._cursor
+
+            def commit(self) -> None:
+                self.committed = True
+
+            def rollback(self) -> None:
+                self.rolled_back = True
+
+        class _FakeConnectionContext:
+            def __init__(self, connection) -> None:
+                self._connection = connection
+
+            def __enter__(self):
+                return self._connection
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+        cursor = _FakeCursor()
+        connection = _FakeConnection(cursor)
+        mock_pool.connection.return_value = _FakeConnectionContext(connection)
+
+        store = MemoryStore(mock_pool)
+        counts = store.delete_project(7)
+
+        assert counts["projects"] == 1
+        assert counts["agents"] == 1
+        assert connection.committed is True
+        assert connection.rolled_back is False
+        assert connection.autocommit_calls == [False, True]
+        assert len(cursor.executed) == 18
+        assert cursor.executed[-1] == ("DELETE FROM projects WHERE id = %s", (7,))
+
     def test_store_knowledge_without_embedding(self, mock_pool):
         mock_pool.insert_returning_id.return_value = 99
 

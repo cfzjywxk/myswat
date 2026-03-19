@@ -805,6 +805,132 @@ class MemoryStore:
             return 0
         return int(row.get("memory_revision") or 0)
 
+    def delete_project(self, project_id: int) -> dict[str, int]:
+        """Delete one project and all related state in a single transaction."""
+        counts = {
+            "session_turns": 0,
+            "coordination_events": 0,
+            "review_cycles": 0,
+            "stage_runs": 0,
+            "artifacts": 0,
+            "learn_runs": 0,
+            "learn_requests": 0,
+            "runtime_registrations": 0,
+            "document_sources": 0,
+            "knowledge_terms": 0,
+            "knowledge_entities": 0,
+            "knowledge_relations": 0,
+            "knowledge": 0,
+            "sessions": 0,
+            "work_items": 0,
+            "agents": 0,
+            "projects": 0,
+        }
+        with self._pool.connection() as conn:
+            conn.autocommit(False)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE work_items SET parent_item_id = NULL WHERE project_id = %s",
+                        (project_id,),
+                    )
+                    cur.execute(
+                        "DELETE st FROM session_turns st "
+                        "JOIN sessions s ON st.session_id = s.id "
+                        "JOIN agents a ON s.agent_id = a.id "
+                        "WHERE a.project_id = %s",
+                        (project_id,),
+                    )
+                    counts["session_turns"] = cur.rowcount
+
+                    cur.execute(
+                        "DELETE ce FROM coordination_events ce "
+                        "JOIN work_items wi ON ce.work_item_id = wi.id "
+                        "WHERE wi.project_id = %s",
+                        (project_id,),
+                    )
+                    counts["coordination_events"] = cur.rowcount
+
+                    cur.execute(
+                        "DELETE rc FROM review_cycles rc "
+                        "JOIN work_items wi ON rc.work_item_id = wi.id "
+                        "WHERE wi.project_id = %s",
+                        (project_id,),
+                    )
+                    counts["review_cycles"] = cur.rowcount
+
+                    cur.execute(
+                        "DELETE sr FROM stage_runs sr "
+                        "JOIN work_items wi ON sr.work_item_id = wi.id "
+                        "WHERE wi.project_id = %s",
+                        (project_id,),
+                    )
+                    counts["stage_runs"] = cur.rowcount
+
+                    cur.execute(
+                        "DELETE ar FROM artifacts ar "
+                        "JOIN work_items wi ON ar.work_item_id = wi.id "
+                        "WHERE wi.project_id = %s",
+                        (project_id,),
+                    )
+                    counts["artifacts"] = cur.rowcount
+
+                    cur.execute(
+                        "DELETE lr FROM learn_runs lr "
+                        "JOIN learn_requests lq ON lr.learn_request_id = lq.id "
+                        "WHERE lq.project_id = %s",
+                        (project_id,),
+                    )
+                    counts["learn_runs"] = cur.rowcount
+
+                    cur.execute("DELETE FROM learn_requests WHERE project_id = %s", (project_id,))
+                    counts["learn_requests"] = cur.rowcount
+
+                    cur.execute(
+                        "DELETE FROM runtime_registrations WHERE project_id = %s",
+                        (project_id,),
+                    )
+                    counts["runtime_registrations"] = cur.rowcount
+
+                    cur.execute("DELETE FROM document_sources WHERE project_id = %s", (project_id,))
+                    counts["document_sources"] = cur.rowcount
+
+                    cur.execute("DELETE FROM knowledge_terms WHERE project_id = %s", (project_id,))
+                    counts["knowledge_terms"] = cur.rowcount
+
+                    cur.execute("DELETE FROM knowledge_entities WHERE project_id = %s", (project_id,))
+                    counts["knowledge_entities"] = cur.rowcount
+
+                    cur.execute("DELETE FROM knowledge_relations WHERE project_id = %s", (project_id,))
+                    counts["knowledge_relations"] = cur.rowcount
+
+                    cur.execute("DELETE FROM knowledge WHERE project_id = %s", (project_id,))
+                    counts["knowledge"] = cur.rowcount
+
+                    cur.execute(
+                        "DELETE s FROM sessions s "
+                        "JOIN agents a ON s.agent_id = a.id "
+                        "WHERE a.project_id = %s",
+                        (project_id,),
+                    )
+                    counts["sessions"] = cur.rowcount
+
+                    cur.execute("DELETE FROM work_items WHERE project_id = %s", (project_id,))
+                    counts["work_items"] = cur.rowcount
+
+                    cur.execute("DELETE FROM agents WHERE project_id = %s", (project_id,))
+                    counts["agents"] = cur.rowcount
+
+                    cur.execute("DELETE FROM projects WHERE id = %s", (project_id,))
+                    counts["projects"] = cur.rowcount
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.autocommit(True)
+        return counts
+
     # ──────────────────────────── Learn History ────────────────────────────
 
     def create_learn_request(
@@ -2616,7 +2742,7 @@ class MemoryStore:
         project_id: int,
         owner_role: str,
         runtime_registration_id: int,
-        lease_seconds: int = 1800,
+        lease_seconds: int = 300,
     ) -> StageRun | None:
         now = datetime.now()
         row = self._pool.fetch_one(
@@ -2644,6 +2770,21 @@ class MemoryStore:
         if updated != 1:
             return None
         return self.get_stage_run(int(row["id"]))
+
+    def renew_stage_run_lease(
+        self,
+        stage_run_id: int,
+        *,
+        runtime_registration_id: int,
+        lease_seconds: int = 300,
+    ) -> bool:
+        lease_expires_at = datetime.now() + timedelta(seconds=max(lease_seconds, 30))
+        updated = self._pool.execute(
+            "UPDATE stage_runs SET lease_expires_at = %s "
+            "WHERE id = %s AND status = 'claimed' AND claimed_by_runtime_id = %s",
+            (lease_expires_at, stage_run_id, runtime_registration_id),
+        )
+        return updated == 1
 
     def cancel_open_stage_runs(
         self,
@@ -2886,7 +3027,7 @@ class MemoryStore:
         project_id: int,
         reviewer_role: str,
         runtime_registration_id: int,
-        lease_seconds: int = 1800,
+        lease_seconds: int = 300,
     ) -> dict | None:
         now = datetime.now()
         row = self._pool.fetch_one(
@@ -2914,6 +3055,21 @@ class MemoryStore:
         if updated != 1:
             return None
         return self.get_review_cycle(int(row["id"]))
+
+    def renew_review_cycle_lease(
+        self,
+        cycle_id: int,
+        *,
+        runtime_registration_id: int,
+        lease_seconds: int = 300,
+    ) -> bool:
+        lease_expires_at = datetime.now() + timedelta(seconds=max(lease_seconds, 30))
+        updated = self._pool.execute(
+            "UPDATE review_cycles SET lease_expires_at = %s "
+            "WHERE id = %s AND status = 'claimed' AND claimed_by_runtime_id = %s",
+            (lease_expires_at, cycle_id, runtime_registration_id),
+        )
+        return updated == 1
 
     def cancel_open_review_cycles(
         self,

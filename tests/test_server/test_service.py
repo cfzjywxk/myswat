@@ -15,10 +15,12 @@ from myswat.server.contracts import (
     DecisionPersistenceRequest,
     KnowledgeSearchRequest,
     RecentArtifactsRequest,
+    ReviewCycleLeaseRenewalRequest,
     ReviewRequest,
     ReviewVerdictSubmission,
     RuntimeRegistrationRequest,
     RuntimeStatusUpdateRequest,
+    StageRunLeaseRenewalRequest,
     StageRunStart,
     StageRunUpdate,
     StatusReport,
@@ -167,6 +169,26 @@ def test_update_stage_run_delegates_to_store():
         lease_expires_at=None,
         output_artifact_id=999,
         metadata_json={"iterations": 2},
+    )
+
+
+def test_renew_stage_run_lease_delegates_to_store():
+    store = Mock(spec=MemoryStore)
+    store.renew_stage_run_lease.return_value = True
+    service = MySwatToolService(store)
+
+    service.renew_stage_run_lease(
+        StageRunLeaseRenewalRequest(
+            stage_run_id=55,
+            runtime_registration_id=91,
+            lease_seconds=120,
+        )
+    )
+
+    store.renew_stage_run_lease.assert_called_once_with(
+        55,
+        runtime_registration_id=91,
+        lease_seconds=120,
     )
 
 
@@ -410,6 +432,26 @@ def test_publish_review_verdict_updates_cycle_and_work_item():
         review_session_id=None,
         status="completed",
         claimed_by_runtime_id=91,
+    )
+
+
+def test_renew_review_cycle_lease_delegates_to_store():
+    store = Mock(spec=MemoryStore)
+    store.renew_review_cycle_lease.return_value = True
+    service = MySwatToolService(store)
+
+    service.renew_review_cycle_lease(
+        ReviewCycleLeaseRenewalRequest(
+            cycle_id=88,
+            runtime_registration_id=91,
+            lease_seconds=120,
+        )
+    )
+
+    store.renew_review_cycle_lease.assert_called_once_with(
+        88,
+        runtime_registration_id=91,
+        lease_seconds=120,
     )
 
 

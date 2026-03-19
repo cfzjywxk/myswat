@@ -99,6 +99,18 @@ def test_reset_aborts_when_confirmation_does_not_match(mock_settings_cls, mock_p
     mock_pool_cls.assert_not_called()
 
 
+@patch("myswat.server.control_client.DaemonClient")
+def test_cleanup_aborts_when_confirmation_does_not_match(mock_client_cls):
+    with patch("myswat.cli.main.typer.prompt", return_value="nope"):
+        with pytest.raises(ClickExit) as exc_info:
+            from myswat.cli.main import cleanup
+
+            cleanup(project="proj", yes=False)
+
+    assert exc_info.value.exit_code == 0
+    mock_client_cls.assert_not_called()
+
+
 @patch("myswat.db.schema.ensure_schema")
 @patch("myswat.db.connection.TiDBPool")
 @patch("myswat.config.settings.MySwatSettings")

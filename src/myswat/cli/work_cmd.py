@@ -28,6 +28,8 @@ from myswat.db.schema import ensure_schema
 from myswat.memory.learn_triggers import submit_workflow_summary_learn_request
 from myswat.memory.store import MemoryStore
 from myswat.server import MySwatToolService
+from myswat.server.mcp_stdio import MySwatMCPDispatcher
+from myswat.server.workflow_client import LocalMCPToolClient, MCPWorkflowCoordinator
 from myswat.workflow.kernel import WorkflowKernel as WorkflowEngine
 from myswat.workflow.modes import WorkMode
 from myswat.workflow.runtime import WorkflowRuntime
@@ -70,17 +72,22 @@ def _source_root() -> Path:
 def _load_project_context(
     project_slug: str,
     workdir: str | None,
+    *,
+    settings: MySwatSettings | None = None,
+    store: MemoryStore | None = None,
+    project_row: dict | None = None,
 ) -> tuple[MySwatSettings, MemoryStore, dict, str | None]:
-    settings = MySwatSettings()
-    pool = TiDBPool(settings.tidb)
-    ensure_schema(pool)
-    store = MemoryStore(
-        pool,
-        tidb_embedding_model=settings.embedding.tidb_model,
-        embedding_backend=settings.embedding.backend,
-    )
+    settings = settings or MySwatSettings()
+    if store is None:
+        pool = TiDBPool(settings.tidb)
+        ensure_schema(pool)
+        store = MemoryStore(
+            pool,
+            tidb_embedding_model=settings.embedding.tidb_model,
+            embedding_backend=settings.embedding.backend,
+        )
 
-    proj = store.get_project_by_slug(project_slug)
+    proj = project_row or store.get_project_by_slug(project_slug)
     if not proj:
         console.print(f"[red]Project '{project_slug}' not found.[/red]")
         raise typer.Exit(1)
@@ -298,8 +305,18 @@ def _run_workflow(
     mode_explicit: bool = False,
     external_cancel_event: threading.Event | None = None,
     emit_console_output: bool = True,
+    settings: MySwatSettings | None = None,
+    store: MemoryStore | None = None,
+    project_row: dict | None = None,
+    service: MySwatToolService | None = None,
 ) -> int:
-    settings, store, proj, effective_workdir = _load_project_context(project_slug, workdir)
+    settings, store, proj, effective_workdir = _load_project_context(
+        project_slug,
+        workdir,
+        settings=settings,
+        store=store,
+        project_row=project_row,
+    )
 
     # ── Resume logic ──
     resume_stage: str | None = None
@@ -453,7 +470,8 @@ def _run_workflow(
         else None
     )
     display = WorkflowDisplay() if show_monitor else None
-    service = MySwatToolService(store)
+    service = service or MySwatToolService(store)
+    coordinator = MCPWorkflowCoordinator(LocalMCPToolClient(MySwatMCPDispatcher(service)))
     poll_interval_value = getattr(settings.workflow, "assignment_poll_interval_seconds", 1.0)
     try:
         poll_interval_seconds = float(poll_interval_value)
@@ -467,7 +485,7 @@ def _run_workflow(
         timeout_seconds_value = 0.0
     engine = WorkflowEngine(
         store=store,
-        service=service,
+        coordinator=coordinator,
         dev=dev_runtime,
         qas=qa_runtimes,
         arch=arch_runtime,

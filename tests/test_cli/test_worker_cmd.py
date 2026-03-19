@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
+import time
 from pathlib import Path
 from itertools import chain, repeat
 from types import SimpleNamespace
@@ -29,6 +31,32 @@ class _FakeRunner:
     def invoke(self, prompt: str, system_context: str | None = None):
         self.invocations.append((prompt, system_context))
         success, content = self._responses.pop(0)
+        return SimpleNamespace(success=success, content=content)
+
+
+class _BlockingRunner:
+    def __init__(
+        self,
+        response: tuple[bool, str],
+        *,
+        started: threading.Event,
+        release: threading.Event,
+    ) -> None:
+        self._response = response
+        self._started = started
+        self._release = release
+        self.reset_calls = 0
+        self.invocations: list[tuple[str, str | None]] = []
+
+    def reset_session(self) -> None:
+        self.reset_calls += 1
+
+    def invoke(self, prompt: str, system_context: str | None = None):
+        self.invocations.append((prompt, system_context))
+        self._started.set()
+        if not self._release.wait(timeout=2):
+            raise RuntimeError("blocking runner was not released")
+        success, content = self._response
         return SimpleNamespace(success=success, content=content)
 
 
@@ -168,6 +196,77 @@ def test_run_worker_reports_failed_stage_roundtrip():
     assert request.stage_run_id == 24
     assert request.stage_name == "phase_1"
     assert "borrow checker errors" in request.summary
+
+
+def test_run_worker_renews_stage_lease_while_assignment_is_running():
+    service = Mock()
+    service.register_runtime.return_value = SimpleNamespace(
+        model_dump=lambda: {"runtime_registration_id": 801}
+    )
+    service.claim_next_assignment.side_effect = _assignment_stream(
+        AssignmentEnvelope(
+            assignment_kind="stage",
+            runtime_registration_id=801,
+            project_id=1,
+            work_item_id=44,
+            stage_run_id=54,
+            stage_name="phase_1",
+            agent_id=3,
+            agent_role="developer",
+            iteration=1,
+            prompt="Implement phase 1",
+            system_context="kind=stage;stage=phase_1",
+            artifact_type="phase_result",
+            artifact_title="Phase 1 result",
+        )
+    )
+    service.complete_stage_task.return_value = StageRunCompletion(
+        stage_run_id=54,
+        work_item_id=44,
+        stage_name="phase_1",
+        status="completed",
+        summary="done",
+        artifact_id=144,
+        artifact_content="done",
+    )
+    service.heartbeat_runtime.return_value = None
+    service.renew_stage_run_lease.return_value = None
+    service.update_runtime_status.return_value = {"runtime_registration_id": 801, "status": "offline"}
+
+    started = threading.Event()
+    release = threading.Event()
+    runner = _BlockingRunner((True, "done"), started=started, release=release)
+    result_holder: dict[str, object] = {}
+
+    def _run() -> None:
+        try:
+            result_holder["result"] = run_worker(
+                project_slug="fib-demo",
+                role="developer",
+                server_url="http://unused",
+                project_row={"id": 1, "slug": "fib-demo", "repo_path": "/tmp/fib-demo"},
+                agent_row=_agent_row("developer"),
+                runner=runner,
+                mcp_client=_DirectMCPClient(service),
+                idle_exit_seconds=0.05,
+            )
+        except Exception as exc:  # pragma: no cover - failure path surfaced below
+            result_holder["error"] = exc
+
+    with patch("myswat.cli.worker_cmd._KEEPALIVE_INTERVAL_SECONDS", 0.01):
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+        assert started.wait(timeout=1) is True
+        time.sleep(0.05)
+        release.set()
+        thread.join(timeout=2)
+
+    assert thread.is_alive() is False
+    assert "error" not in result_holder
+    assert result_holder["result"] == {"stage_assignments": 1, "review_assignments": 0}
+    renew_request = service.renew_stage_run_lease.call_args.args[0]
+    assert renew_request.stage_run_id == 54
+    assert renew_request.runtime_registration_id == 801
 
 
 def test_run_worker_externalizes_large_stage_prompt_and_context_to_markdown_files():
@@ -330,6 +429,71 @@ def test_run_worker_publishes_review_verdict_roundtrip():
     assert request.cycle_id == 33
     assert request.verdict == "lgtm"
     assert request.summary == "Looks good."
+
+
+def test_run_worker_renews_review_lease_while_assignment_is_running():
+    service = Mock()
+    service.register_runtime.return_value = SimpleNamespace(
+        model_dump=lambda: {"runtime_registration_id": 901}
+    )
+    service.claim_next_assignment.side_effect = _assignment_stream(
+        AssignmentEnvelope(
+            assignment_kind="review",
+            runtime_registration_id=901,
+            project_id=1,
+            work_item_id=45,
+            review_cycle_id=65,
+            stage_name="phase_1_review",
+            agent_id=4,
+            agent_role="qa_main",
+            iteration=1,
+            prompt="Review phase 1",
+            system_context="kind=review;stage=phase_1_review",
+        )
+    )
+    service.publish_review_verdict.return_value = {"ok": True}
+    service.heartbeat_runtime.return_value = None
+    service.renew_review_cycle_lease.return_value = None
+    service.update_runtime_status.return_value = {"runtime_registration_id": 901, "status": "offline"}
+
+    started = threading.Event()
+    release = threading.Event()
+    runner = _BlockingRunner(
+        (True, '{"verdict":"lgtm","issues":[],"summary":"Looks good."}'),
+        started=started,
+        release=release,
+    )
+    result_holder: dict[str, object] = {}
+
+    def _run() -> None:
+        try:
+            result_holder["result"] = run_worker(
+                project_slug="fib-demo",
+                role="qa_main",
+                server_url="http://unused",
+                project_row={"id": 1, "slug": "fib-demo", "repo_path": "/tmp/fib-demo"},
+                agent_row=_agent_row("qa_main"),
+                runner=runner,
+                mcp_client=_DirectMCPClient(service),
+                idle_exit_seconds=0.05,
+            )
+        except Exception as exc:  # pragma: no cover - failure path surfaced below
+            result_holder["error"] = exc
+
+    with patch("myswat.cli.worker_cmd._KEEPALIVE_INTERVAL_SECONDS", 0.01):
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+        assert started.wait(timeout=1) is True
+        time.sleep(0.05)
+        release.set()
+        thread.join(timeout=2)
+
+    assert thread.is_alive() is False
+    assert "error" not in result_holder
+    assert result_holder["result"] == {"stage_assignments": 0, "review_assignments": 1}
+    renew_request = service.renew_review_cycle_lease.call_args.args[0]
+    assert renew_request.cycle_id == 65
+    assert renew_request.runtime_registration_id == 901
 
 
 def test_run_worker_resolves_externalized_review_verdict_fields():

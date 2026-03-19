@@ -14,7 +14,7 @@ from myswat.server import (
     StageRunWaitRequest,
     StatusReport,
 )
-from myswat.server.service import MySwatToolService
+from myswat.server.workflow_client import WorkflowCoordinator
 from myswat.workflow.events import WorkflowEvent
 from myswat.workflow.modes import WorkMode
 from myswat.workflow.prompts import (
@@ -110,7 +110,6 @@ class WorkflowKernel:
         self,
         *,
         store,
-        service: MySwatToolService,
         dev: WorkflowRuntime,
         qas: list[WorkflowRuntime],
         project_id: int,
@@ -125,9 +124,13 @@ class WorkflowKernel:
         on_event: Callable[[WorkflowEvent], None] | None = None,
         assignment_poll_interval_seconds: float = 1.0,
         assignment_timeout_seconds: float | None = None,
+        coordinator: WorkflowCoordinator | None = None,
+        service: WorkflowCoordinator | None = None,
     ) -> None:
         self._store = store
-        self._service = service
+        self._coordinator = coordinator or service
+        if self._coordinator is None:
+            raise ValueError("coordinator is required")
         self._dev = dev
         self._qas = qas
         self._arch = arch
@@ -199,7 +202,7 @@ class WorkflowKernel:
         open_issues: list[str] | None = None,
         title: str | None = None,
     ) -> None:
-        self._service.report_status(
+        self._coordinator.report_status(
             StatusReport(
                 work_item_id=self._work_item_id,
                 agent_id=runtime.agent_id,
@@ -231,7 +234,7 @@ class WorkflowKernel:
             stage=stage_name,
             agent_role=owner.agent_role,
         )
-        stage_run = self._service.start_stage_run(
+        stage_run = self._coordinator.start_stage_run(
             StageRunStart(
                 work_item_id=self._work_item_id,
                 stage_name=stage_name,
@@ -263,7 +266,7 @@ class WorkflowKernel:
             stage=stage_name,
             agent_role=owner.agent_role,
         )
-        result = self._service.wait_for_stage_run_completion(
+        result = self._coordinator.wait_for_stage_run_completion(
             StageRunWaitRequest(
                 stage_run_id=stage_run_id,
                 poll_interval_seconds=self._assignment_poll_interval_seconds,
@@ -336,7 +339,7 @@ class WorkflowKernel:
         return completion.artifact_content, True
 
     def _wait_for_review_verdicts(self, cycle_ids: list[int]) -> list:
-        return self._service.wait_for_review_verdicts(
+        return self._coordinator.wait_for_review_verdicts(
             ReviewWaitRequest(
                 cycle_ids=cycle_ids,
                 poll_interval_seconds=self._assignment_poll_interval_seconds,
@@ -383,7 +386,7 @@ class WorkflowKernel:
             )
             cycle_ids: list[int] = []
             for reviewer in reviewers:
-                request = self._service.request_review(
+                request = self._coordinator.request_review(
                     ReviewRequest(
                         work_item_id=self._work_item_id,
                         artifact_id=artifact_id,

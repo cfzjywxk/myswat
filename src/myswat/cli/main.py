@@ -443,6 +443,55 @@ def init(
 
 
 @app.command()
+def cleanup(
+    project: str = typer.Option(..., "--project", "-p", help="Project slug"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+):
+    """Delete one project and all related TiDB state through the local MySwat daemon."""
+    from rich.console import Console
+
+    from myswat.config.settings import MySwatSettings
+    from myswat.server.control_client import DaemonClient, DaemonClientError
+
+    console = Console()
+    if not yes:
+        console.print(
+            f"\n[bold red]WARNING: This will permanently delete project '{project}'.[/bold red]"
+        )
+        console.print(
+            "[red]All project agents, work items, stage runs, review cycles, sessions, "
+            "knowledge, runtime registrations, and daemon worker state for this project will be removed.[/red]\n"
+        )
+        confirm = typer.prompt(f"Type '{project}' to confirm", default="")
+        if confirm != project:
+            console.print("[dim]Aborted.[/dim]")
+            raise typer.Exit(0)
+
+    settings = MySwatSettings()
+    client = DaemonClient(settings)
+    try:
+        result = client.cleanup_project(project=project)
+    except DaemonClientError as exc:
+        console.print(f"[red]{exc}[/red]")
+        console.print(f"[dim]Start the daemon first: myswat server[/dim]")
+        raise typer.Exit(1)
+
+    console.print(f"[green]Project '{result.get('project') or project}' removed.[/green]")
+    deleted = result.get("deleted") or {}
+    if isinstance(deleted, dict):
+        summary = ", ".join(
+            f"{key}={value}"
+            for key, value in deleted.items()
+            if isinstance(value, int) and value > 0
+        )
+        if summary:
+            console.print(f"[dim]Deleted: {summary}[/dim]")
+    removed_runtime_paths = result.get("removed_runtime_paths") or []
+    if isinstance(removed_runtime_paths, list) and removed_runtime_paths:
+        console.print(f"[dim]Removed runtime state: {', '.join(str(path) for path in removed_runtime_paths)}[/dim]")
+
+
+@app.command()
 def reset(
     project: str = typer.Option(None, "--project", "-p", help="Project slug (re-init after reset)"),
     repo_path: str = typer.Option(None, "--repo", "-r", help="Repo path for re-init"),
