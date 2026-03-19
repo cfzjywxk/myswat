@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 import typer
 
@@ -28,6 +29,8 @@ from myswat.workflow.review_loop import _parse_verdict
 _RUNTIME_LEASE_SECONDS = 300
 _ASSIGNMENT_LEASE_SECONDS = 300
 _KEEPALIVE_INTERVAL_SECONDS = 60.0
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _build_default_runtime_name(project_slug: str, role: str) -> str:
@@ -145,10 +148,12 @@ class _AssignmentKeepalive:
         assignment: dict[str, Any],
         mcp: MCPHTTPClient,
         runtime_registration_id: int,
+        cancel_runner: Callable[[], None] | None = None,
     ) -> None:
         self._assignment = assignment
         self._mcp = mcp
         self._runtime_registration_id = runtime_registration_id
+        self._cancel_runner = cancel_runner
         self._stop_event = threading.Event()
         self._error_lock = threading.Lock()
         self._error: Exception | None = None
@@ -187,7 +192,19 @@ class _AssignmentKeepalive:
                     runtime_registration_id=self._runtime_registration_id,
                 )
             except Exception as exc:
+                LOGGER.warning(
+                    "Worker assignment keepalive failed: kind=%s stage_run_id=%s review_cycle_id=%s error=%s",
+                    self._assignment.get("assignment_kind"),
+                    self._assignment.get("stage_run_id"),
+                    self._assignment.get("review_cycle_id"),
+                    exc,
+                )
                 self._record_error(exc)
+                if self._cancel_runner is not None:
+                    try:
+                        self._cancel_runner()
+                    except Exception:  # pragma: no cover - defensive only
+                        LOGGER.exception("Failed to cancel runner after keepalive error")
                 return
 
 
@@ -200,10 +217,12 @@ def _invoke_runner_with_keepalive(
     mcp: MCPHTTPClient,
     runtime_registration_id: int,
 ) -> Any:
+    cancel_runner = getattr(runner, "cancel", None)
     keepalive = _AssignmentKeepalive(
         assignment=assignment,
         mcp=mcp,
         runtime_registration_id=runtime_registration_id,
+        cancel_runner=cancel_runner if callable(cancel_runner) else None,
     )
     keepalive.start()
     runner_error: Exception | None = None

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -43,6 +44,28 @@ from myswat.server.contracts import (
 )
 
 
+_SYSTEM_CONTEXT_EVENT_LIMIT = 20
+_SYSTEM_CONTEXT_ARTIFACT_LIMIT = 3
+_SYSTEM_CONTEXT_KNOWLEDGE_LIMIT = 5
+_SNAPSHOT_ARTIFACT_LIMIT = 5
+_SYSTEM_CONTEXT_SUMMARY_TEXT_LIMIT = 4_000
+_SYSTEM_CONTEXT_ARTIFACT_TEXT_LIMIT = 8_192
+_SYSTEM_CONTEXT_EVENT_TEXT_LIMIT = 2_000
+_SYSTEM_CONTEXT_KNOWLEDGE_TEXT_LIMIT = 2_000
+_TERMINAL_STAGE_STATUSES = frozenset({"completed", "blocked", "cancelled", "failed"})
+_TERMINAL_REVIEW_STATUSES = frozenset({"completed", "blocked", "cancelled"})
+
+
+@dataclass(frozen=True)
+class _ContextBundle:
+    work_item: dict[str, Any]
+    project: dict[str, Any]
+    task_state: dict[str, Any]
+    artifacts: list[dict[str, Any]]
+    events: list[Any]
+    knowledge: list[dict[str, Any]]
+
+
 class _CoordinationNotifier:
     """Condition-based notifier for in-process orchestrator waits."""
 
@@ -50,10 +73,26 @@ class _CoordinationNotifier:
         self._condition = threading.Condition()
         self._stage_tokens: dict[int, int] = {}
         self._review_tokens: dict[int, int] = {}
+        self._stage_waiters: dict[int, int] = {}
+        self._review_waiters: dict[int, int] = {}
 
     def snapshot_stage(self, stage_run_id: int) -> int:
         with self._condition:
+            self._stage_waiters[stage_run_id] = self._stage_waiters.get(stage_run_id, 0) + 1
             return self._stage_tokens.get(stage_run_id, 0)
+
+    def release_stage(self, stage_run_id: int) -> None:
+        with self._condition:
+            remaining = self._stage_waiters.get(stage_run_id, 0) - 1
+            if remaining > 0:
+                self._stage_waiters[stage_run_id] = remaining
+                return
+            self._stage_waiters.pop(stage_run_id, None)
+            self._stage_tokens.pop(stage_run_id, None)
+
+    def has_stage_waiter(self, stage_run_id: int) -> bool:
+        with self._condition:
+            return self._stage_waiters.get(stage_run_id, 0) > 0
 
     def wait_for_stage_change(
         self,
@@ -72,12 +111,31 @@ class _CoordinationNotifier:
 
     def notify_stage(self, stage_run_id: int) -> None:
         with self._condition:
+            if self._stage_waiters.get(stage_run_id, 0) <= 0:
+                return
             self._stage_tokens[stage_run_id] = self._stage_tokens.get(stage_run_id, 0) + 1
             self._condition.notify_all()
 
     def snapshot_reviews(self, cycle_ids: list[int]) -> dict[int, int]:
         with self._condition:
-            return {cycle_id: self._review_tokens.get(cycle_id, 0) for cycle_id in cycle_ids}
+            unique_cycle_ids = list(dict.fromkeys(cycle_ids))
+            for cycle_id in unique_cycle_ids:
+                self._review_waiters[cycle_id] = self._review_waiters.get(cycle_id, 0) + 1
+            return {cycle_id: self._review_tokens.get(cycle_id, 0) for cycle_id in unique_cycle_ids}
+
+    def release_reviews(self, cycle_ids: list[int]) -> None:
+        with self._condition:
+            for cycle_id in dict.fromkeys(cycle_ids):
+                remaining = self._review_waiters.get(cycle_id, 0) - 1
+                if remaining > 0:
+                    self._review_waiters[cycle_id] = remaining
+                    continue
+                self._review_waiters.pop(cycle_id, None)
+                self._review_tokens.pop(cycle_id, None)
+
+    def has_review_waiter(self, cycle_id: int) -> bool:
+        with self._condition:
+            return self._review_waiters.get(cycle_id, 0) > 0
 
     def wait_for_review_change(
         self,
@@ -101,8 +159,32 @@ class _CoordinationNotifier:
 
     def notify_review(self, cycle_id: int) -> None:
         with self._condition:
+            if self._review_waiters.get(cycle_id, 0) <= 0:
+                return
             self._review_tokens[cycle_id] = self._review_tokens.get(cycle_id, 0) + 1
             self._condition.notify_all()
+
+
+def _clip_context_text(value: str, limit: int) -> str:
+    text = str(value or "")
+    if limit <= 0 or len(text) <= limit:
+        return text
+
+    base_marker = "\n...[truncated]...\n"
+    budget = max(0, limit - len(base_marker))
+    if budget <= 0:
+        return text[:limit]
+
+    head = budget // 2
+    tail = budget - head
+    truncated_chars = max(0, len(text) - head - tail)
+    marker = f"\n...[truncated {truncated_chars} chars]...\n"
+    budget = max(0, limit - len(marker))
+    head = budget // 2
+    tail = budget - head
+    truncated_chars = max(0, len(text) - head - tail)
+    marker = f"\n...[truncated {truncated_chars} chars]...\n"
+    return text[:head] + marker + text[-tail:]
 
 
 class MySwatToolService:
@@ -130,11 +212,18 @@ class MySwatToolService:
 
     def notify_work_item_coordination_changed(self, work_item_id: int) -> None:
         for stage_run in self._store.list_stage_runs(work_item_id):
-            if stage_run.id is not None:
-                self._notifier.notify_stage(int(stage_run.id))
+            if stage_run.id is None:
+                continue
+            stage_run_id = int(stage_run.id)
+            status = str(stage_run.status or "")
+            if status not in _TERMINAL_STAGE_STATUSES or self._notifier.has_stage_waiter(stage_run_id):
+                self._notifier.notify_stage(stage_run_id)
         for review_cycle in self._store.get_review_cycles(work_item_id):
             cycle_id = int(review_cycle.get("id") or 0)
-            if cycle_id > 0:
+            if cycle_id <= 0:
+                continue
+            status = str(review_cycle.get("status") or "")
+            if status not in _TERMINAL_REVIEW_STATUSES or self._notifier.has_review_waiter(cycle_id):
                 self._notifier.notify_review(cycle_id)
 
     def resolve_project(self, request: ProjectLookupRequest) -> ProjectLookupResult:
@@ -167,115 +256,119 @@ class MySwatToolService:
         )
 
     def get_work_item_snapshot(self, request: WorkItemSnapshotRequest) -> dict[str, Any]:
-        work_item = self._store.get_work_item(request.work_item_id) or {}
-        project_id = int(work_item.get("project_id") or 0)
-        project = self._store.get_project(project_id) or {}
-        task_state = self._store.get_work_item_state(request.work_item_id)
-        artifacts = self._store.list_artifacts(request.work_item_id)
-        events = self._store.list_coordination_events(
-            request.work_item_id,
+        bundle = self._load_context_bundle(
+            work_item_id=request.work_item_id,
             stage_name=request.stage_name,
-            limit=8,
+            focus=request.focus,
         )
-        knowledge: list[dict[str, Any]] = []
-        if project_id and request.focus.strip():
-            try:
-                knowledge = self._store.search_knowledge(
-                    project_id=project_id,
-                    query=request.focus[:400],
-                    limit=5,
-                    use_vector=False,
-                    use_fulltext=True,
-                )
-            except Exception:
-                knowledge = []
 
         return {
-            "project": project,
-            "work_item": work_item,
-            "task_state": task_state,
-            "recent_artifacts": artifacts[-5:],
-            "recent_events": [event.model_dump() for event in reversed(events)],
-            "knowledge": knowledge,
+            "project": bundle.project,
+            "work_item": bundle.work_item,
+            "task_state": bundle.task_state,
+            "recent_artifacts": bundle.artifacts[-_SNAPSHOT_ARTIFACT_LIMIT:],
+            "recent_events": [event.model_dump() for event in reversed(bundle.events)],
+            "knowledge": bundle.knowledge,
             "system_context": self._build_system_context(
-                work_item_id=request.work_item_id,
+                bundle,
                 stage_name=request.stage_name,
-                focus=request.focus,
             ),
         }
 
-    def _build_system_context(
+    def _load_context_bundle(
         self,
         *,
         work_item_id: int,
         stage_name: str | None,
         focus: str,
-    ) -> str:
+    ) -> _ContextBundle:
         work_item = self._store.get_work_item(work_item_id) or {}
         project = self._store.get_project(int(work_item.get("project_id") or 0)) or {}
-        parts: list[str] = [
-            "You are working through MySwat MCP. "
-            "Do not assume hidden chat history. "
-            "Rely on the repository state, persisted artifacts, and coordination records returned here.",
-        ]
-
-        if project:
-            parts.append(
-                "## Project\n"
-                f"- Name: {project.get('name', '')}\n"
-                f"- Repo: {project.get('repo_path', '')}\n"
-                f"- Current stage: {stage_name or ''}"
-            )
-
-        task_state = self._store.get_work_item_state(work_item_id)
-        if task_state:
-            parts.append(
-                "## Work Item State\n"
-                f"- Recorded stage: {task_state.get('current_stage', '')}\n"
-                f"- Latest summary: {str(task_state.get('latest_summary') or '')}\n"
-                f"- Next todos: {(task_state.get('next_todos') or [])[:5]}\n"
-                f"- Open issues: {(task_state.get('open_issues') or [])[:5]}"
-            )
-
+        task_state = self._store.get_work_item_state(work_item_id) or {}
         artifacts = self._store.list_artifacts(work_item_id)
-        if artifacts:
-            rendered = []
-            for artifact in artifacts[-3:]:
-                rendered.append(
-                    f"- {artifact.get('artifact_type')} / {artifact.get('title') or 'untitled'} "
-                    f"(iteration {artifact.get('iteration')}): "
-                    f"{str(artifact.get('content') or '')}"
-                )
-            parts.append("## Recent Artifacts\n" + "\n".join(rendered))
-
-        events = self._store.list_coordination_events(work_item_id, stage_name=stage_name, limit=8)
-        if events:
-            rendered = []
-            for event in reversed(events):
-                rendered.append(
-                    f"- [{event.stage_name or '-'}] {event.event_type}: {event.summary}"
-                )
-            parts.append("## Recent Coordination Events\n" + "\n".join(rendered))
-
+        events = self._store.list_coordination_events(
+            work_item_id,
+            stage_name=stage_name,
+            limit=_SYSTEM_CONTEXT_EVENT_LIMIT,
+        )
+        knowledge: list[dict[str, Any]] = []
         project_id = int(work_item.get("project_id") or 0)
         if project_id and focus.strip():
             try:
                 knowledge = self._store.search_knowledge(
                     project_id=project_id,
                     query=focus[:400],
-                    limit=5,
+                    limit=_SYSTEM_CONTEXT_KNOWLEDGE_LIMIT,
                     use_vector=False,
                     use_fulltext=True,
                 )
             except Exception:
                 knowledge = []
-            if knowledge:
-                rendered = []
-                for row in knowledge:
-                    rendered.append(
-                        f"- {row.get('title', '')}: {str(row.get('content') or '')}"
-                    )
-                parts.append("## Relevant Project Knowledge\n" + "\n".join(rendered))
+        return _ContextBundle(
+            work_item=work_item,
+            project=project,
+            task_state=task_state,
+            artifacts=artifacts,
+            events=events,
+            knowledge=knowledge,
+        )
+
+    def _build_system_context(
+        self,
+        bundle: _ContextBundle,
+        *,
+        stage_name: str | None,
+    ) -> str:
+        parts: list[str] = [
+            "You are working through MySwat MCP. "
+            "Do not assume hidden chat history. "
+            "Rely on the repository state, persisted artifacts, and coordination records returned here.",
+        ]
+
+        if bundle.project:
+            parts.append(
+                "## Project\n"
+                f"- Name: {bundle.project.get('name', '')}\n"
+                f"- Repo: {bundle.project.get('repo_path', '')}\n"
+                f"- Current stage: {stage_name or ''}"
+            )
+
+        if bundle.task_state:
+            parts.append(
+                "## Work Item State\n"
+                f"- Recorded stage: {bundle.task_state.get('current_stage', '')}\n"
+                f"- Latest summary: {_clip_context_text(str(bundle.task_state.get('latest_summary') or ''), _SYSTEM_CONTEXT_SUMMARY_TEXT_LIMIT)}\n"
+                f"- Next todos: {(bundle.task_state.get('next_todos') or [])[:5]}\n"
+                f"- Open issues: {(bundle.task_state.get('open_issues') or [])[:5]}"
+            )
+
+        if bundle.artifacts:
+            rendered = []
+            for artifact in bundle.artifacts[-_SYSTEM_CONTEXT_ARTIFACT_LIMIT:]:
+                rendered.append(
+                    f"- {artifact.get('artifact_type')} / {artifact.get('title') or 'untitled'} "
+                    f"(iteration {artifact.get('iteration')}): "
+                    f"{_clip_context_text(str(artifact.get('content') or ''), _SYSTEM_CONTEXT_ARTIFACT_TEXT_LIMIT)}"
+                )
+            parts.append("## Recent Artifacts\n" + "\n".join(rendered))
+
+        if bundle.events:
+            rendered = []
+            for event in reversed(bundle.events):
+                rendered.append(
+                    f"- [{event.stage_name or '-'}] {event.event_type}: "
+                    f"{_clip_context_text(str(event.summary or ''), _SYSTEM_CONTEXT_EVENT_TEXT_LIMIT)}"
+                )
+            parts.append("## Recent Coordination Events\n" + "\n".join(rendered))
+
+        if bundle.knowledge:
+            rendered = []
+            for row in bundle.knowledge:
+                rendered.append(
+                    f"- {row.get('title', '')}: "
+                    f"{_clip_context_text(str(row.get('content') or ''), _SYSTEM_CONTEXT_KNOWLEDGE_TEXT_LIMIT)}"
+                )
+            parts.append("## Relevant Project Knowledge\n" + "\n".join(rendered))
 
         return "\n\n".join(part for part in parts if part.strip())
 
@@ -386,44 +479,47 @@ class MySwatToolService:
     ) -> StageRunCompletion:
         started_at = time.monotonic()
         observed_token = self._notifier.snapshot_stage(request.stage_run_id)
-        while True:
-            stage_run = self._store.get_stage_run(request.stage_run_id)
-            if not stage_run:
-                raise ValueError(f"Stage run not found: {request.stage_run_id}")
+        try:
+            while True:
+                stage_run = self._store.get_stage_run(request.stage_run_id)
+                if not stage_run:
+                    raise ValueError(f"Stage run not found: {request.stage_run_id}")
 
-            if stage_run.status in {"completed", "blocked", "cancelled", "failed"}:
-                artifact_id = stage_run.output_artifact_id
-                artifact_content = ""
-                if artifact_id is not None:
-                    artifact = self._store.get_artifact(artifact_id) or {}
-                    artifact_content = str(artifact.get("content") or "")
-                elif stage_run.metadata_json and stage_run.metadata_json.get("artifact_type"):
-                    artifact = self._store.get_latest_artifact_by_type(
-                        stage_run.work_item_id,
-                        str(stage_run.metadata_json.get("artifact_type")),
-                    )
-                    if artifact:
-                        artifact_id = int(artifact["id"])
+                if stage_run.status in _TERMINAL_STAGE_STATUSES:
+                    artifact_id = stage_run.output_artifact_id
+                    artifact_content = ""
+                    if artifact_id is not None:
+                        artifact = self._store.get_artifact(artifact_id) or {}
                         artifact_content = str(artifact.get("content") or "")
-                return StageRunCompletion(
-                    stage_run_id=int(stage_run.id or request.stage_run_id),
-                    work_item_id=int(stage_run.work_item_id),
-                    stage_name=str(stage_run.stage_name),
-                    status=str(stage_run.status),
-                    summary=str(stage_run.summary or ""),
-                    artifact_id=artifact_id,
-                    artifact_content=artifact_content,
-                    metadata_json=stage_run.metadata_json,
-                )
+                    elif stage_run.metadata_json and stage_run.metadata_json.get("artifact_type"):
+                        artifact = self._store.get_latest_artifact_by_type(
+                            stage_run.work_item_id,
+                            str(stage_run.metadata_json.get("artifact_type")),
+                        )
+                        if artifact:
+                            artifact_id = int(artifact["id"])
+                            artifact_content = str(artifact.get("content") or "")
+                    return StageRunCompletion(
+                        stage_run_id=int(stage_run.id or request.stage_run_id),
+                        work_item_id=int(stage_run.work_item_id),
+                        stage_name=str(stage_run.stage_name),
+                        status=str(stage_run.status),
+                        summary=str(stage_run.summary or ""),
+                        artifact_id=artifact_id,
+                        artifact_content=artifact_content,
+                        metadata_json=stage_run.metadata_json,
+                    )
 
-            remaining = self._remaining_timeout(started_at, request.timeout_seconds)
-            if remaining is not None and remaining <= 0:
-                raise TimeoutError(f"Timed out waiting for stage run {request.stage_run_id}")
-            observed_token = self._notifier.wait_for_stage_change(
-                stage_run_id=request.stage_run_id,
-                observed_token=observed_token,
-                timeout_seconds=remaining,
-            )
+                remaining = self._remaining_timeout(started_at, request.timeout_seconds)
+                if remaining is not None and remaining <= 0:
+                    raise TimeoutError(f"Timed out waiting for stage run {request.stage_run_id}")
+                observed_token = self._notifier.wait_for_stage_change(
+                    stage_run_id=request.stage_run_id,
+                    observed_token=observed_token,
+                    timeout_seconds=remaining,
+                )
+        finally:
+            self._notifier.release_stage(request.stage_run_id)
 
     def claim_next_assignment(
         self,
@@ -441,6 +537,11 @@ class MySwatToolService:
             focus = str(metadata.get("task_focus") or "")
             artifact_type = metadata.get("artifact_type")
             artifact_title = metadata.get("artifact_title")
+            bundle = self._load_context_bundle(
+                work_item_id=int(stage_run.work_item_id),
+                stage_name=str(stage_run.stage_name),
+                focus=focus,
+            )
             return AssignmentEnvelope(
                 assignment_kind="stage",
                 runtime_registration_id=request.runtime_registration_id,
@@ -454,9 +555,8 @@ class MySwatToolService:
                 prompt=prompt,
                 focus=focus,
                 system_context=self._build_system_context(
-                    work_item_id=int(stage_run.work_item_id),
+                    bundle,
                     stage_name=str(stage_run.stage_name),
-                    focus=focus,
                 ),
                 artifact_type=str(artifact_type) if artifact_type else None,
                 artifact_title=str(artifact_title) if artifact_title else None,
@@ -478,6 +578,11 @@ class MySwatToolService:
             if artifact:
                 metadata_json["artifact_content"] = str(artifact.get("content") or "")
                 metadata_json["artifact_title"] = artifact.get("title")
+            bundle = self._load_context_bundle(
+                work_item_id=int(review["work_item_id"]),
+                stage_name=str(review.get("stage_name") or ""),
+                focus=focus,
+            )
             return AssignmentEnvelope(
                 assignment_kind="review",
                 runtime_registration_id=request.runtime_registration_id,
@@ -491,9 +596,8 @@ class MySwatToolService:
                 prompt=prompt,
                 focus=focus,
                 system_context=self._build_system_context(
-                    work_item_id=int(review["work_item_id"]),
+                    bundle,
                     stage_name=str(review.get("stage_name") or ""),
-                    focus=focus,
                 ),
                 artifact_id=int(review.get("artifact_id") or 0) or None,
                 metadata_json=metadata_json,
@@ -669,40 +773,43 @@ class MySwatToolService:
     ) -> list[ReviewVerdictEnvelope]:
         started_at = time.monotonic()
         observed_tokens = self._notifier.snapshot_reviews(request.cycle_ids)
-        while True:
-            cycles = self._store.get_review_cycles_by_ids(request.cycle_ids)
-            if len(cycles) == len(request.cycle_ids):
-                terminal = True
-                verdicts: list[ReviewVerdictEnvelope] = []
-                for cycle in cycles:
-                    verdict = str(cycle.get("verdict") or "pending")
-                    status = str(cycle.get("status") or "pending")
-                    if verdict == "pending" or status not in {"completed", "blocked", "cancelled"}:
-                        terminal = False
-                        break
-                    verdict_json = cycle.get("verdict_json") or {}
-                    issues = verdict_json.get("issues") if isinstance(verdict_json, dict) else []
-                    summary = verdict_json.get("summary") if isinstance(verdict_json, dict) else ""
-                    verdicts.append(
-                        ReviewVerdictEnvelope(
-                            cycle_id=int(cycle["id"]),
-                            reviewer_role=str(cycle.get("reviewer_role") or ""),
-                            verdict=verdict,  # type: ignore[arg-type]
-                            issues=[str(item) for item in (issues or [])],
-                            summary=str(summary or ""),
+        try:
+            while True:
+                cycles = self._store.get_review_cycles_by_ids(request.cycle_ids)
+                if len(cycles) == len(request.cycle_ids):
+                    terminal = True
+                    verdicts: list[ReviewVerdictEnvelope] = []
+                    for cycle in cycles:
+                        verdict = str(cycle.get("verdict") or "pending")
+                        status = str(cycle.get("status") or "pending")
+                        if verdict == "pending" or status not in _TERMINAL_REVIEW_STATUSES:
+                            terminal = False
+                            break
+                        verdict_json = cycle.get("verdict_json") or {}
+                        issues = verdict_json.get("issues") if isinstance(verdict_json, dict) else []
+                        summary = verdict_json.get("summary") if isinstance(verdict_json, dict) else ""
+                        verdicts.append(
+                            ReviewVerdictEnvelope(
+                                cycle_id=int(cycle["id"]),
+                                reviewer_role=str(cycle.get("reviewer_role") or ""),
+                                verdict=verdict,  # type: ignore[arg-type]
+                                issues=[str(item) for item in (issues or [])],
+                                summary=str(summary or ""),
+                            )
                         )
-                    )
-                if terminal:
-                    return verdicts
+                    if terminal:
+                        return verdicts
 
-            remaining = self._remaining_timeout(started_at, request.timeout_seconds)
-            if remaining is not None and remaining <= 0:
-                raise TimeoutError("Timed out waiting for review verdicts")
-            observed_tokens = self._notifier.wait_for_review_change(
-                cycle_ids=request.cycle_ids,
-                observed_tokens=observed_tokens,
-                timeout_seconds=remaining,
-            )
+                remaining = self._remaining_timeout(started_at, request.timeout_seconds)
+                if remaining is not None and remaining <= 0:
+                    raise TimeoutError("Timed out waiting for review verdicts")
+                observed_tokens = self._notifier.wait_for_review_change(
+                    cycle_ids=request.cycle_ids,
+                    observed_tokens=observed_tokens,
+                    timeout_seconds=remaining,
+                )
+        finally:
+            self._notifier.release_reviews(request.cycle_ids)
 
     def publish_review_verdict(self, request: ReviewVerdictSubmission) -> dict[str, Any]:
         verdict_json = {

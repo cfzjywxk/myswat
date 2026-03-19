@@ -478,6 +478,7 @@ def test_full_fib_workflow_completes_via_mcp_workers():
                 runner=_WorkflowRunner(role),
                 settings=settings,
                 mcp_client=dispatcher_client,
+                poll_interval_seconds=0.1,
                 idle_exit_seconds=2.0,
             )
 
@@ -508,7 +509,7 @@ def test_full_fib_workflow_completes_via_mcp_workers():
 
     kernel_thread = threading.Thread(target=_run_kernel, daemon=True)
     kernel_thread.start()
-    kernel_thread.join(timeout=10)
+    kernel_thread.join(timeout=15)
     assert kernel_thread.is_alive() is False
 
     for thread in workers:

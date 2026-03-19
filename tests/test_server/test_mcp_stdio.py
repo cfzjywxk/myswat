@@ -14,6 +14,7 @@ from myswat.server.mcp_stdio import (
     MySwatMCPDispatcher,
     _read_message,
     _write_message,
+    dispatch_rpc_request,
     serve_stdio,
 )
 
@@ -145,6 +146,14 @@ def test_call_tool_rejects_unknown_tool():
 
     with pytest.raises(ValueError, match="Unknown tool: nope"):
         dispatcher.call_tool("nope", {})
+
+
+def test_dispatch_rpc_request_treats_initialized_as_notification():
+    dispatcher = MySwatMCPDispatcher(Mock())
+
+    result = dispatch_rpc_request(dispatcher, "initialized", {})
+
+    assert result is None
 
 
 def test_read_message_parses_length_prefixed_payload():

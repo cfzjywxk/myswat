@@ -18,7 +18,6 @@ from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console
 
 from myswat.agents.base import AgentRunner
-from myswat.agents.session_manager import SessionManager  # Legacy export kept for older tests.
 from myswat.cli.prompting import create_prompt_session, make_prompt_callback
 from myswat.cli.progress import TaskMonitorPromptBridge, _run_with_task_monitor
 from myswat.cli.workflow_display import WorkflowDisplay
@@ -440,7 +439,7 @@ def _run_workflow(
             f"[dim]Dev: {dev_agent['display_name']} ({dev_agent['cli_backend']}/{dev_agent['model_name']})[/dim]"
         )
         for qa_runtime in qa_runtimes:
-            qa_row = qa_runtime._agent_row
+            qa_row = qa_runtime.agent_row
             console.print(
                 f"[dim]QA:  {qa_row['display_name']} ({qa_row['cli_backend']}/{qa_row['model_name']})[/dim]"
             )

@@ -245,6 +245,32 @@ def _write_message(stdout, payload: dict[str, Any]) -> None:
     stdout.flush()
 
 
+def dispatch_rpc_request(
+    dispatcher: MySwatMCPDispatcher,
+    method: str,
+    params: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    params = params or {}
+    if method == "initialize":
+        return {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "myswat", "version": "0.1.0"},
+        }
+    if method == "tools/list":
+        return dispatcher.list_tools()
+    if method == "tools/call":
+        return dispatcher.call_tool(
+            str(params.get("name") or ""),
+            params.get("arguments") or {},
+        )
+    if method == "ping":
+        return {}
+    if method == "initialized":
+        return None
+    raise ValueError(f"Unsupported MCP method: {method}")
+
+
 def serve_stdio(service: MySwatToolService) -> int:
     dispatcher = MySwatMCPDispatcher(service)
     stdin = sys.stdin.buffer
@@ -260,26 +286,12 @@ def serve_stdio(service: MySwatToolService) -> int:
         params = message.get("params") or {}
 
         try:
-            if method == "initialize":
-                result = {
-                    "protocolVersion": "2025-03-26",
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "myswat", "version": "0.1.0"},
-                }
-            elif method == "tools/list":
-                result = dispatcher.list_tools()
-            elif method == "tools/call":
-                result = dispatcher.call_tool(
-                    str(params.get("name") or ""),
-                    params.get("arguments") or {},
-                )
-            elif method == "ping":
-                result = {}
-            elif method == "initialized":
-                continue
-            else:
-                raise ValueError(f"Unsupported MCP method: {method}")
-            if request_id is not None:
+            result = dispatch_rpc_request(
+                dispatcher,
+                str(method or ""),
+                params,
+            )
+            if request_id is not None and result is not None:
                 _write_message(stdout, {"jsonrpc": "2.0", "id": request_id, "result": result})
         except Exception as exc:
             if request_id is None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -12,7 +13,10 @@ import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
+
+from pydantic import ValidationError
 
 from myswat.cli.init_cmd import _slugify, run_init
 from myswat.cli.work_cmd import _run_workflow
@@ -20,12 +24,15 @@ from myswat.config.settings import MySwatSettings
 from myswat.db.connection import TiDBPool
 from myswat.db.schema import ensure_schema
 from myswat.memory.store import MemoryStore
-from myswat.server.mcp_stdio import MySwatMCPDispatcher
+from myswat.server.mcp_stdio import MySwatMCPDispatcher, dispatch_rpc_request
 from myswat.server.service import MySwatToolService
 from myswat.workflow.modes import WorkMode
 
 _ACTIVE_WORK_ITEM_STATUSES = frozenset({"pending", "in_progress", "review"})
 _TERMINAL_WORK_ITEM_STATUSES = frozenset({"approved", "blocked", "cancelled", "completed", "paused"})
+_REQUEST_SLOW_SECONDS = 1.0
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _source_root() -> Path:
@@ -75,7 +82,7 @@ class MySwatDaemon:
         )
         self._service = MySwatToolService(self._store)
         self._dispatcher = MySwatMCPDispatcher(self._service)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._workers: dict[tuple[str, str], ManagedWorkerProcess] = {}
         self._workflows: dict[int, threading.Thread] = {}
         self._workflow_controls: dict[int, ManagedWorkflow] = {}
@@ -422,26 +429,27 @@ class MySwatDaemon:
         mode: str,
     ) -> dict:
         work_mode = WorkMode(mode)
-        active_item = self._find_active_work_item(project)
-        if active_item is not None:
-            raise ValueError(
-                f"Project '{project}' already has an active workflow "
-                f"(work item {active_item['id']}, status={active_item['status']})."
+        with self._lock:
+            active_item = self._find_active_work_item(project)
+            if active_item is not None:
+                raise ValueError(
+                    f"Project '{project}' already has an active workflow "
+                    f"(work item {active_item['id']}, status={active_item['status']})."
+                )
+            roles = self.ensure_workers(project_slug=project, mode=work_mode, workdir=workdir)
+            work_item_id = self._create_work_item(
+                project_slug=project,
+                requirement=requirement,
+                workdir=workdir,
+                mode=work_mode,
             )
-        roles = self.ensure_workers(project_slug=project, mode=work_mode, workdir=workdir)
-        work_item_id = self._create_work_item(
-            project_slug=project,
-            requirement=requirement,
-            workdir=workdir,
-            mode=work_mode,
-        )
-        self._start_workflow_thread(
-            project_slug=project,
-            requirement=requirement,
-            work_item_id=work_item_id,
-            workdir=workdir,
-            mode=work_mode,
-        )
+            self._start_workflow_thread(
+                project_slug=project,
+                requirement=requirement,
+                work_item_id=work_item_id,
+                workdir=workdir,
+                mode=work_mode,
+            )
         return {
             "ok": True,
             "work_item_id": work_item_id,
@@ -601,6 +609,45 @@ class MySwatDaemon:
             "removed_runtime_paths": removed_runtime_paths,
         }
 
+    @staticmethod
+    def _public_error_message(exc: Exception) -> str:
+        if isinstance(exc, (ValueError, ValidationError)):
+            return str(exc)
+        return "internal server error"
+
+    def handle_mcp_request(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        request_id = payload.get("id")
+        method = str(payload.get("method") or "")
+        params = payload.get("params") or {}
+        try:
+            result = dispatch_rpc_request(
+                self._dispatcher,
+                method,
+                params if isinstance(params, dict) else {},
+            )
+        except Exception as exc:
+            if isinstance(exc, (ValueError, ValidationError)):
+                LOGGER.warning("MCP request failed: method=%s error=%s", method, exc)
+            else:
+                LOGGER.exception("MCP request failed: method=%s", method)
+            if request_id is None:
+                return None
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {
+                    "code": -32000,
+                    "message": self._public_error_message(exc),
+                },
+            }
+        if request_id is None or result is None:
+            return None
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": result,
+        }
+
     def serve_forever(self) -> None:
         self._ensure_worker_supervisor_started()
         daemon = self
@@ -610,6 +657,48 @@ class MySwatDaemon:
 
             def log_message(self, format: str, *args) -> None:
                 return
+
+            def _request_duration(self, started_at: float) -> float:
+                return max(0.0, time.monotonic() - started_at)
+
+            def _log_slow_request(self, *, path: str, status: int, started_at: float) -> None:
+                duration = self._request_duration(started_at)
+                if duration < _REQUEST_SLOW_SECONDS:
+                    return
+                LOGGER.warning(
+                    "Slow daemon request: %s %s status=%s duration=%.3fs",
+                    self.command,
+                    path,
+                    status,
+                    duration,
+                )
+
+            def _log_request_failure(
+                self,
+                *,
+                path: str,
+                status: int,
+                started_at: float,
+                exc: Exception,
+            ) -> None:
+                duration = self._request_duration(started_at)
+                if isinstance(exc, (ValueError, ValidationError)):
+                    LOGGER.warning(
+                        "Daemon request failed: %s %s status=%s duration=%.3fs error=%s",
+                        self.command,
+                        path,
+                        status,
+                        duration,
+                        exc,
+                    )
+                    return
+                LOGGER.exception(
+                    "Daemon request failed: %s %s status=%s duration=%.3fs",
+                    self.command,
+                    path,
+                    status,
+                    duration,
+                )
 
             def _read_json(self) -> dict:
                 length = int(self.headers.get("Content-Length", "0") or 0)
@@ -628,13 +717,17 @@ class MySwatDaemon:
                 self.wfile.write(body)
 
             def do_GET(self) -> None:
+                started_at = time.monotonic()
                 parsed = urlparse(self.path)
                 if parsed.path == "/api/health":
                     self._write_json(200, {"ok": True})
+                    self._log_slow_request(path=parsed.path, status=200, started_at=started_at)
                     return
                 self._write_json(404, {"error": "not found"})
+                self._log_slow_request(path=parsed.path, status=404, started_at=started_at)
 
             def do_POST(self) -> None:
+                started_at = time.monotonic()
                 parsed = urlparse(self.path)
                 try:
                     payload = self._read_json()
@@ -645,6 +738,7 @@ class MySwatDaemon:
                             description=payload.get("description"),
                         )
                         self._write_json(200, result)
+                        self._log_slow_request(path=parsed.path, status=200, started_at=started_at)
                         return
                     if parsed.path == "/api/work":
                         result = daemon.handle_work(
@@ -654,6 +748,7 @@ class MySwatDaemon:
                             mode=str(payload.get("mode") or WorkMode.full.value),
                         )
                         self._write_json(200, result)
+                        self._log_slow_request(path=parsed.path, status=200, started_at=started_at)
                         return
                     if parsed.path == "/api/work-item":
                         result = daemon.handle_get_work_item(
@@ -661,6 +756,7 @@ class MySwatDaemon:
                             work_item_id=int(payload.get("work_item_id") or 0),
                         )
                         self._write_json(200, result)
+                        self._log_slow_request(path=parsed.path, status=200, started_at=started_at)
                         return
                     if parsed.path == "/api/work-control":
                         result = daemon.handle_control_work(
@@ -669,39 +765,32 @@ class MySwatDaemon:
                             action=str(payload.get("action") or "cancel"),
                         )
                         self._write_json(200, result)
+                        self._log_slow_request(path=parsed.path, status=200, started_at=started_at)
                         return
                     if parsed.path == "/api/project-cleanup":
                         result = daemon.handle_cleanup_project(
                             project=str(payload.get("project") or ""),
                         )
                         self._write_json(200, result)
+                        self._log_slow_request(path=parsed.path, status=200, started_at=started_at)
                         return
                     if parsed.path == "/mcp":
-                        request_id = payload.get("id")
-                        method = payload.get("method")
-                        params = payload.get("params") or {}
-                        if method == "initialize":
-                            result = {
-                                "protocolVersion": "2025-03-26",
-                                "capabilities": {"tools": {}},
-                                "serverInfo": {"name": "myswat", "version": "0.1.0"},
-                            }
-                        elif method == "tools/list":
-                            result = daemon._dispatcher.list_tools()
-                        elif method == "tools/call":
-                            result = daemon._dispatcher.call_tool(
-                                str(params.get("name") or ""),
-                                params.get("arguments") or {},
-                            )
-                        elif method == "ping":
-                            result = {}
-                        else:
-                            raise ValueError(f"Unsupported method: {method}")
-                        self._write_json(200, {"jsonrpc": "2.0", "id": request_id, "result": result})
+                        response = daemon.handle_mcp_request(payload)
+                        if response is None:
+                            self._write_json(202, {})
+                            self._log_slow_request(path=parsed.path, status=202, started_at=started_at)
+                            return
+                        self._write_json(200, response)
+                        self._log_slow_request(path=parsed.path, status=200, started_at=started_at)
                         return
                     self._write_json(404, {"error": "not found"})
+                    self._log_slow_request(path=parsed.path, status=404, started_at=started_at)
+                except (ValueError, ValidationError) as exc:
+                    self._log_request_failure(path=parsed.path, status=400, started_at=started_at, exc=exc)
+                    self._write_json(400, {"error": str(exc)})
                 except Exception as exc:
-                    self._write_json(500, {"error": str(exc)})
+                    self._log_request_failure(path=parsed.path, status=500, started_at=started_at, exc=exc)
+                    self._write_json(500, {"error": "internal server error"})
 
         httpd = ThreadingHTTPServer(
             (self._settings.server.host, self._settings.server.port),

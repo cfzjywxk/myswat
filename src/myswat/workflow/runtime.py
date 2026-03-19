@@ -17,18 +17,8 @@ class WorkflowRuntime:
         self,
         *,
         agent_row: dict[str, Any],
-        store: object | None = None,
-        runner: object | None = None,
-        project_id: int | None = None,
-        work_item_id: int | None = None,
-        workdir: str | None = None,
     ) -> None:
         self._agent_row = agent_row
-        self._store = store
-        self._runner = runner
-        self._project_id = project_id
-        self._work_item_id = work_item_id
-        self._workdir = workdir
 
     @property
     def agent_id(self) -> int:

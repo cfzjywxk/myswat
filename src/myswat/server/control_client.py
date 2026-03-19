@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from myswat.config.settings import MySwatSettings
@@ -23,6 +23,23 @@ class DaemonClient:
     def base_url(self) -> str:
         return self._base_url
 
+    @staticmethod
+    def _parse_error_body(body: str) -> str | None:
+        if not body:
+            return None
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError:
+            return body[:200]
+        if isinstance(parsed, dict):
+            error = parsed.get("error")
+            if isinstance(error, dict):
+                return str(error.get("message") or error)
+            if error:
+                return str(error)
+            return str(parsed)
+        return str(parsed)
+
     def _request(self, *, method: str, path: str, payload: dict | None = None) -> dict:
         data = None
         headers = {}
@@ -38,6 +55,10 @@ class DaemonClient:
         try:
             with urlopen(request, timeout=self._timeout) as response:
                 body = response.read().decode("utf-8")
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            message = self._parse_error_body(body) or str(exc)
+            raise DaemonClientError(message) from exc
         except URLError as exc:
             raise DaemonClientError(f"MySwat daemon is unavailable at {self._base_url}: {exc}") from exc
         if not body:

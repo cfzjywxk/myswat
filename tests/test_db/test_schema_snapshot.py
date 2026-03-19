@@ -30,7 +30,7 @@ def test_knowledge_snapshot_uses_final_vector_and_metadata_fields() -> None:
 
 
 def test_review_schema_uses_final_artifact_and_unique_key_shape() -> None:
-    assert "ENUM('proposal', 'diff', 'patch', 'test_plan', 'design_doc', 'phase_result')" in SQL
+    assert "artifact_type   VARCHAR(64) NOT NULL" in SQL
     assert "updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP" in SQL
     assert "UNIQUE KEY uk_artifact_reviewer (artifact_id, reviewer_agent_id)" in SQL
 

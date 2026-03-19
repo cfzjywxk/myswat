@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import myswat.server.service as service_module
 from myswat.memory.store import MemoryStore
 from myswat.models.workflow_runtime import StageRun
 from myswat.server.contracts import (
@@ -24,6 +26,7 @@ from myswat.server.contracts import (
     StageRunStart,
     StageRunUpdate,
     StatusReport,
+    WorkItemSnapshotRequest,
 )
 from myswat.server.service import MySwatToolService
 
@@ -57,6 +60,207 @@ def test_get_recent_artifacts_delegates_to_store():
 
     assert result == [{"artifact_type": "patch"}]
     store.get_recent_artifacts_for_project.assert_called_once_with(project_id=9, limit=2)
+
+
+def test_get_work_item_snapshot_reuses_single_context_bundle_fetch():
+    store = Mock(spec=MemoryStore)
+    store.get_work_item.return_value = {"id": 17, "project_id": 9}
+    store.get_project.return_value = {"id": 9, "name": "proj", "repo_path": "/tmp/repo"}
+    store.get_work_item_state.return_value = {"current_stage": "design"}
+    store.list_artifacts.return_value = [{"artifact_type": "design_doc", "content": "..."}, {"artifact_type": "plan", "content": "Phase 1"}]
+    store.list_coordination_events.return_value = []
+    store.search_knowledge.return_value = [{"title": "decision", "content": "Use staged review."}]
+    service = MySwatToolService(store)
+
+    result = service.get_work_item_snapshot(
+        WorkItemSnapshotRequest(
+            work_item_id=17,
+            stage_name="design",
+            focus="staged review",
+        )
+    )
+
+    assert result["work_item"]["id"] == 17
+    assert store.get_work_item.call_count == 1
+    assert store.get_project.call_count == 1
+    assert store.get_work_item_state.call_count == 1
+    assert store.list_artifacts.call_count == 1
+    assert store.list_coordination_events.call_count == 1
+    assert store.search_knowledge.call_count == 1
+
+
+def test_claim_next_assignment_clips_large_context_entries_but_preserves_tail_markers(monkeypatch):
+    monkeypatch.setattr(service_module, "_SYSTEM_CONTEXT_SUMMARY_TEXT_LIMIT", 128)
+    monkeypatch.setattr(service_module, "_SYSTEM_CONTEXT_ARTIFACT_TEXT_LIMIT", 128)
+    monkeypatch.setattr(service_module, "_SYSTEM_CONTEXT_EVENT_TEXT_LIMIT", 128)
+    monkeypatch.setattr(service_module, "_SYSTEM_CONTEXT_KNOWLEDGE_TEXT_LIMIT", 128)
+
+    store = Mock(spec=MemoryStore)
+    store.claim_stage_run.return_value = StageRun(
+        id=56,
+        work_item_id=18,
+        stage_name="phase_1",
+        stage_index=40,
+        iteration=1,
+        owner_agent_id=3,
+        owner_role="developer",
+        status="claimed",
+        summary="Implement phase 1",
+        metadata_json={
+            "task_prompt": "Implement the Rust fibonacci generator",
+            "task_focus": "fibonacci generator",
+            "artifact_type": "phase_result",
+            "artifact_title": "Phase 1 result",
+        },
+        started_at=datetime.now(),
+    )
+    store.get_work_item.return_value = {"id": 18, "project_id": 1}
+    store.get_project.return_value = {"id": 1, "name": "proj", "repo_path": "/tmp/repo"}
+    store.get_work_item_state.return_value = {
+        "current_stage": "phase_1",
+        "latest_summary": ("summary-body " * 20) + "SUMMARY-TAIL-MARKER",
+        "next_todos": ["finish implementation"],
+        "open_issues": ["none"],
+    }
+    store.list_artifacts.return_value = [
+        {
+            "artifact_type": "design_doc",
+            "title": "Technical design",
+            "iteration": 1,
+            "content": ("artifact-body " * 20) + "ARTIFACT-TAIL-MARKER",
+        }
+    ]
+    store.list_coordination_events.return_value = [
+        CoordinationEventRecord(
+            work_item_id=18,
+            stage_name="phase_1",
+            event_type="review_feedback",
+            summary=("event-body " * 20) + "EVENT-TAIL-MARKER",
+        )
+    ]
+    store.search_knowledge.return_value = [
+        {
+            "title": "design-note",
+            "content": ("knowledge-body " * 20) + "KNOWLEDGE-TAIL-MARKER",
+        }
+    ]
+    service = MySwatToolService(store)
+
+    result = service.claim_next_assignment(
+        ClaimNextAssignmentRequest(
+            project_id=1,
+            agent_role="developer",
+            runtime_registration_id=92,
+        )
+    )
+
+    assert "truncated" in result.system_context
+    assert "SUMMARY-TAIL-MARKER" in result.system_context
+    assert "ARTIFACT-TAIL-MARKER" in result.system_context
+    assert "EVENT-TAIL-MARKER" in result.system_context
+    assert "KNOWLEDGE-TAIL-MARKER" in result.system_context
+
+
+def test_wait_for_stage_run_completion_releases_notifier_state():
+    store = Mock(spec=MemoryStore)
+    pending = SimpleNamespace(
+        id=55,
+        work_item_id=17,
+        stage_name="plan",
+        status="claimed",
+        output_artifact_id=None,
+        metadata_json=None,
+        summary="pending",
+    )
+    completed = SimpleNamespace(
+        id=55,
+        work_item_id=17,
+        stage_name="plan",
+        status="completed",
+        output_artifact_id=None,
+        metadata_json=None,
+        summary="done",
+    )
+    store.get_stage_run.side_effect = [pending, completed]
+    service = MySwatToolService(store)
+    result_holder: dict[str, object] = {}
+
+    def _wait() -> None:
+        result_holder["result"] = service.wait_for_stage_run_completion(
+            service_module.StageRunWaitRequest(stage_run_id=55, timeout_seconds=1)
+        )
+
+    thread = threading.Thread(target=_wait, daemon=True)
+    thread.start()
+    assert service._notifier.has_stage_waiter(55) is True
+    service._notifier.notify_stage(55)
+    thread.join(timeout=1)
+
+    assert thread.is_alive() is False
+    assert result_holder["result"].status == "completed"
+    assert service._notifier.has_stage_waiter(55) is False
+    assert service._notifier._stage_tokens == {}
+
+
+def test_notify_work_item_coordination_changed_skips_terminal_items_without_waiters():
+    store = Mock(spec=MemoryStore)
+    service = MySwatToolService(store)
+    waiting_stage = StageRun(
+        id=11,
+        work_item_id=17,
+        stage_name="phase_1",
+        stage_index=10,
+        iteration=1,
+        owner_agent_id=3,
+        owner_role="developer",
+        status="cancelled",
+        summary="stopped",
+        started_at=datetime.now(),
+    )
+    completed_stage = StageRun(
+        id=12,
+        work_item_id=17,
+        stage_name="plan",
+        stage_index=20,
+        iteration=1,
+        owner_agent_id=3,
+        owner_role="developer",
+        status="completed",
+        summary="done",
+        started_at=datetime.now(),
+    )
+    active_stage = StageRun(
+        id=13,
+        work_item_id=17,
+        stage_name="design",
+        stage_index=5,
+        iteration=1,
+        owner_agent_id=3,
+        owner_role="architect",
+        status="pending",
+        summary="queued",
+        started_at=datetime.now(),
+    )
+    store.list_stage_runs.return_value = [waiting_stage, completed_stage, active_stage]
+    store.get_review_cycles.return_value = [
+        {"id": 21, "status": "cancelled"},
+        {"id": 22, "status": "completed"},
+        {"id": 23, "status": "pending"},
+    ]
+
+    service._notifier.snapshot_stage(11)
+    service._notifier.snapshot_reviews([21])
+    stage_calls: list[int] = []
+    review_calls: list[int] = []
+    service._notifier.notify_stage = lambda stage_run_id: stage_calls.append(stage_run_id)
+    service._notifier.notify_review = lambda cycle_id: review_calls.append(cycle_id)
+
+    service.notify_work_item_coordination_changed(17)
+
+    assert stage_calls == [11, 13]
+    assert review_calls == [21, 23]
+    service._notifier.release_stage(11)
+    service._notifier.release_reviews([21])
 
 
 def test_register_runtime_creates_runtime_registration():

@@ -11,7 +11,7 @@ from click.exceptions import Exit as ClickExit
 from prompt_toolkit.enums import EditingMode
 from prompt_toolkit.history import FileHistory
 
-from myswat.workflow.engine import WorkMode
+from myswat.workflow.modes import WorkMode
 
 from myswat.cli.work_cmd import (
     _build_background_env,
@@ -119,7 +119,7 @@ class TestRunWork:
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.ensure_schema")
     @patch("myswat.cli.work_cmd.MemoryStore")
-    @patch("myswat.cli.work_cmd.SessionManager")
+    @patch("myswat.cli.work_cmd.SessionManager", create=True)
     def test_success(self, mock_sm_cls, mock_store_cls, mock_mig,
                       mock_pool_cls, mock_settings_cls, mock_prompt_session_cls,
                       mock_submit_learn, mock_engine_cls):
@@ -168,7 +168,7 @@ class TestRunWork:
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.ensure_schema")
     @patch("myswat.cli.work_cmd.MemoryStore")
-    @patch("myswat.cli.work_cmd.SessionManager")
+    @patch("myswat.cli.work_cmd.SessionManager", create=True)
     def test_foreground_run_prints_tracking_commands(
         self,
         mock_sm_cls,
@@ -226,7 +226,7 @@ class TestRunWork:
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.ensure_schema")
     @patch("myswat.cli.work_cmd.MemoryStore")
-    @patch("myswat.cli.work_cmd.SessionManager")
+    @patch("myswat.cli.work_cmd.SessionManager", create=True)
     def test_foreground_run_uses_task_monitor(
         self,
         mock_sm_cls,
@@ -282,7 +282,7 @@ class TestRunWork:
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.ensure_schema")
     @patch("myswat.cli.work_cmd.MemoryStore")
-    @patch("myswat.cli.work_cmd.SessionManager")
+    @patch("myswat.cli.work_cmd.SessionManager", create=True)
     def test_failure(self, mock_sm_cls, mock_store_cls, mock_mig,
                       mock_pool_cls, mock_settings_cls, mock_prompt_session_cls,
                       mock_engine_cls):
@@ -325,7 +325,7 @@ class TestRunWork:
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.ensure_schema")
     @patch("myswat.cli.work_cmd.MemoryStore")
-    @patch("myswat.cli.work_cmd.SessionManager")
+    @patch("myswat.cli.work_cmd.SessionManager", create=True)
     def test_exception(self, mock_sm_cls, mock_store_cls, mock_mig,
                         mock_pool_cls, mock_settings_cls, mock_engine_cls):
         settings = MagicMock()
@@ -367,7 +367,7 @@ class TestRunWork:
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.ensure_schema")
     @patch("myswat.cli.work_cmd.MemoryStore")
-    @patch("myswat.cli.work_cmd.SessionManager")
+    @patch("myswat.cli.work_cmd.SessionManager", create=True)
     def test_schema_bootstrap_runs_printed(self, mock_sm_cls,
                                          mock_store_cls, mock_mig,
                                          mock_pool_cls, mock_settings_cls,
@@ -411,7 +411,7 @@ class TestRunWork:
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.ensure_schema")
     @patch("myswat.cli.work_cmd.MemoryStore")
-    @patch("myswat.cli.work_cmd.SessionManager")
+    @patch("myswat.cli.work_cmd.SessionManager", create=True)
     def test_design_mode_threads_to_engine_and_persists_metadata(
         self, mock_sm_cls, mock_store_cls, mock_mig,
         mock_pool_cls, mock_settings_cls, mock_engine_cls,
@@ -461,7 +461,7 @@ class TestRunWork:
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.ensure_schema")
     @patch("myswat.cli.work_cmd.MemoryStore")
-    @patch("myswat.cli.work_cmd.SessionManager")
+    @patch("myswat.cli.work_cmd.SessionManager", create=True)
     def test_foreground_auto_approve_is_forwarded(
         self,
         mock_sm_cls,
@@ -507,7 +507,7 @@ class TestRunWork:
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.ensure_schema")
     @patch("myswat.cli.work_cmd.MemoryStore")
-    @patch("myswat.cli.work_cmd.SessionManager")
+    @patch("myswat.cli.work_cmd.SessionManager", create=True)
     def test_foreground_interactive_checkpoints_build_prompt_session(
         self,
         mock_sm_cls,
@@ -639,7 +639,7 @@ class TestRunWork:
     @patch("myswat.cli.work_cmd.TiDBPool")
     @patch("myswat.cli.work_cmd.ensure_schema")
     @patch("myswat.cli.work_cmd.MemoryStore")
-    @patch("myswat.cli.work_cmd.SessionManager")
+    @patch("myswat.cli.work_cmd.SessionManager", create=True)
     def test_background_worker_reuses_existing_work_item(
         self,
         mock_sm_cls,
