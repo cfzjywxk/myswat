@@ -687,6 +687,7 @@ def _run_testplan_review(
     register_cancel_target: Callable[[AgentRunner], None] | None = None,
     on_event: Callable | None = None,
     ask_user: Callable[[str], str] | None = None,
+    auto_approve: bool = True,
 ) -> None:
     from myswat.workflow.engine import WorkflowEngine, WorkMode
 
@@ -750,7 +751,7 @@ def _run_testplan_review(
         max_review_iterations=settings.workflow.max_review_iterations,
         mode=WorkMode.testplan_design,
         ask_user=ask_user or _make_prompt_callback(prompt_session),
-        auto_approve=False,
+        auto_approve=auto_approve,
         should_cancel=should_cancel,
         on_event=on_event,
     )
@@ -785,6 +786,7 @@ def _run_workflow(
     proposer_sm: SessionManager | None = None,
     on_event: Callable | None = None,
     ask_user: Callable[[str], str] | None = None,
+    auto_approve: bool = True,
 ) -> None:
     """Run a teamwork workflow, optionally reusing an architect chat session."""
     from myswat.workflow.engine import WorkflowEngine
@@ -913,7 +915,7 @@ def _run_workflow(
         max_review_iterations=settings.workflow.max_review_iterations,
         mode=mode,
         ask_user=ask_user or _make_prompt_callback(prompt_session),
-        auto_approve=False,
+        auto_approve=auto_approve,
         should_cancel=should_cancel,
         on_event=on_event,
     )

@@ -145,10 +145,6 @@ class TestRunWork:
         mock_store.create_work_item.return_value = 42
         mock_store_cls.return_value = mock_store
 
-        prompt_session = MagicMock()
-        prompt_session.prompt.return_value = "y"
-        mock_prompt_session_cls.return_value = prompt_session
-
         sm = MagicMock()
         sm.session = SimpleNamespace(session_uuid="uuid")
         sm._agent_row = qa_row
@@ -162,11 +158,8 @@ class TestRunWork:
         mock_store.update_work_item_status.assert_any_call(42, "completed")
         assert mock_store.create_work_item.call_args.kwargs["metadata_json"] == {"work_mode": "full"}
         assert mock_engine_cls.call_args.kwargs["mode"] == WorkMode.full
-        assert mock_engine_cls.call_args.kwargs["auto_approve"] is False
-        assert mock_prompt_session_cls.call_args.kwargs["editing_mode"] == EditingMode.EMACS
-        assert isinstance(mock_prompt_session_cls.call_args.kwargs["history"], FileHistory)
-        assert mock_engine_cls.call_args.kwargs["ask_user"]("Approve?") == "y"
-        prompt_session.prompt.assert_called_with("Approve?", multiline=False)
+        assert mock_engine_cls.call_args.kwargs["auto_approve"] is True
+        mock_prompt_session_cls.assert_not_called()
         mock_submit_learn.assert_called_once()
 
     @patch("myswat.cli.work_cmd.WorkflowEngine")
@@ -460,7 +453,7 @@ class TestRunWork:
 
         assert mock_store.create_work_item.call_args.kwargs["metadata_json"] == {"work_mode": "design"}
         assert mock_engine_cls.call_args.kwargs["mode"] == WorkMode.design
-        assert mock_engine_cls.call_args.kwargs["auto_approve"] is False
+        assert mock_engine_cls.call_args.kwargs["auto_approve"] is True
 
     @patch("myswat.cli.work_cmd.WorkflowEngine")
     @patch("myswat.cli.work_cmd.PromptSession")
@@ -507,6 +500,59 @@ class TestRunWork:
 
         assert mock_engine_cls.call_args.kwargs["auto_approve"] is True
         mock_prompt_session_cls.assert_not_called()
+
+    @patch("myswat.cli.work_cmd.WorkflowEngine")
+    @patch("myswat.cli.work_cmd.PromptSession")
+    @patch("myswat.cli.work_cmd.MySwatSettings")
+    @patch("myswat.cli.work_cmd.TiDBPool")
+    @patch("myswat.cli.work_cmd.ensure_schema")
+    @patch("myswat.cli.work_cmd.MemoryStore")
+    @patch("myswat.cli.work_cmd.SessionManager")
+    def test_foreground_interactive_checkpoints_build_prompt_session(
+        self,
+        mock_sm_cls,
+        mock_store_cls,
+        mock_mig,
+        mock_pool_cls,
+        mock_settings_cls,
+        mock_prompt_session_cls,
+        mock_engine_cls,
+    ):
+        settings = MagicMock()
+        settings.compaction.threshold_turns = 200
+        settings.workflow.max_review_iterations = 5
+        mock_settings_cls.return_value = settings
+
+        dev_row = _agent_row("developer")
+        qa_row = _agent_row("qa_main", "kimi")
+
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = {"id": 1, "repo_path": "/tmp"}
+
+        def get_agent_side(pid, role):
+            if role == "developer":
+                return dev_row
+            if role == "qa_main":
+                return qa_row
+            return None
+
+        mock_store.get_agent.side_effect = get_agent_side
+        mock_store.create_work_item.return_value = 42
+        mock_store_cls.return_value = mock_store
+        mock_sm_cls.return_value = MagicMock(session=SimpleNamespace(session_uuid="uuid"), _agent_row=qa_row)
+
+        prompt_session = MagicMock()
+        prompt_session.prompt.return_value = "y"
+        mock_prompt_session_cls.return_value = prompt_session
+        mock_engine_cls.return_value = MagicMock(run=MagicMock(return_value=SimpleNamespace(success=True)))
+
+        run_work("proj", "do stuff", auto_approve=False)
+
+        assert mock_engine_cls.call_args.kwargs["auto_approve"] is False
+        assert mock_prompt_session_cls.call_args.kwargs["editing_mode"] == EditingMode.EMACS
+        assert isinstance(mock_prompt_session_cls.call_args.kwargs["history"], FileHistory)
+        assert mock_engine_cls.call_args.kwargs["ask_user"]("Approve?") == "y"
+        prompt_session.prompt.assert_called_with("Approve?", multiline=False)
 
     @patch("myswat.cli.work_cmd._launch_background_work")
     def test_design_mode_rejected_for_background(self, mock_launch_background_work):

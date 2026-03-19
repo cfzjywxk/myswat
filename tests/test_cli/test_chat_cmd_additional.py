@@ -358,6 +358,43 @@ def test_run_testplan_review_marks_blocked_when_cancel_requested(
     store.update_work_item_status.assert_any_call(94, "blocked")
 
 
+@patch("myswat.workflow.engine.WorkflowEngine")
+@patch("myswat.cli.chat_cmd.SessionManager")
+@patch("myswat.cli.chat_cmd.make_runner_from_row")
+def test_run_testplan_review_forwards_interactive_override(
+    mock_make_runner,
+    mock_sm_cls,
+    mock_engine_cls,
+):
+    store = MagicMock()
+    arch_agent = _agent_row("architect")
+    dev_agent = _agent_row("developer")
+    proposer_sm = MagicMock()
+    proposer_sm.agent_id = 9
+    proposer_sm._runner = MagicMock()
+    proposer_sm.fork_for_work_item.return_value = MagicMock()
+    store.get_agent.side_effect = lambda _pid, role: {
+        "architect": arch_agent,
+        "developer": dev_agent,
+    }.get(role)
+    store.create_work_item.return_value = 95
+    mock_make_runner.side_effect = [MagicMock(), MagicMock()]
+    mock_sm_cls.side_effect = [MagicMock(), MagicMock()]
+    mock_engine_cls.return_value = MagicMock(run=MagicMock(return_value=SimpleNamespace(success=True, blocked=False)))
+
+    _run_testplan_review(
+        store=store,
+        proj=_proj(),
+        proposer_sm=proposer_sm,
+        workdir="/tmp",
+        settings=_settings(),
+        task="finalize qa plan",
+        auto_approve=False,
+    )
+
+    assert mock_engine_cls.call_args.kwargs["auto_approve"] is False
+
+
 @patch("myswat.cli.chat_cmd._run_with_task_monitor")
 @patch("myswat.cli.chat_cmd._run_testplan_review")
 def test_testplan_review_interactive_executes_worker_callback(mock_run_review, mock_monitor):
@@ -580,6 +617,42 @@ def test_run_workflow_blocks_when_should_cancel_is_set_after_run(
     )
 
     store.update_work_item_status.assert_any_call(93, "blocked")
+
+
+@patch("myswat.workflow.engine.WorkflowEngine")
+@patch("myswat.cli.chat_cmd.SessionManager")
+@patch("myswat.cli.chat_cmd.make_runner_from_row")
+def test_run_workflow_forwards_interactive_override(
+    mock_make_runner,
+    mock_sm_cls,
+    mock_engine_cls,
+):
+    store = MagicMock()
+    dev_agent = _agent_row("developer")
+    qa_main = _agent_row("qa_main", "kimi")
+    store.get_agent.side_effect = lambda _pid, role: {
+        "developer": dev_agent,
+        "qa_main": qa_main,
+        "qa_vice": None,
+    }.get(role)
+    store.create_work_item.return_value = 96
+    mock_make_runner.side_effect = [MagicMock(), MagicMock()]
+    dev_sm = MagicMock()
+    qa_sm = MagicMock(_agent_row=qa_main)
+    mock_sm_cls.side_effect = [dev_sm, qa_sm]
+    mock_engine_cls.return_value = MagicMock(run=MagicMock(return_value=SimpleNamespace(success=True, blocked=False)))
+
+    _run_workflow(
+        store=store,
+        proj=_proj(),
+        workdir="/tmp",
+        settings=_settings(),
+        requirement="ship auth",
+        mode=WorkMode.develop,
+        auto_approve=False,
+    )
+
+    assert mock_engine_cls.call_args.kwargs["auto_approve"] is False
 
 
 @patch("myswat.cli.chat_cmd._run_with_task_monitor")

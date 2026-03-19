@@ -397,6 +397,7 @@ class TestRunTestplanReview:
         assert store.create_work_item.call_args.kwargs["item_type"] == "review"
         assert store.create_work_item.call_args.kwargs["metadata_json"]["work_mode"] == "testplan_design"
         proposer_sm.fork_for_work_item.assert_called_once_with(43, purpose="QA test plan: plan tests")
+        assert mock_engine_cls.call_args.kwargs["auto_approve"] is True
         store.update_work_item_status.assert_any_call(43, "blocked")
 
 
@@ -491,6 +492,7 @@ class TestRunWorkflow:
         mock_engine_cls.return_value = engine
 
         _run_workflow(store, _proj(), "/tmp", settings, "do stuff")
+        assert mock_engine_cls.call_args.kwargs["auto_approve"] is True
         store.update_work_item_status.assert_any_call(42, "completed")
 
     @patch("myswat.workflow.engine.WorkflowEngine")

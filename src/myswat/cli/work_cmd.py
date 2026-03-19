@@ -292,7 +292,7 @@ def _run_workflow(
     show_monitor: bool,
     background_worker: bool,
     mode: WorkMode = WorkMode.full,
-    auto_approve: bool = False,
+    auto_approve: bool = True,
     resume: int | None = None,
     mode_explicit: bool = False,
 ) -> int:
@@ -738,7 +738,7 @@ def run_work(
     workdir: str | None = None,
     background: bool = False,
     mode: WorkMode = WorkMode.full,
-    auto_approve: bool = False,
+    auto_approve: bool = True,
     resume: int | None = None,
     mode_explicit: bool = False,
 ) -> None:

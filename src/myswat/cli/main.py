@@ -101,7 +101,11 @@ def work(
     design_mode: bool = typer.Option(False, "--design", "--plan", help="Run design + planning only."),
     develop_mode: bool = typer.Option(False, "--develop", "--dev", help="Run development only."),
     test_mode: bool = typer.Option(False, "--test", "--ga-test", help="Run GA testing only."),
-    auto_approve: bool = typer.Option(False, "--auto-approve", help="Skip user checkpoints in foreground workflows."),
+    auto_approve: bool = typer.Option(
+        True,
+        "--auto-approve/--interactive-checkpoints",
+        help="Automatically continue through workflow checkpoints by default. Use --interactive-checkpoints to require manual approval.",
+    ),
     resume: int = typer.Option(None, "--resume", help="Resume a blocked/failed work item by ID."),
 ):
     """Run the teamwork workflow in full or selected foreground mode."""

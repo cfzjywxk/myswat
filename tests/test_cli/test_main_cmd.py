@@ -711,7 +711,7 @@ class TestCommandRouting:
             workdir=None,
             background=False,
             mode=WorkMode.full,
-            auto_approve=False,
+            auto_approve=True,
             resume=None,
             mode_explicit=False,
         )
@@ -740,7 +740,7 @@ class TestCommandRouting:
                 workdir=None,
                 background=False,
                 mode=expected_mode,
-                auto_approve=False,
+                auto_approve=True,
                 resume=None,
                 mode_explicit=True,
             )
@@ -773,7 +773,7 @@ class TestCommandRouting:
             workdir=None,
             background=True,
             mode=WorkMode.full,
-            auto_approve=False,
+            auto_approve=True,
             resume=None,
             mode_explicit=False,
         )
@@ -802,7 +802,7 @@ class TestCommandRouting:
             workdir=None,
             background=True,
             mode=WorkMode.develop,
-            auto_approve=False,
+            auto_approve=True,
             resume=None,
             mode_explicit=True,
         )
@@ -822,6 +822,25 @@ class TestCommandRouting:
             background=False,
             mode=WorkMode.full,
             auto_approve=True,
+            resume=None,
+            mode_explicit=False,
+        )
+
+    @patch("myswat.cli.work_cmd.run_work")
+    def test_work_command_interactive_checkpoints(self, mock_run_work):
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["work", "add feature", "--project", "proj", "--interactive-checkpoints"])
+        assert result.exit_code == 0
+        mock_run_work.assert_called_once_with(
+            "proj",
+            "add feature",
+            workdir=None,
+            background=False,
+            mode=WorkMode.full,
+            auto_approve=False,
             resume=None,
             mode_explicit=False,
         )
