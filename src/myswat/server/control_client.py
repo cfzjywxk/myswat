@@ -40,12 +40,20 @@ class DaemonClient:
             return str(parsed)
         return str(parsed)
 
-    def _request(self, *, method: str, path: str, payload: dict | None = None) -> dict:
+    def _request(
+        self,
+        *,
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        timeout_seconds: int | None = None,
+    ) -> dict:
         data = None
         headers = {}
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
+        timeout = self._timeout if timeout_seconds is None else max(1, int(timeout_seconds))
         request = Request(
             url=self._base_url + path,
             data=data,
@@ -53,7 +61,7 @@ class DaemonClient:
             method=method,
         )
         try:
-            with urlopen(request, timeout=self._timeout) as response:
+            with urlopen(request, timeout=timeout) as response:
                 body = response.read().decode("utf-8")
         except HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
@@ -134,4 +142,5 @@ class DaemonClient:
             payload={
                 "project": project,
             },
+            timeout_seconds=max(self._timeout, 300),
         )

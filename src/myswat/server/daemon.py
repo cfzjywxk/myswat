@@ -33,6 +33,7 @@ _TERMINAL_WORK_ITEM_STATUSES = frozenset({"approved", "blocked", "cancelled", "c
 _REQUEST_SLOW_SECONDS = 1.0
 
 LOGGER = logging.getLogger(__name__)
+_CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
 
 
 def _source_root() -> Path:
@@ -700,6 +701,15 @@ class MySwatDaemon:
                     duration,
                 )
 
+            def _log_client_disconnect(self, *, path: str, started_at: float, exc: Exception) -> None:
+                LOGGER.warning(
+                    "Daemon client disconnected: %s %s duration=%.3fs error=%s",
+                    self.command,
+                    path,
+                    self._request_duration(started_at),
+                    exc,
+                )
+
             def _read_json(self) -> dict:
                 length = int(self.headers.get("Content-Length", "0") or 0)
                 body = self.rfile.read(length) if length > 0 else b"{}"
@@ -719,12 +729,15 @@ class MySwatDaemon:
             def do_GET(self) -> None:
                 started_at = time.monotonic()
                 parsed = urlparse(self.path)
-                if parsed.path == "/api/health":
-                    self._write_json(200, {"ok": True})
-                    self._log_slow_request(path=parsed.path, status=200, started_at=started_at)
-                    return
-                self._write_json(404, {"error": "not found"})
-                self._log_slow_request(path=parsed.path, status=404, started_at=started_at)
+                try:
+                    if parsed.path == "/api/health":
+                        self._write_json(200, {"ok": True})
+                        self._log_slow_request(path=parsed.path, status=200, started_at=started_at)
+                        return
+                    self._write_json(404, {"error": "not found"})
+                    self._log_slow_request(path=parsed.path, status=404, started_at=started_at)
+                except _CLIENT_DISCONNECT_ERRORS as exc:
+                    self._log_client_disconnect(path=parsed.path, started_at=started_at, exc=exc)
 
             def do_POST(self) -> None:
                 started_at = time.monotonic()
@@ -788,9 +801,18 @@ class MySwatDaemon:
                 except (ValueError, ValidationError) as exc:
                     self._log_request_failure(path=parsed.path, status=400, started_at=started_at, exc=exc)
                     self._write_json(400, {"error": str(exc)})
+                except _CLIENT_DISCONNECT_ERRORS as exc:
+                    self._log_client_disconnect(path=parsed.path, started_at=started_at, exc=exc)
                 except Exception as exc:
                     self._log_request_failure(path=parsed.path, status=500, started_at=started_at, exc=exc)
-                    self._write_json(500, {"error": "internal server error"})
+                    try:
+                        self._write_json(500, {"error": "internal server error"})
+                    except _CLIENT_DISCONNECT_ERRORS as disconnect_exc:
+                        self._log_client_disconnect(
+                            path=parsed.path,
+                            started_at=started_at,
+                            exc=disconnect_exc,
+                        )
 
         httpd = ThreadingHTTPServer(
             (self._settings.server.host, self._settings.server.port),

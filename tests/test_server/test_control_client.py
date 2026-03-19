@@ -47,3 +47,33 @@ def test_request_surfaces_nested_http_error_message(monkeypatch):
 
     with pytest.raises(DaemonClientError, match="internal server error"):
         client.cleanup_project(project="fib-demo")
+
+
+def test_cleanup_project_uses_extended_timeout(monkeypatch):
+    observed: dict[str, object] = {}
+
+    class _Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return b'{"ok": true}'
+
+    def _urlopen(request, timeout):
+        observed["url"] = request.full_url
+        observed["timeout"] = timeout
+        return _Response()
+
+    monkeypatch.setattr("myswat.server.control_client.urlopen", _urlopen)
+    client = DaemonClient()
+
+    result = client.cleanup_project(project="fib-demo")
+
+    assert result == {"ok": True}
+    assert observed["url"].endswith("/api/project-cleanup")
+    assert observed["timeout"] == 300
