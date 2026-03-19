@@ -34,7 +34,7 @@ class _ReviewerVerdict:
 @dataclass
 class _ReviewState:
     iteration: int = 0
-    max_iterations: int = 5
+    max_iterations: int = 10
     verdicts: list[_ReviewerVerdict] = field(default_factory=list)
     all_approved: bool = False
 
@@ -147,7 +147,7 @@ class WorkflowDisplay:
         self._current_stage.agent_action = ""
         self._current_stage.agent_role = None
         iteration = event.metadata.get("iteration", 1)
-        max_iter = event.metadata.get("max_iterations", 5)
+        max_iter = event.metadata.get("max_iterations", 10)
         if self._current_stage.review is None:
             self._current_stage.review = _ReviewState(
                 iteration=iteration, max_iterations=max_iter,

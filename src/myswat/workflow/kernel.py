@@ -115,7 +115,7 @@ class WorkflowKernel:
         project_id: int,
         work_item_id: int,
         mode: WorkMode = WorkMode.full,
-        max_review_iterations: int = 5,
+        max_review_iterations: int = 10,
         ask_user: Callable[[str], str] | None = None,
         auto_approve: bool = True,
         should_cancel: Callable[[], bool] | None = None,

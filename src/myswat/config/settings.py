@@ -56,7 +56,7 @@ class AgentSettings(BaseSettings):
 
 
 class WorkflowSettings(BaseSettings):
-    max_review_iterations: int = 5
+    max_review_iterations: int = 10
     assignment_poll_interval_seconds: float = 1.0
     assignment_timeout_seconds: int = 0
 

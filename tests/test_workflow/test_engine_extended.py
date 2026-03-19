@@ -1797,8 +1797,8 @@ class TestRunReviewLoopEdgeCases:
             for call in engine._store.append_work_item_process_event.call_args_list
         )
 
-    def test_max_iterations_unreviewed_artifact_persisted(self):
-        """At max iterations, the final unreviewed artifact is persisted."""
+    def test_max_iterations_skip_extra_revision_and_record_skip_state(self):
+        """The last failed review round must not trigger one extra proposer revision."""
         store = MagicMock()
         store.create_artifact.return_value = 42
         store.create_review_cycle.return_value = 99
@@ -1814,33 +1814,75 @@ class TestRunReviewLoopEdgeCases:
         )
         assert iters == 1
         assert passed is False
-        assert result == "revised"
-        # The last create_artifact call should be the unreviewed final revision
-        last_create_call = store.create_artifact.call_args_list[-1]
-        assert last_create_call.kwargs.get("iteration") == 2 or last_create_call[1].get("iteration") == 2
-
-    def test_max_iterations_unreviewed_artifact_persistence_error(self):
-        """Exception persisting final unreviewed artifact is caught."""
-        store = MagicMock()
-        # First create_artifact succeeds, second raises
-        store.create_artifact.side_effect = [42, Exception("DB error")]
-        store.create_review_cycle.return_value = 99
-        engine, dev, qas = _make_engine(store=store, max_review=1)
-        changes = _changes_json(["issue"])
-        qas[0].send.return_value = _ok(changes)
-        dev.send.return_value = _ok("revised")
-
-        # Should not raise
-        result, iters, passed = engine._run_review_loop(
-            artifact="original",
-            artifact_type="design",
-            context="ctx",
+        assert result == "original"
+        assert engine._last_review_limit_reached is True
+        dev.send.assert_not_called()
+        assert store.create_artifact.call_count == 1
+        assert any(
+            call.kwargs.get("current_stage") == "design_review_skipped"
+            for call in store.update_work_item_state.call_args_list
         )
-        assert passed is False
-        assert result == "revised"
+        assert any(
+            call.kwargs.get("event_type") == "review_skipped"
+            for call in store.append_work_item_process_event.call_args_list
+        )
+
+    @patch.object(WorkflowEngine, "_generate_report", return_value="# report")
+    @patch.object(WorkflowEngine, "_run_ga_test_phase", return_value=GATestResult(passed=True))
+    @patch.object(
+        WorkflowEngine,
+        "_run_phase",
+        return_value=PhaseResult(
+            name="phase 1",
+            summary="done",
+            review_iterations=0,
+            review_passed=False,
+            committed=True,
+        ),
+    )
+    @patch.object(WorkflowEngine, "_parse_phases", return_value=["phase 1"])
+    @patch.object(WorkflowEngine, "_user_checkpoint", side_effect=["approved design", "approved plan"])
+    @patch.object(WorkflowEngine, "_run_planning", return_value="reviewed plan")
+    def test_full_mode_design_review_limit_reached_continues(
+        self,
+        m_planning,
+        m_checkpoint,
+        m_parse_phases,
+        m_run_phase,
+        m_ga_test,
+        m_report,
+    ):
+        arch = make_fake_session_manager(agent_id=30, agent_role="architect", responses=[_arch_design_doc()], session_id=300)
+        dev = make_fake_session_manager(agent_id=10, agent_role="developer", responses=[], session_id=100)
+        qa = make_fake_session_manager(agent_id=20, agent_role="qa-0", responses=[], session_id=101)
+        store = MagicMock()
+        engine = WorkflowEngine(
+            store=store, dev_sm=dev, qa_sms=[qa], arch_sm=arch,
+            project_id=1, work_item_id=1, mode=WorkMode.full,
+        )
+
+        def _review_side_effect(*args, **kwargs):
+            artifact_type = kwargs.get("artifact_type")
+            if artifact_type == "arch_design":
+                engine._last_review_limit_reached = True
+                engine._last_review_limit_stage = "design"
+                engine._last_review_limit_summary = "Max review iterations reached."
+                return ("reviewed design", 10, False)
+            engine._last_review_limit_reached = False
+            engine._last_review_limit_stage = ""
+            engine._last_review_limit_summary = ""
+            return ("reviewed plan", 1, True)
+
+        with patch.object(engine, "_run_review_loop", side_effect=_review_side_effect):
+            result = engine.run("build a widget")
+
+        assert result.success is True
+        assert result.design_review_passed is False
+        assert result.plan_review_passed is True
+        assert result.final_report == "# report"
 
     def test_persist_artifacts_false_skips_all_persistence(self):
-        """Opting out skips both per-iteration and final draft artifact writes."""
+        """Opting out skips persistence and still stops cleanly at the review cap."""
         store = MagicMock()
         store.create_artifact.return_value = 42
         store.create_review_cycle.return_value = 99
@@ -1855,9 +1897,10 @@ class TestRunReviewLoopEdgeCases:
             persist_artifacts=False,
         )
 
-        assert result == "revised"
+        assert result == "original"
         assert iters == 1
         assert passed is False
+        dev.send.assert_not_called()
         store.create_artifact.assert_not_called()
         store.create_review_cycle.assert_not_called()
 

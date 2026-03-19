@@ -198,7 +198,7 @@ class TestWorkflowSettings:
 
     def test_defaults(self):
         settings = WorkflowSettings()
-        assert settings.max_review_iterations == 5
+        assert settings.max_review_iterations == 10
 
     def test_env_override_max_review_iterations(self, monkeypatch):
         monkeypatch.setenv("MYSWAT_WORKFLOW_MAX_REVIEW_ITERATIONS", "10")
@@ -311,7 +311,7 @@ class TestMySwatSettings:
         # Spot-check a few nested defaults
         assert settings.tidb.port == 4000
         assert settings.agents.developer_model == "gpt-5.4"
-        assert settings.workflow.max_review_iterations == 5
+        assert settings.workflow.max_review_iterations == 10
         assert settings.compaction.threshold_turns == 50
 
     def test_missing_config_file_no_error(self, tmp_path):
@@ -428,7 +428,7 @@ host = "partial-host"
         # Defaults preserved
         assert settings.tidb.port == 4000
         assert settings.agents.developer_model == "gpt-5.4"
-        assert settings.workflow.max_review_iterations == 5
+        assert settings.workflow.max_review_iterations == 10
         assert settings.compaction.threshold_turns == 50
 
     def test_config_path_attribute(self, tmp_path):
@@ -448,5 +448,5 @@ host = "partial-host"
         assert settings.tidb.host == ""
         assert settings.tidb.port == 4000
         assert settings.agents.codex_path == "codex"
-        assert settings.workflow.max_review_iterations == 5
+        assert settings.workflow.max_review_iterations == 10
         assert settings.compaction.threshold_turns == 50

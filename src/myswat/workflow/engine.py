@@ -184,7 +184,7 @@ class WorkflowEngine:
         qa_sms: list[SessionManager],
         project_id: int,
         work_item_id: int | None = None,
-        max_review_iterations: int = 5,
+        max_review_iterations: int = 10,
         mode: WorkMode = WorkMode.full,
         ask_user: Callable[[str], str] | None = None,
         auto_approve: bool = False,
@@ -212,6 +212,9 @@ class WorkflowEngine:
         self._blocked = False
         self._failure_summary = ""
         self._blocked_stage = ""
+        self._last_review_limit_reached = False
+        self._last_review_limit_stage = ""
+        self._last_review_limit_summary = ""
         self._on_event = on_event
         # When an event handler is attached, use a quiet console to suppress
         # status prints (the display renderer shows structured output instead).
@@ -564,6 +567,59 @@ class WorkflowEngine:
             updated_by_agent_id=updated_by_agent_id,
         )
 
+    def _reset_review_loop_state(self) -> None:
+        self._last_review_limit_reached = False
+        self._last_review_limit_stage = ""
+        self._last_review_limit_summary = ""
+
+    def _record_review_limit_reached(
+        self,
+        *,
+        artifact_type: str,
+        stage: str,
+        iteration: int,
+        proposer: "SessionManager",
+        issues: list[str],
+    ) -> None:
+        summary = (
+            f"Max review iterations reached for {artifact_type} after {iteration} round(s); "
+            "continuing with the latest artifact without another review round."
+        )
+        unresolved = issues[:8]
+        event_summary = summary
+        if unresolved:
+            event_summary += "\nUnresolved review issues:\n" + "\n".join(f"- {issue}" for issue in unresolved)
+
+        self._last_review_limit_reached = True
+        self._last_review_limit_stage = stage
+        self._last_review_limit_summary = summary
+
+        self._emit(
+            "warning",
+            summary,
+            stage=stage,
+            agent_role=proposer.agent_role,
+            iteration=iteration,
+            max_iterations=self._max_review,
+            issue_count=len(issues),
+            review_skipped=True,
+        )
+        self._append_process_event(
+            event_type="review_skipped",
+            title=f"{artifact_type} review skipped after max iterations",
+            summary=event_summary,
+            from_role="myswat",
+            to_role=proposer.agent_role,
+            updated_by_agent_id=proposer.agent_id,
+        )
+        self._persist_task_state(
+            current_stage=f"{stage}_review_skipped",
+            latest_summary=summary,
+            next_todos=["Continue the workflow with the latest artifact despite unresolved review issues"],
+            open_issues=issues,
+            updated_by_agent_id=proposer.agent_id,
+        )
+
     def _sync_result_failure_state(self, result: WorkflowResult) -> WorkflowResult:
         result.blocked = self._blocked
         result.failure_summary = self._failure_summary
@@ -731,6 +787,7 @@ class WorkflowEngine:
         self._blocked = False
         self._failure_summary = ""
         self._blocked_stage = ""
+        self._reset_review_loop_state()
         result = WorkflowResult(requirement=requirement)
         if self._cancelled():
             result.final_report = "Workflow cancelled before start."
@@ -857,11 +914,12 @@ class WorkflowEngine:
         result.design = design
         result.design_review_iterations = iters
         result.design_review_passed = design_review_passed
+        review_limit_reached = self._last_review_limit_reached
         if self._cancelled():
             result.final_report = "Architect-design workflow cancelled during design review."
             return self._sync_result_failure_state(result)
 
-        if not design_review_passed:
+        if not design_review_passed and not review_limit_reached:
             if not self._blocked:
                 self._persist_task_state(
                     current_stage="design_review_failed",
@@ -992,11 +1050,12 @@ class WorkflowEngine:
             test_plan_review_iterations=iters,
             test_plan_review_passed=test_plan_review_passed,
         )
+        review_limit_reached = self._last_review_limit_reached
         if self._cancelled():
             result.final_report = "Testplan-design workflow cancelled during test plan review."
             return self._sync_result_failure_state(result)
 
-        if not test_plan_review_passed:
+        if not test_plan_review_passed and not review_limit_reached:
             if not self._blocked:
                 self._persist_task_state(
                     current_stage="testplan_review_failed",
@@ -1164,11 +1223,12 @@ class WorkflowEngine:
             result.design = design
             result.design_review_iterations = iters
             result.design_review_passed = design_review_passed
+            review_limit_reached = self._last_review_limit_reached
             if self._cancelled():
                 result.final_report = "Workflow cancelled during design review."
                 return result
 
-            if not design_review_passed:
+            if not design_review_passed and not review_limit_reached:
                 if not self._blocked:
                     self._persist_task_state(
                         current_stage="design_review_failed",
@@ -2454,6 +2514,7 @@ class WorkflowEngine:
         stage_prefix overrides artifact_type in _persist_task_state stage names
         (e.g. "phase_2_code" instead of "code") to keep the phase context.
         """
+        self._reset_review_loop_state()
         prop = proposer or self._dev
         revs = reviewers or self._qas
         current = artifact
@@ -2681,6 +2742,20 @@ class WorkflowEngine:
                 )
                 return current, iteration, True
 
+            if iteration >= self._max_review:
+                self._record_review_limit_reached(
+                    artifact_type=artifact_type,
+                    stage=sp,
+                    iteration=iteration,
+                    proposer=prop,
+                    issues=all_issues,
+                )
+                self._console.print(
+                    f"[yellow]Max iterations reached for {artifact_type} review; "
+                    "continuing with the latest artifact.[/yellow]"
+                )
+                return current, iteration, False
+
             # Proposer addresses comments
             self._emit("revision_start", f"Addressing {len(all_issues)} comment(s)...", stage=sp, agent_role=prop.agent_role)
             self._console.print(f"\n[yellow]{prop.agent_role} addressing {len(all_issues)} comment(s)...[/yellow]")
@@ -2760,25 +2835,6 @@ class WorkflowEngine:
                 open_issues=all_issues,
                 updated_by_agent_id=prop.agent_id,
             )
-
-            # Preserve the final unreviewed revision when the loop stops here.
-            if persist_artifacts and self._work_item_id and iteration == self._max_review:
-                try:
-                    self._store.create_artifact(
-                        work_item_id=self._work_item_id,
-                        agent_id=prop.agent_id,
-                        iteration=iteration + 1,
-                        artifact_type=self._review_artifact_type(artifact_type),
-                        title=f"{artifact_type} draft v{iteration + 1}",
-                        content=current[:65000],
-                        metadata_json={
-                            "source": "review_loop",
-                            "workflow_artifact_type": artifact_type,
-                            "reviewed": False,
-                        },
-                    )
-                except Exception as e:
-                    self._console.print(f"[dim red]Warning: Failed to persist final artifact: {e}[/dim red]")
 
         self._console.print(f"[yellow]Max iterations reached for {artifact_type} review.[/yellow]")
         return current, self._max_review, False

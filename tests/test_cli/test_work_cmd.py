@@ -318,7 +318,7 @@ class TestRunWork:
         mock_engine_cls.return_value = engine
 
         run_work("proj", "do stuff")
-        mock_store.update_work_item_status.assert_any_call(42, "review")
+        mock_store.update_work_item_status.assert_any_call(42, "blocked")
 
     @patch("myswat.cli.work_cmd.WorkflowEngine")
     @patch("myswat.cli.work_cmd.MySwatSettings")

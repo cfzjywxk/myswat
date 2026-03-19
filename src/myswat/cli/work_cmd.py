@@ -539,8 +539,9 @@ def _run_workflow(
             final_status = "completed"
             final_summary = "Workflow completed successfully."
         else:
-            final_status = "review"
-            final_summary = "Workflow finished with review or unresolved issues."
+            final_status = "blocked"
+            failure_summary = str(getattr(result, "failure_summary", "") or "").strip()
+            final_summary = failure_summary or "Workflow finished with unresolved review or test issues."
 
         store.update_work_item_status(work_item_id, final_status)
     except Exception as e:

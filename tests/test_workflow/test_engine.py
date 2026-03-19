@@ -483,7 +483,7 @@ class TestWorkflowEngineInit:
         assert engine._qas is mock_qa_sms
         assert engine._project_id == "proj-default"
         assert engine._work_item_id is None
-        assert engine._max_review == 5
+        assert engine._max_review == 10
         assert engine._mode == WorkMode.full
         assert engine._ask is not None
         assert callable(engine._ask)
