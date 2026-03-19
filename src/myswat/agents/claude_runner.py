@@ -26,6 +26,8 @@ class ClaudeRunner(AgentRunner):
     Claude is not launched.
     """
 
+    EMPTY_OUTPUT_EXIT_CODE = -3
+
     def __init__(
         self,
         cli_path: str,
@@ -89,6 +91,15 @@ class ClaudeRunner(AgentRunner):
             self._requested_session_id = str(uuid.uuid4())
 
         response = super().invoke(prompt, system_context=system_context)
+        if response.success and not response.content.strip():
+            return response.__class__(
+                content="Claude CLI returned empty output.",
+                exit_code=self.EMPTY_OUTPUT_EXIT_CODE,
+                raw_stdout=response.raw_stdout,
+                raw_stderr=response.raw_stderr,
+                token_usage=response.token_usage,
+                cancelled=response.cancelled,
+            )
         if response.success and self._cli_session_id is not None:
             self._requested_session_id = None
         return response
@@ -96,29 +107,19 @@ class ClaudeRunner(AgentRunner):
     def build_command(self, prompt: str, system_context: str | None = None) -> list[str]:
         session_id = self._requested_session_id or str(uuid.uuid4())
         self._requested_session_id = session_id
-
-        cmd = [self.cli_path]
-        cmd.extend(self._base_flags())
-        cmd.extend(["--model", self.model, "--session-id", session_id])
-
-        if self.workdir:
-            cmd.extend(["--add-dir", self.workdir])
-        if system_context:
-            cmd.extend(["--append-system-prompt", system_context])
-
-        cmd.append(prompt)
-        return cmd
+        return self._build_command(
+            prompt,
+            session_flag="--session-id",
+            session_value=session_id,
+            system_context=system_context,
+        )
 
     def build_resume_command(self, prompt: str) -> list[str]:
-        cmd = [self.cli_path]
-        cmd.extend(self._base_flags())
-        cmd.extend(["--model", self.model, "--resume", self._cli_session_id])
-
-        if self.workdir:
-            cmd.extend(["--add-dir", self.workdir])
-
-        cmd.append(prompt)
-        return cmd
+        return self._build_command(
+            prompt,
+            session_flag="--resume",
+            session_value=self._cli_session_id,
+        )
 
     def extract_session_id(self, stdout: str, stderr: str) -> str | None:
         if self._requested_session_id:
@@ -229,6 +230,26 @@ class ClaudeRunner(AgentRunner):
                         parts.append(text)
             return "\n".join(parts).strip()
         return ""
+
+    def _build_command(
+        self,
+        prompt: str,
+        *,
+        session_flag: str,
+        session_value: str | None,
+        system_context: str | None = None,
+    ) -> list[str]:
+        cmd = [self.cli_path]
+        cmd.extend(self._base_flags())
+        cmd.extend(["--model", self.model, session_flag, session_value or ""])
+        # Rely on subprocess cwd for repo scoping instead of --add-dir.
+        # This keeps the Claude invocation shape simple and avoids CLI quirks
+        # where --resume combined with --add-dir can return exit 0 with no output.
+        if system_context:
+            cmd.extend(["--append-system-prompt", system_context])
+
+        cmd.append(prompt)
+        return cmd
 
     def _validate_launch_environment(self) -> None:
         http_proxy = self._first_env("http_proxy", "HTTP_PROXY")

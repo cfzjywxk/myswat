@@ -23,6 +23,13 @@ def _parse_verdict(raw: str) -> ReviewVerdict:
     """Parse reviewer output into a structured ReviewVerdict."""
     text = raw.strip()
 
+    if not text:
+        return ReviewVerdict(
+            verdict="changes_requested",
+            issues=["Reviewer returned empty output."],
+            summary="Reviewer returned empty output; treating as changes_requested.",
+        )
+
     # Extract JSON from markdown code blocks
     if "```json" in text:
         text = text.split("```json")[1].split("```")[0].strip()

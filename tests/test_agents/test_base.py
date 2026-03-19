@@ -491,6 +491,9 @@ class TestAgentRunnerInvoke:
         assert call_kwargs.get("stdout") == subprocess.PIPE
         assert call_kwargs.get("stderr") == subprocess.PIPE
         assert call_kwargs.get("text") is True
+        assert call_kwargs.get("encoding") == "utf-8"
+        assert call_kwargs.get("errors") == "replace"
+        assert call_kwargs.get("bufsize") == 1
 
     @patch("myswat.agents.base.subprocess.Popen")
     def test_invoke_clears_process_after_completion(self, mock_popen_cls):

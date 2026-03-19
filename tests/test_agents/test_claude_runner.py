@@ -64,7 +64,7 @@ class TestBuildCommand:
         assert cmd[0] == "/usr/bin/claude"
         assert "--session-id" in cmd
         assert cmd[cmd.index("--model") + 1] == "claude-sonnet-4-6"
-        assert cmd[cmd.index("--add-dir") + 1] == "/tmp/project"
+        assert "--add-dir" not in cmd
         assert cmd[cmd.index("--append-system-prompt") + 1] == "You are helpful"
         assert cmd[-1] == "fix it"
         assert runner._requested_session_id is not None
@@ -77,12 +77,11 @@ class TestBuildCommand:
         assert "--session-id" not in cmd
         assert cmd[-1] == "continue"
 
-    def test_build_resume_command_includes_workdir(self, runner):
+    def test_build_resume_command_omits_workdir(self, runner):
         runner.workdir = "/tmp/project"
         runner.restore_session("b6984f9a-78eb-4f15-9ed8-cde0fd9980b1")
         cmd = runner.build_resume_command("continue")
-        assert "--add-dir" in cmd
-        assert cmd[cmd.index("--add-dir") + 1] == "/tmp/project"
+        assert "--add-dir" not in cmd
 
 
 class TestOutputParsing:
@@ -165,6 +164,16 @@ class TestEnvironmentValidation:
                 runner.invoke("hello")
 
         mock_super_invoke.assert_not_called()
+
+    @patch("myswat.agents.base.AgentRunner.invoke", autospec=True)
+    def test_invoke_treats_empty_success_as_error(self, mock_super_invoke, runner):
+        mock_super_invoke.return_value = AgentResponse(content="", exit_code=0)
+
+        with patch.object(runner, "_validate_launch_environment"):
+            response = runner.invoke("hello")
+
+        assert response.exit_code == ClaudeRunner.EMPTY_OUTPUT_EXIT_CODE
+        assert response.content == "Claude CLI returned empty output."
 
     @patch("myswat.agents.claude_runner.subprocess.run")
     @patch("myswat.agents.base.subprocess.Popen")

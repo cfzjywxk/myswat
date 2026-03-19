@@ -419,3 +419,26 @@ class TestMemoryFallbacks:
             "agent_retry",
             {"attempt": 1, "next_attempt": 2, "max_attempts": 3, "next_timeout": 30},
         )
+
+    def test_send_retries_empty_output_runner_response(self):
+        sm, store, runner = _make_sm()
+        store.get_active_session.return_value = None
+        store.create_session.return_value = Session(id=1, agent_id=1, session_uuid="uuid-1")
+        store.get_project_memory_revision.return_value = 3
+        store.count_session_turns.return_value = 2
+        runner.timeout = 20
+        type(runner).is_session_started = PropertyMock(return_value=False)
+        sm._retriever.build_context_for_agent = MagicMock(return_value="ctx")
+        runner.invoke.side_effect = [
+            AgentResponse(content="Claude CLI returned empty output.", exit_code=-3, cancelled=False),
+            AgentResponse(content="ok", exit_code=0, cancelled=False),
+        ]
+
+        captured = io.StringIO()
+        with patch("sys.stderr", captured):
+            response = sm.send("hello", task_description="greet")
+
+        assert response.content == "ok"
+        assert runner.reset_session.call_count == 1
+        assert sm._retriever.build_context_for_agent.call_count == 2
+        assert "Agent returned empty output (attempt 1/3)" in captured.getvalue()

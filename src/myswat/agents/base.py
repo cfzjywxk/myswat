@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import signal
 import subprocess
 import threading
 import time
@@ -171,16 +170,21 @@ class AgentRunner(ABC):
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
         stalled = False
+        proc: subprocess.Popen | None = None
 
         try:
-            self._process = subprocess.Popen(
+            proc = subprocess.Popen(
                 cmd,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
                 cwd=self.workdir,
             )
+            self._process = proc
 
             # Watchdog thread — monitors stdout/stderr activity or wall-clock time
             last_activity = time.monotonic()
@@ -190,7 +194,9 @@ class AgentRunner(ABC):
             # Stderr output also counts as activity for stall detection.
             def _read_stderr():
                 nonlocal last_activity
-                for line in self._process.stderr:
+                if proc is None or proc.stderr is None:
+                    return
+                for line in proc.stderr:
                     last_activity = time.monotonic()
                     stderr_lines.append(line)
 
@@ -201,7 +207,9 @@ class AgentRunner(ABC):
             if self.timeout:
                 def _watchdog():
                     nonlocal stalled
-                    while self._process and self._process.poll() is None:
+                    if proc is None:
+                        return
+                    while proc.poll() is None:
                         now = time.monotonic()
                         if use_activity_monitoring:
                             elapsed_since_activity = now - last_activity
@@ -210,7 +218,7 @@ class AgentRunner(ABC):
                         if elapsed_since_activity > self.timeout:
                             stalled = True
                             try:
-                                self._process.kill()
+                                proc.kill()
                             except OSError:
                                 pass
                             return
@@ -222,19 +230,20 @@ class AgentRunner(ABC):
                 watcher = None
 
             # Read stdout line by line — feeds live_output
-            for line in self._process.stdout:
-                last_activity = time.monotonic()
-                stdout_lines.append(line)
-                formatted = self.format_live_line(line.rstrip("\n"))
-                if formatted is not None:
-                    with self._live_lock:
-                        self._live_lines.append(formatted)
+            if proc.stdout is not None:
+                for line in proc.stdout:
+                    last_activity = time.monotonic()
+                    stdout_lines.append(line)
+                    formatted = self.format_live_line(line.rstrip("\n"))
+                    if formatted is not None:
+                        with self._live_lock:
+                            self._live_lines.append(formatted)
 
-            self._process.wait()
+            proc.wait()
             stderr_thread.join(timeout=5)
             if watcher is not None:
                 watcher.join(timeout=2)
-            returncode = self._process.returncode
+            returncode = proc.returncode
 
         except FileNotFoundError:
             return AgentResponse(

@@ -347,6 +347,34 @@ class WorkflowEngine:
                 )
                 return
 
+            if event_type == "agent_empty_output":
+                message = f"{sm.agent_role} returned empty output"
+                if attempt and max_attempts:
+                    message += f" ({attempt}/{max_attempts})"
+                self._emit(
+                    "warning",
+                    message,
+                    stage=stage,
+                    agent_role=sm.agent_role,
+                    **payload,
+                )
+                self._emit(
+                    "agent_working",
+                    message,
+                    stage=stage,
+                    agent_role=sm.agent_role,
+                    **payload,
+                )
+                self._append_process_event(
+                    event_type="agent_empty_output",
+                    title="Agent returned empty output",
+                    summary=message,
+                    from_role=sm.agent_role,
+                    to_role="myswat",
+                    updated_by_agent_id=sm.agent_id,
+                )
+                return
+
             if event_type == "agent_retry":
                 next_attempt = int(payload.get("next_attempt") or 0)
                 next_timeout = payload.get("next_timeout")

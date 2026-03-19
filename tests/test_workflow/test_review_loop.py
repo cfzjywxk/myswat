@@ -171,10 +171,14 @@ class TestParseVerdict:
     def test_empty_string_input(self):
         result = _parse_verdict("")
         assert result.verdict == "changes_requested"
+        assert result.issues == ["Reviewer returned empty output."]
+        assert result.summary == "Reviewer returned empty output; treating as changes_requested."
 
     def test_whitespace_only_input(self):
         result = _parse_verdict("   \n\t  ")
         assert result.verdict == "changes_requested"
+        assert result.issues == ["Reviewer returned empty output."]
+        assert result.summary == "Reviewer returned empty output; treating as changes_requested."
 
 
 # ===========================================================================

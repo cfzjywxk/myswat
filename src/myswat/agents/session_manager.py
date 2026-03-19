@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _MEMORY_LAYER_ERRORS = (pymysql.err.Error, OSError)
+_EMPTY_OUTPUT_EXIT_CODE = -3
 
 
 class SessionManager:
@@ -172,7 +173,7 @@ class SessionManager:
         """
         self._runner.reset_session()
 
-    # Maximum stall retries before giving up.
+    # Maximum retries for retryable runner failures before giving up.
     _MAX_STALL_RETRIES = 3
 
     def _build_system_context_and_track_revision(
@@ -231,10 +232,11 @@ class SessionManager:
             1. Just send the prompt — AI already has all context
             2. No TiDB context rebuild (the AI remembers naturally)
 
-        Stall handling:
-            If the agent stalls (exit_code == -1, not cancelled), retry up to
-            _MAX_STALL_RETRIES times with increasing timeout. Each retry resets
-            the AI session and rebuilds system context from TiDB.
+        Retryable runner failures:
+            If the agent stalls (exit_code == -1) or returns an empty response
+            (exit_code == -3), retry up to _MAX_STALL_RETRIES times with
+            increasing timeout. Each retry resets the AI session and rebuilds
+            system context from TiDB.
 
         Always:
             - Save user + assistant turns to TiDB
@@ -293,28 +295,44 @@ class SessionManager:
                 system_context=sent_system_context,
             )
 
-            is_stall = response.exit_code == -1 and not response.cancelled
-            if not is_stall:
+            retry_reason = self._retryable_runner_failure_reason(response)
+            if retry_reason is None:
                 break  # success, explicit error, or user cancel
 
             timeout_seconds = self._runner.timeout or original_timeout
-            if status_callback is not None:
-                try:
-                    status_callback(
-                        "agent_stalled",
-                        {
-                            "attempt": attempt,
-                            "max_attempts": self._MAX_STALL_RETRIES,
-                            "timeout": timeout_seconds,
-                        },
-                    )
-                except Exception:
-                    pass
-
-            print(
-                f"[myswat] Agent stalled (attempt {attempt}/{self._MAX_STALL_RETRIES})",
-                file=sys.stderr,
-            )
+            if retry_reason == "stall":
+                if status_callback is not None:
+                    try:
+                        status_callback(
+                            "agent_stalled",
+                            {
+                                "attempt": attempt,
+                                "max_attempts": self._MAX_STALL_RETRIES,
+                                "timeout": timeout_seconds,
+                            },
+                        )
+                    except Exception:
+                        pass
+                print(
+                    f"[myswat] Agent stalled (attempt {attempt}/{self._MAX_STALL_RETRIES})",
+                    file=sys.stderr,
+                )
+            else:
+                if status_callback is not None:
+                    try:
+                        status_callback(
+                            "agent_empty_output",
+                            {
+                                "attempt": attempt,
+                                "max_attempts": self._MAX_STALL_RETRIES,
+                            },
+                        )
+                    except Exception:
+                        pass
+                print(
+                    f"[myswat] Agent returned empty output (attempt {attempt}/{self._MAX_STALL_RETRIES})",
+                    file=sys.stderr,
+                )
 
             if attempt >= self._MAX_STALL_RETRIES:
                 break  # exhausted retries
@@ -379,6 +397,16 @@ class SessionManager:
         self._update_progress(prompt, response, elapsed)
 
         return response
+
+    @staticmethod
+    def _retryable_runner_failure_reason(response: AgentResponse) -> str | None:
+        if response.cancelled:
+            return None
+        if response.exit_code == -1:
+            return "stall"
+        if response.exit_code == _EMPTY_OUTPUT_EXIT_CODE:
+            return "empty_output"
+        return None
 
     @staticmethod
     def _fmt_duration(seconds: float) -> str:
