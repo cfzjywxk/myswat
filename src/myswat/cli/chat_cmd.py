@@ -112,6 +112,51 @@ def _extract_delegation(text: str) -> tuple[str, str] | None:
     return (task, mode) if task else None
 
 
+def _strip_wrapping_quotes(text: str) -> str:
+    stripped = text.strip()
+    if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {"'", '"'}:
+        return stripped[1:-1].strip()
+    return stripped
+
+
+def _detect_direct_delegation_request(role: str, text: str) -> tuple[str, str] | None:
+    normalized = _strip_wrapping_quotes(text)
+    lowered = normalized.lower()
+    team_requested = any(
+        phrase in lowered
+        for phrase in (
+            "with your team",
+            "through your team",
+            "using your team",
+            "use your team",
+            "delegate to your team",
+        )
+    )
+    if not team_requested:
+        return None
+
+    if role == "architect":
+        wants_full = (
+            ("design" in lowered and "implement" in lowered)
+            or "end-to-end" in lowered
+            or "take it from here" in lowered
+            or "deliver" in lowered
+        )
+        if wants_full:
+            return normalized, WorkMode.full.value
+        if "design" in lowered:
+            return normalized, WorkMode.design.value
+        if any(keyword in lowered for keyword in ("implement", "build", "fix", "add")):
+            return normalized, DEFAULT_DELEGATION_MODE
+
+    if role in {"qa_main", "qa_vice"} and (
+        "test plan" in lowered or "testing approach" in lowered
+    ):
+        return normalized, "testplan"
+
+    return None
+
+
 def run_chat(
     project_slug: str,
     role: str = "developer",
@@ -175,6 +220,86 @@ def run_chat(
 
     prompt_session = _build_prompt_session(settings, f"chat-{project_slug}")
 
+    def _handle_delegation(
+        delegation_task: str,
+        delegation_mode: str,
+        source_note: str | None = None,
+    ) -> None:
+        nonlocal sm
+
+        delegation_spec = DELEGATION_MODE_SPECS.get(delegation_mode)
+        if delegation_spec is None:
+            console.print(
+                f"[yellow]Delegation mode '{delegation_mode}' is not supported.[/yellow]"
+            )
+            return
+
+        if current_role not in delegation_spec.allowed_roles:
+            allowed_roles = ", ".join(sorted(delegation_spec.allowed_roles))
+            console.print(
+                f"[yellow]Delegation mode '{delegation_mode}' is only available for role(s): {allowed_roles}. Current role: '{current_role}'.[/yellow]"
+            )
+            return
+
+        delegation_handlers = {
+            "workflow": lambda: _run_workflow_interactive(
+                store,
+                proj,
+                effective_workdir,
+                settings,
+                delegation_task,
+                prompt_session=prompt_session,
+                mode=delegation_spec.engine_mode,
+            ),
+            "design_review": lambda: _run_design_review_interactive(
+                store,
+                proj,
+                sm,
+                effective_workdir,
+                settings,
+                delegation_task,
+                prompt_session=prompt_session,
+            ),
+            "full_workflow": lambda: _run_full_workflow_interactive(
+                store,
+                proj,
+                sm,
+                effective_workdir,
+                settings,
+                delegation_task,
+                prompt_session=prompt_session,
+            ),
+            "testplan_review": lambda: _run_testplan_review_interactive(
+                store,
+                proj,
+                sm,
+                effective_workdir,
+                settings,
+                delegation_task,
+                prompt_session=prompt_session,
+            ),
+        }
+        handler = delegation_handlers.get(delegation_spec.chat_handler)
+        if handler is None:
+            console.print(
+                f"[yellow]Delegation mode '{delegation_mode}' is misconfigured.[/yellow]"
+            )
+            return
+
+        console.print(
+            f"\n[bold cyan]{delegation_spec.banner}:[/bold cyan] {delegation_task[:160]}"
+        )
+        if source_note:
+            console.print(f"[dim]{source_note}[/dim]")
+        elif delegation_spec.detail:
+            console.print(f"[dim]{delegation_spec.detail}[/dim]")
+        if delegation_spec.save_session_before_run and sm:
+            with console.status("[dim]Saving session to TiDB...[/dim]", spinner="dots"):
+                sm.close()
+        handler()
+        if delegation_spec.reset_role_session:
+            sm = _switch_agent(current_role, settings)
+
     # REPL
     while True:
         try:
@@ -182,7 +307,7 @@ def run_chat(
             user_input = prompt_session.prompt(
                 f"you ({current_role})> ",
                 multiline=False,
-            ).strip()
+            )
         except EOFError:
             console.print("\n[dim]Goodbye.[/dim]")
             break
@@ -190,6 +315,7 @@ def run_chat(
             console.print("\n[dim]Type /quit to exit, or Ctrl+D.[/dim]")
             continue
 
+        user_input = _strip_wrapping_quotes(user_input)
         if not user_input:
             continue
 
@@ -317,6 +443,16 @@ def run_chat(
             if sm is None:
                 continue
 
+        direct_delegation = _detect_direct_delegation_request(current_role, user_input)
+        if direct_delegation:
+            delegation_task, delegation_mode = direct_delegation
+            _handle_delegation(
+                delegation_task,
+                delegation_mode,
+                source_note="User explicitly asked to run this with the team, so skipping the architect round-trip.",
+            )
+            continue
+
         response, elapsed = _send_with_timer(console, sm, user_input)
 
         if response.cancelled:
@@ -347,72 +483,7 @@ def run_chat(
             delegation = _extract_delegation(response.content)
             if delegation:
                 delegation_task, delegation_mode = delegation
-                delegation_spec = DELEGATION_MODE_SPECS.get(delegation_mode)
-                if delegation_spec is None:
-                    console.print(
-                        f"[yellow]Delegation mode '{delegation_mode}' is not supported.[/yellow]"
-                    )
-                elif current_role not in delegation_spec.allowed_roles:
-                    allowed_roles = ", ".join(sorted(delegation_spec.allowed_roles))
-                    console.print(
-                        f"[yellow]Delegation mode '{delegation_mode}' is only available for role(s): {allowed_roles}. Current role: '{current_role}'.[/yellow]"
-                    )
-                else:
-                    delegation_handlers = {
-                        "workflow": lambda: _run_workflow_interactive(
-                            store,
-                            proj,
-                            effective_workdir,
-                            settings,
-                            delegation_task,
-                            prompt_session=prompt_session,
-                            mode=delegation_spec.engine_mode,
-                        ),
-                        "design_review": lambda: _run_design_review_interactive(
-                            store,
-                            proj,
-                            sm,
-                            effective_workdir,
-                            settings,
-                            delegation_task,
-                            prompt_session=prompt_session,
-                        ),
-                        "full_workflow": lambda: _run_full_workflow_interactive(
-                            store,
-                            proj,
-                            sm,
-                            effective_workdir,
-                            settings,
-                            delegation_task,
-                            prompt_session=prompt_session,
-                        ),
-                        "testplan_review": lambda: _run_testplan_review_interactive(
-                            store,
-                            proj,
-                            sm,
-                            effective_workdir,
-                            settings,
-                            delegation_task,
-                            prompt_session=prompt_session,
-                        ),
-                    }
-                    handler = delegation_handlers.get(delegation_spec.chat_handler)
-                    if handler is None:
-                        console.print(
-                            f"[yellow]Delegation mode '{delegation_mode}' is misconfigured.[/yellow]"
-                        )
-                    else:
-                        console.print(
-                            f"\n[bold cyan]{delegation_spec.banner}:[/bold cyan] {delegation_task[:160]}"
-                        )
-                        if delegation_spec.detail:
-                            console.print(f"[dim]{delegation_spec.detail}[/dim]")
-                        if delegation_spec.save_session_before_run and sm:
-                            with console.status("[dim]Saving session to TiDB...[/dim]", spinner="dots"):
-                                sm.close()
-                        handler()
-                        if delegation_spec.reset_role_session:
-                            sm = _switch_agent(current_role, settings)
+                _handle_delegation(delegation_task, delegation_mode)
         else:
             console.print(Panel(
                 response.content,

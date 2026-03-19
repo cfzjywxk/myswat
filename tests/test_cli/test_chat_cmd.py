@@ -1416,6 +1416,58 @@ class TestRunChat:
         # The requirement (7th positional arg) should be the task
         assert mock_full_workflow.call_args.args[5] == "design and implement the auth module"
 
+    @patch("myswat.cli.chat_cmd._run_full_workflow_interactive")
+    @patch("myswat.cli.chat_cmd._send_with_timer")
+    @patch("myswat.cli.chat_cmd.PromptSession")
+    @patch("myswat.cli.chat_cmd.preload_model")
+    @patch("myswat.cli.chat_cmd.MySwatSettings")
+    @patch("myswat.cli.chat_cmd.TiDBPool")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
+    @patch("myswat.cli.chat_cmd.MemoryStore")
+    @patch("myswat.cli.chat_cmd.SessionManager")
+    def test_architect_direct_team_request_skips_round_trip_and_starts_full_workflow(
+        self,
+        mock_sm_cls,
+        mock_store_cls,
+        mock_mig,
+        mock_pool_cls,
+        mock_settings_cls,
+        mock_preload,
+        mock_prompt_session_cls,
+        mock_send_timer,
+        mock_full_workflow,
+    ):
+        from myswat.cli.chat_cmd import run_chat
+
+        settings = self._setup_mocks()
+        mock_settings_cls.return_value = settings
+
+        architect_row = _agent_row("architect")
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = _proj()
+        mock_store.get_agent.return_value = architect_row
+        mock_store.list_agents.return_value = [architect_row]
+        mock_store_cls.return_value = mock_store
+
+        sm = MagicMock()
+        sm.session = SimpleNamespace(session_uuid="uuid-1234")
+        sm.agent_id = 9
+        mock_sm_cls.return_value = sm
+
+        prompt_session = MagicMock()
+        prompt_session.prompt.side_effect = [
+            '"Design and implement the auth module with your team"',
+            "/quit",
+        ]
+        mock_prompt_session_cls.return_value = prompt_session
+
+        run_chat("proj", role="architect")
+
+        mock_send_timer.assert_not_called()
+        mock_full_workflow.assert_called_once()
+        assert mock_full_workflow.call_args.args[2] is sm
+        assert mock_full_workflow.call_args.args[5] == "Design and implement the auth module with your team"
+
     @patch("myswat.cli.chat_cmd.console.print")
     @patch("myswat.cli.chat_cmd._run_workflow_interactive")
     @patch("myswat.cli.chat_cmd._send_with_timer")

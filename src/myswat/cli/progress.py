@@ -29,6 +29,7 @@ _TASK_MONITOR_PROCESS_LINES = 4
 _TASK_MONITOR_REFRESH_PER_SECOND = 8
 _TASK_MONITOR_LOOP_INTERVAL = 0.1
 _TASK_MONITOR_STORE_POLL_SECONDS = 1.0
+_SEND_CANCEL_GRACE_SECONDS = 5.0
 
 
 def _check_esc() -> bool:
@@ -535,6 +536,12 @@ def _send_with_timer(
         raise error[0]
 
     if cancelled and result[0] is None:
+        worker.join(timeout=_SEND_CANCEL_GRACE_SECONDS)
+        elapsed = time.monotonic() - start
+        if error[0] is not None:
+            raise error[0]
+        if result[0] is not None:
+            return result[0], elapsed
         return AgentResponse(content="Request cancelled.", exit_code=-1, cancelled=True), elapsed
 
     return result[0], elapsed

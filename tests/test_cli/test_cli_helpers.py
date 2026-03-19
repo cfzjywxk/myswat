@@ -4,7 +4,11 @@ import re
 import pytest
 from unittest.mock import MagicMock, patch
 
-from myswat.cli.chat_cmd import _extract_delegation
+from myswat.cli.chat_cmd import (
+    _detect_direct_delegation_request,
+    _extract_delegation,
+    _strip_wrapping_quotes,
+)
 from myswat.cli.init_cmd import _slugify
 from myswat.cli.main import _infer_stage_labels
 from myswat.cli.progress import _fmt_duration, _build_live_display
@@ -140,6 +144,26 @@ class TestExtractDelegation:
         assert result is not None
         assert "no task prefix here" in result[0]
         assert result[1] == "develop"
+
+
+class TestDirectChatDelegation:
+    def test_strip_wrapping_quotes_removes_outer_pair_only(self):
+        assert _strip_wrapping_quotes('"hello world"') == "hello world"
+        assert _strip_wrapping_quotes("'hello world'") == "hello world"
+        assert _strip_wrapping_quotes('"hello') == '"hello'
+
+    def test_detect_direct_architect_full_workflow_request(self):
+        result = _detect_direct_delegation_request(
+            "architect",
+            '"Design and implement the auth module with your team"',
+        )
+        assert result == ("Design and implement the auth module with your team", "full")
+
+    def test_detect_direct_request_requires_team_language(self):
+        assert _detect_direct_delegation_request(
+            "architect",
+            "Design and implement the auth module",
+        ) is None
 
 
 class TestWorkflowModes:

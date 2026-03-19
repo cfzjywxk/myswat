@@ -89,6 +89,26 @@ class _JoinStopsThread:
         return self._alive
 
 
+class _CancelThenFinishThread:
+    def __init__(self, target=None, daemon=None):
+        self._target = target
+        self._alive = False
+
+    def start(self):
+        self._alive = True
+
+    def join(self, timeout=None):
+        if timeout and timeout >= 1 and self._alive:
+            try:
+                if self._target is not None:
+                    self._target()
+            finally:
+                self._alive = False
+
+    def is_alive(self):
+        return self._alive
+
+
 def test_check_esc_reads_escape_character():
     with patch("myswat.cli.progress.select.select", return_value=([True], [], [])):
         with patch("myswat.cli.progress.sys.stdin.read", return_value="\x1b"):
@@ -293,4 +313,33 @@ def test_send_with_timer_returns_cancelled_response_when_worker_keeps_running():
 
     assert response.cancelled is True
     assert response.exit_code == -1
+    runner.cancel.assert_called_once()
+
+
+def test_send_with_timer_waits_for_cancelled_worker_result_before_fabricating_response():
+    runner = MagicMock()
+    runner.live_output = []
+    runner.clear_live_output.return_value = None
+    runner.cancel.return_value = None
+
+    sm = MagicMock()
+    sm._runner = runner
+    sm.send.return_value = AgentResponse(
+        content="Request cancelled.",
+        exit_code=-15,
+        cancelled=True,
+    )
+
+    with patch("myswat.cli.progress.threading.Thread", _CancelThenFinishThread):
+        with patch("myswat.cli.progress.Live", _FakeLive):
+            with patch("myswat.cli.progress.sys.stdin.fileno", return_value=0):
+                with patch("myswat.cli.progress.termios.tcgetattr", return_value=object()):
+                    with patch("myswat.cli.progress.termios.tcsetattr"):
+                        with patch("myswat.cli.progress.tty.setcbreak"):
+                            with patch("myswat.cli.progress._check_esc", return_value=True):
+                                response, _elapsed = _send_with_timer(MagicMock(), sm, "hello")
+
+    assert response.cancelled is True
+    assert response.exit_code == -15
+    sm.send.assert_called_once_with("hello", task_description=None)
     runner.cancel.assert_called_once()
