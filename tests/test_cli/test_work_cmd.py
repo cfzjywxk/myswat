@@ -62,7 +62,7 @@ class TestRunWork:
 
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
-    @patch("myswat.cli.work_cmd.run_migrations")
+    @patch("myswat.cli.work_cmd.ensure_schema")
     @patch("myswat.cli.work_cmd.MemoryStore")
     def test_project_not_found(self, mock_store_cls, mock_mig, mock_pool_cls,
                                 mock_settings_cls):
@@ -74,7 +74,7 @@ class TestRunWork:
             run_work("missing", "do stuff")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
-    @patch("myswat.cli.work_cmd.run_migrations")
+    @patch("myswat.cli.work_cmd.ensure_schema")
     @patch("myswat.cli.work_cmd.MemoryStore")
     def test_dev_not_found(self, mock_store_cls, mock_mig, mock_pool_cls,
                             mock_settings_cls):
@@ -89,7 +89,7 @@ class TestRunWork:
             run_work("proj", "do stuff")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
-    @patch("myswat.cli.work_cmd.run_migrations")
+    @patch("myswat.cli.work_cmd.ensure_schema")
     @patch("myswat.cli.work_cmd.MemoryStore")
     def test_no_qa_agents(self, mock_store_cls, mock_mig, mock_pool_cls,
                            mock_settings_cls):
@@ -117,7 +117,7 @@ class TestRunWork:
     @patch("myswat.cli.work_cmd.PromptSession")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
-    @patch("myswat.cli.work_cmd.run_migrations")
+    @patch("myswat.cli.work_cmd.ensure_schema")
     @patch("myswat.cli.work_cmd.MemoryStore")
     @patch("myswat.cli.work_cmd.SessionManager")
     def test_success(self, mock_sm_cls, mock_store_cls, mock_mig,
@@ -173,7 +173,7 @@ class TestRunWork:
     @patch("myswat.cli.work_cmd.PromptSession")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
-    @patch("myswat.cli.work_cmd.run_migrations")
+    @patch("myswat.cli.work_cmd.ensure_schema")
     @patch("myswat.cli.work_cmd.MemoryStore")
     @patch("myswat.cli.work_cmd.SessionManager")
     def test_foreground_run_prints_tracking_commands(
@@ -231,7 +231,7 @@ class TestRunWork:
     @patch("myswat.cli.work_cmd.PromptSession")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
-    @patch("myswat.cli.work_cmd.run_migrations")
+    @patch("myswat.cli.work_cmd.ensure_schema")
     @patch("myswat.cli.work_cmd.MemoryStore")
     @patch("myswat.cli.work_cmd.SessionManager")
     def test_foreground_run_uses_task_monitor(
@@ -287,7 +287,7 @@ class TestRunWork:
     @patch("myswat.cli.work_cmd.PromptSession")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
-    @patch("myswat.cli.work_cmd.run_migrations")
+    @patch("myswat.cli.work_cmd.ensure_schema")
     @patch("myswat.cli.work_cmd.MemoryStore")
     @patch("myswat.cli.work_cmd.SessionManager")
     def test_failure(self, mock_sm_cls, mock_store_cls, mock_mig,
@@ -330,7 +330,7 @@ class TestRunWork:
     @patch("myswat.cli.work_cmd.WorkflowEngine")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
-    @patch("myswat.cli.work_cmd.run_migrations")
+    @patch("myswat.cli.work_cmd.ensure_schema")
     @patch("myswat.cli.work_cmd.MemoryStore")
     @patch("myswat.cli.work_cmd.SessionManager")
     def test_exception(self, mock_sm_cls, mock_store_cls, mock_mig,
@@ -372,10 +372,10 @@ class TestRunWork:
     @patch("myswat.cli.work_cmd.WorkflowEngine")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
-    @patch("myswat.cli.work_cmd.run_migrations")
+    @patch("myswat.cli.work_cmd.ensure_schema")
     @patch("myswat.cli.work_cmd.MemoryStore")
     @patch("myswat.cli.work_cmd.SessionManager")
-    def test_migrations_applied_printed(self, mock_sm_cls,
+    def test_schema_bootstrap_runs_printed(self, mock_sm_cls,
                                          mock_store_cls, mock_mig,
                                          mock_pool_cls, mock_settings_cls,
                                          mock_engine_cls):
@@ -416,7 +416,7 @@ class TestRunWork:
     @patch("myswat.cli.work_cmd.WorkflowEngine")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
-    @patch("myswat.cli.work_cmd.run_migrations")
+    @patch("myswat.cli.work_cmd.ensure_schema")
     @patch("myswat.cli.work_cmd.MemoryStore")
     @patch("myswat.cli.work_cmd.SessionManager")
     def test_design_mode_threads_to_engine_and_persists_metadata(
@@ -466,7 +466,7 @@ class TestRunWork:
     @patch("myswat.cli.work_cmd.PromptSession")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
-    @patch("myswat.cli.work_cmd.run_migrations")
+    @patch("myswat.cli.work_cmd.ensure_schema")
     @patch("myswat.cli.work_cmd.MemoryStore")
     @patch("myswat.cli.work_cmd.SessionManager")
     def test_foreground_auto_approve_is_forwarded(
@@ -517,7 +517,7 @@ class TestRunWork:
     @patch("myswat.cli.work_cmd.subprocess.Popen")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
-    @patch("myswat.cli.work_cmd.run_migrations")
+    @patch("myswat.cli.work_cmd.ensure_schema")
     @patch("myswat.cli.work_cmd.MemoryStore")
     def test_background_launch(
         self,
@@ -587,7 +587,7 @@ class TestRunWork:
     @patch("myswat.cli.work_cmd.WorkflowEngine")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
-    @patch("myswat.cli.work_cmd.run_migrations")
+    @patch("myswat.cli.work_cmd.ensure_schema")
     @patch("myswat.cli.work_cmd.MemoryStore")
     @patch("myswat.cli.work_cmd.SessionManager")
     def test_background_worker_reuses_existing_work_item(

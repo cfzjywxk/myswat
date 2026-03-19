@@ -122,7 +122,7 @@ def test_history_command_handles_missing_project_and_empty_rows(
     assert "No recent turns found." in empty.stdout
 
 
-@patch("myswat.db.schema.run_migrations", return_value=["v001"])
+@patch("myswat.db.schema.ensure_schema", return_value=["v001"])
 @patch("myswat.db.connection.TiDBPool")
 @patch("myswat.config.settings.MySwatSettings")
 def test_reset_without_project_prints_reinit_hint(mock_settings_cls, mock_pool_cls, mock_migrations):
@@ -137,7 +137,7 @@ def test_reset_without_project_prints_reinit_hint(mock_settings_cls, mock_pool_c
     result = CliRunner().invoke(app, ["reset", "--yes"])
 
     assert result.exit_code == 0
-    assert "Database is empty. Run 'myswat init <name>' to create a project." in result.stdout
+    assert "Database schema is ready. Run 'myswat init <name>' to create a project." in result.stdout
 
 
 def test_build_teamwork_flow_entries_returns_empty_without_rows():

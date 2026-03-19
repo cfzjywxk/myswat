@@ -646,7 +646,7 @@ def test_make_prompt_callback_falls_back_to_input():
 @patch("myswat.cli.chat_cmd.preload_model")
 @patch("myswat.cli.chat_cmd.MySwatSettings")
 @patch("myswat.cli.chat_cmd.TiDBPool")
-@patch("myswat.cli.chat_cmd.run_migrations")
+@patch("myswat.cli.chat_cmd.ensure_schema")
 @patch("myswat.cli.chat_cmd.MemoryStore")
 @patch("myswat.cli.chat_cmd.SessionManager")
 def test_run_chat_missing_initial_agent_exits(
@@ -680,7 +680,7 @@ def test_run_chat_missing_initial_agent_exits(
 @patch("myswat.cli.chat_cmd.preload_model")
 @patch("myswat.cli.chat_cmd.MySwatSettings")
 @patch("myswat.cli.chat_cmd.TiDBPool")
-@patch("myswat.cli.chat_cmd.run_migrations")
+@patch("myswat.cli.chat_cmd.ensure_schema")
 @patch("myswat.cli.chat_cmd.MemoryStore")
 @patch("myswat.cli.chat_cmd.SessionManager")
 def test_run_chat_history_without_active_session(
@@ -727,7 +727,7 @@ def test_run_chat_history_without_active_session(
 @patch("myswat.cli.chat_cmd.preload_model")
 @patch("myswat.cli.chat_cmd.MySwatSettings")
 @patch("myswat.cli.chat_cmd.TiDBPool")
-@patch("myswat.cli.chat_cmd.run_migrations")
+@patch("myswat.cli.chat_cmd.ensure_schema")
 @patch("myswat.cli.chat_cmd.MemoryStore")
 @patch("myswat.cli.chat_cmd.SessionManager")
 def test_run_chat_new_then_missing_agent_skips_message_send(
@@ -770,7 +770,7 @@ def test_run_chat_new_then_missing_agent_skips_message_send(
 @patch("myswat.cli.chat_cmd.preload_model")
 @patch("myswat.cli.chat_cmd.MySwatSettings")
 @patch("myswat.cli.chat_cmd.TiDBPool")
-@patch("myswat.cli.chat_cmd.run_migrations")
+@patch("myswat.cli.chat_cmd.ensure_schema")
 @patch("myswat.cli.chat_cmd.MemoryStore")
 @patch("myswat.cli.chat_cmd.SessionManager")
 def test_run_chat_chat_learn_failure_is_best_effort(
@@ -817,7 +817,7 @@ def test_run_chat_chat_learn_failure_is_best_effort(
 @patch("myswat.cli.chat_cmd.preload_model")
 @patch("myswat.cli.chat_cmd.MySwatSettings")
 @patch("myswat.cli.chat_cmd.TiDBPool")
-@patch("myswat.cli.chat_cmd.run_migrations")
+@patch("myswat.cli.chat_cmd.ensure_schema")
 @patch("myswat.cli.chat_cmd.MemoryStore")
 @patch("myswat.cli.chat_cmd.SessionManager")
 def test_run_chat_warns_on_misconfigured_delegation_handler(

@@ -282,7 +282,7 @@ def reset(
     description: str = typer.Option(None, "--desc", "-d", help="Project description for re-init"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ):
-    """Drop the TiDB database and re-create from scratch.
+    """Drop the TiDB database and re-create the current schema from scratch.
 
     WARNING: This destroys ALL data — projects, agents, sessions, knowledge,
     work items, review cycles. Use only when you want a clean slate.
@@ -291,7 +291,7 @@ def reset(
 
     from myswat.config.settings import MySwatSettings
     from myswat.db.connection import TiDBPool
-    from myswat.db.schema import run_migrations
+    from myswat.db.schema import ensure_schema
 
     console = Console()
     settings = MySwatSettings()
@@ -319,17 +319,17 @@ def reset(
     pool.execute(f"DROP DATABASE IF EXISTS `{db_name}`")
     console.print(f"[green]Database '{db_name}' dropped.[/green]")
 
-    # Re-create with fresh connection and run all migrations
+    # Re-create with a fresh connection and bootstrap the latest schema
     pool2 = TiDBPool(settings.tidb)
-    applied = run_migrations(pool2)
-    console.print(f"[green]Re-created database with {len(applied)} migrations.[/green]")
+    ensure_schema(pool2)
+    console.print(f"[green]Re-created database schema for '{db_name}'.[/green]")
 
     if project:
         from myswat.cli.init_cmd import run_init
         run_init(project, repo_path, description)
     else:
         console.print(
-            "\n[dim]Database is empty. Run 'myswat init <name>' to create a project.[/dim]"
+            "\n[dim]Database schema is ready. Run 'myswat init <name>' to create a project.[/dim]"
         )
 
 

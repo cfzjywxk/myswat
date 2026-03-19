@@ -12,7 +12,7 @@ from rich.console import Console
 
 from myswat.config.settings import MySwatSettings
 from myswat.db.connection import TiDBPool
-from myswat.db.schema import run_migrations
+from myswat.db.schema import ensure_schema
 from myswat.memory.store import MemoryStore
 from myswat.workflow.modes import QA_DELEGATION_MODES
 
@@ -36,13 +36,10 @@ def run_init(name: str, repo_path: str | None, description: str | None) -> None:
         console.print("[red]Cannot connect to TiDB. Check your config.[/red]")
         raise typer.Exit(1)
 
-    # Run migrations
-    console.print("[dim]Running schema migrations...[/dim]")
-    applied = run_migrations(pool)
-    if applied:
-        console.print(f"[green]Applied migrations: {applied}[/green]")
-    else:
-        console.print("[dim]Schema up to date.[/dim]")
+    # Ensure the current schema exists
+    console.print("[dim]Ensuring TiDB schema...[/dim]")
+    ensure_schema(pool)
+    console.print("[green]TiDB schema ready.[/green]")
 
     # Create project
     slug = _slugify(name)

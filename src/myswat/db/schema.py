@@ -1,49 +1,258 @@
-"""Schema migration runner for MySwat."""
+"""Schema bootstrap for MySwat."""
 
 from __future__ import annotations
 
-import importlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from myswat.db.connection import TiDBPool
 
-MIGRATION_MODULES = [
-    "myswat.db.migrations.v001_initial",
-    "myswat.db.migrations.v002_knowledge_source_file",
-    "myswat.db.migrations.v003_compaction_watermark",
-    "myswat.db.migrations.v004_architect_system_prompt",
-    "myswat.db.migrations.v005_review_cycles_artifact_unique_key",
-    "myswat.db.migrations.v006_flexible_vector_dimension",
-    "myswat.db.migrations.v007_conversation_persistence",
-    "myswat.db.migrations.v008_chat_workflow_agent_prompts",
-    "myswat.db.migrations.v009_memory_phase1a",
-    "myswat.db.migrations.v010_knowledge_terms",
-    "myswat.db.migrations.v011_document_sources_and_session_revision",
-    "myswat.db.migrations.v012_knowledge_graph",
-    "myswat.db.migrations.v013_drop_redundant_document_sources_index",
-    "myswat.db.migrations.v014_learn_requests_and_runs",
-    "myswat.db.migrations.v015_workflow_mode_alignment",
-    "myswat.db.migrations.v016_add_phase_result_artifact_type",
-    "myswat.db.migrations.v017_artifacts_updated_at",
+SCHEMA_STATEMENTS = [
+    """
+    CREATE TABLE IF NOT EXISTS projects (
+        id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+        slug            VARCHAR(128) NOT NULL UNIQUE,
+        name            VARCHAR(256) NOT NULL,
+        description     TEXT,
+        repo_path       VARCHAR(512),
+        config_json     JSON,
+        memory_revision BIGINT NOT NULL DEFAULT 0,
+        created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS agents (
+        id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+        project_id      BIGINT NOT NULL,
+        role            VARCHAR(64) NOT NULL,
+        display_name    VARCHAR(128) NOT NULL,
+        cli_backend     VARCHAR(32) NOT NULL,
+        model_name      VARCHAR(128) NOT NULL,
+        cli_path        VARCHAR(512) NOT NULL,
+        cli_extra_args  JSON,
+        system_prompt   TEXT,
+        created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_project_role (project_id, role),
+        FOREIGN KEY (project_id) REFERENCES projects(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS sessions (
+        id                                BIGINT AUTO_INCREMENT PRIMARY KEY,
+        agent_id                          BIGINT NOT NULL,
+        session_uuid                      CHAR(36) NOT NULL UNIQUE,
+        parent_session_id                 BIGINT,
+        status                            ENUM('active', 'completed', 'compacted', 'archived')
+                                              NOT NULL DEFAULT 'active',
+        purpose                           VARCHAR(512),
+        work_item_id                      BIGINT,
+        token_count_est                   INT DEFAULT 0,
+        compacted_through_turn_index      INT DEFAULT -1,
+        compacted_at                      TIMESTAMP NULL DEFAULT NULL,
+        memory_revision_at_context_build  BIGINT NULL DEFAULT NULL,
+        created_at                        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at                        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_agent_status (agent_id, status),
+        INDEX idx_work_item (work_item_id),
+        FOREIGN KEY (agent_id) REFERENCES agents(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS session_turns (
+        id                      BIGINT AUTO_INCREMENT PRIMARY KEY,
+        session_id              BIGINT NOT NULL,
+        turn_index              INT NOT NULL,
+        role                    ENUM('system', 'user', 'assistant') NOT NULL,
+        content                 LONGTEXT NOT NULL,
+        token_count_est         INT DEFAULT 0,
+        metadata_json           JSON,
+        created_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_session_turn (session_id, turn_index),
+        INDEX idx_session_id (session_id),
+        INDEX idx_session_turns_recency (created_at DESC, id DESC),
+        FOREIGN KEY (session_id) REFERENCES sessions(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS knowledge (
+        id                          BIGINT AUTO_INCREMENT PRIMARY KEY,
+        project_id                  BIGINT NOT NULL,
+        agent_id                    BIGINT,
+        source_session_id           BIGINT,
+        source_turn_ids             JSON,
+        category                    VARCHAR(64) NOT NULL,
+        title                       VARCHAR(512) NOT NULL,
+        content                     TEXT NOT NULL,
+        embedding                   VECTOR,
+        tags                        JSON,
+        relevance_score             FLOAT DEFAULT 1.0,
+        confidence                  FLOAT DEFAULT 1.0,
+        ttl_days                    INT DEFAULT NULL,
+        expires_at                  TIMESTAMP NULL,
+        source_file                 VARCHAR(1024) DEFAULT NULL,
+        source_type                 VARCHAR(32) NOT NULL DEFAULT 'session',
+        content_hash                CHAR(64) DEFAULT NULL,
+        version                     INT NOT NULL DEFAULT 1,
+        search_metadata_json        JSON DEFAULT NULL,
+        merged_from                 JSON DEFAULT NULL,
+        created_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_project_agent_category (project_id, agent_id, category),
+        INDEX idx_expires (expires_at),
+        INDEX idx_knowledge_source_scope (project_id, source_type, category, source_file(255)),
+        INDEX idx_knowledge_content_hash (project_id, content_hash),
+        FOREIGN KEY (project_id) REFERENCES projects(id),
+        FOREIGN KEY (agent_id) REFERENCES agents(id),
+        FOREIGN KEY (source_session_id) REFERENCES sessions(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS work_items (
+        id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+        project_id        BIGINT NOT NULL,
+        title             VARCHAR(512) NOT NULL,
+        description       TEXT,
+        item_type         ENUM('task', 'design', 'code_change', 'review', 'benchmark') NOT NULL,
+        status            ENUM('pending', 'in_progress', 'review', 'approved', 'completed', 'blocked')
+                              NOT NULL DEFAULT 'pending',
+        assigned_agent_id BIGINT,
+        parent_item_id    BIGINT,
+        priority          TINYINT DEFAULT 3,
+        metadata_json     JSON,
+        created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_project_status (project_id, status),
+        INDEX idx_assigned (assigned_agent_id),
+        FOREIGN KEY (project_id) REFERENCES projects(id),
+        FOREIGN KEY (assigned_agent_id) REFERENCES agents(id),
+        FOREIGN KEY (parent_item_id) REFERENCES work_items(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS artifacts (
+        id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+        work_item_id    BIGINT NOT NULL,
+        agent_id        BIGINT NOT NULL,
+        iteration       INT NOT NULL,
+        artifact_type   ENUM('proposal', 'diff', 'patch', 'test_plan', 'design_doc', 'phase_result')
+                            NOT NULL,
+        title           VARCHAR(512),
+        content         LONGTEXT NOT NULL,
+        metadata_json   JSON,
+        created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_work_item_iteration (work_item_id, iteration),
+        FOREIGN KEY (work_item_id) REFERENCES work_items(id),
+        FOREIGN KEY (agent_id) REFERENCES agents(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS review_cycles (
+        id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
+        work_item_id        BIGINT NOT NULL,
+        artifact_id         BIGINT,
+        iteration           INT NOT NULL DEFAULT 1,
+        proposer_agent_id   BIGINT NOT NULL,
+        reviewer_agent_id   BIGINT NOT NULL,
+        proposal_session_id BIGINT,
+        review_session_id   BIGINT,
+        verdict             ENUM('pending', 'changes_requested', 'lgtm')
+                                NOT NULL DEFAULT 'pending',
+        verdict_json        JSON,
+        created_at          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_artifact_reviewer (artifact_id, reviewer_agent_id),
+        INDEX idx_work_item (work_item_id),
+        FOREIGN KEY (work_item_id) REFERENCES work_items(id),
+        FOREIGN KEY (artifact_id) REFERENCES artifacts(id),
+        FOREIGN KEY (proposer_agent_id) REFERENCES agents(id),
+        FOREIGN KEY (reviewer_agent_id) REFERENCES agents(id),
+        FOREIGN KEY (proposal_session_id) REFERENCES sessions(id),
+        FOREIGN KEY (review_session_id) REFERENCES sessions(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS knowledge_terms (
+        project_id                  BIGINT NOT NULL,
+        knowledge_id                BIGINT NOT NULL,
+        term                        VARCHAR(255) NOT NULL,
+        field                       VARCHAR(32) NOT NULL,
+        weight                      FLOAT NOT NULL DEFAULT 1.0,
+        PRIMARY KEY (project_id, term, knowledge_id, field),
+        INDEX idx_knowledge_terms_lookup (project_id, term),
+        INDEX idx_knowledge_terms_knowledge (knowledge_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS document_sources (
+        id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
+        project_id          BIGINT NOT NULL,
+        source_file         VARCHAR(1024) NOT NULL,
+        source_file_hash    CHAR(64) NOT NULL,
+        content_hash        CHAR(64) NOT NULL,
+        updated_at          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_project_source_hash (project_id, source_file_hash)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS knowledge_entities (
+        id                      BIGINT AUTO_INCREMENT PRIMARY KEY,
+        project_id              BIGINT NOT NULL,
+        knowledge_id            BIGINT NOT NULL,
+        entity_name             VARCHAR(255) NOT NULL,
+        confidence              FLOAT NOT NULL DEFAULT 1.0,
+        INDEX idx_knowledge_entities_lookup (project_id, entity_name),
+        INDEX idx_knowledge_entities_knowledge (knowledge_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS knowledge_relations (
+        id                      BIGINT AUTO_INCREMENT PRIMARY KEY,
+        project_id              BIGINT NOT NULL,
+        knowledge_id            BIGINT NOT NULL,
+        source_entity           VARCHAR(255) NOT NULL,
+        relation                VARCHAR(64) NOT NULL,
+        target_entity           VARCHAR(255) NOT NULL,
+        confidence              FLOAT NOT NULL DEFAULT 1.0,
+        INDEX idx_knowledge_rel_source (project_id, source_entity),
+        INDEX idx_knowledge_rel_target (project_id, target_entity),
+        INDEX idx_knowledge_rel_knowledge (knowledge_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS learn_requests (
+        id                      BIGINT AUTO_INCREMENT PRIMARY KEY,
+        project_id              BIGINT NOT NULL,
+        source_kind             VARCHAR(64) NOT NULL,
+        trigger_kind            VARCHAR(64) NOT NULL,
+        source_session_id       BIGINT NULL,
+        source_work_item_id     BIGINT NULL,
+        payload_json            JSON NOT NULL,
+        status                  VARCHAR(32) NOT NULL DEFAULT 'pending',
+        created_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_learn_requests_project_status (project_id, status, created_at),
+        INDEX idx_learn_requests_session (source_session_id),
+        INDEX idx_learn_requests_work_item (source_work_item_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS learn_runs (
+        id                      BIGINT AUTO_INCREMENT PRIMARY KEY,
+        learn_request_id        BIGINT NOT NULL,
+        worker_backend          VARCHAR(32) NOT NULL,
+        worker_model            VARCHAR(128) NOT NULL,
+        input_context_json      JSON NOT NULL,
+        output_envelope_json    JSON NULL,
+        status                  VARCHAR(32) NOT NULL DEFAULT 'started',
+        error_text              TEXT NULL,
+        created_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at              TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_learn_runs_request_status (learn_request_id, status, created_at)
+    )
+    """,
 ]
-
-
-def ensure_schema_version_table(pool: TiDBPool) -> None:
-    """Create the schema_version tracking table if it doesn't exist."""
-    pool.execute("""
-        CREATE TABLE IF NOT EXISTS schema_version (
-            version     INT NOT NULL PRIMARY KEY,
-            description VARCHAR(512),
-            applied_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-
-def get_current_version(pool: TiDBPool) -> int:
-    """Return the highest applied migration version, or 0 if none."""
-    row = pool.fetch_one("SELECT MAX(version) AS v FROM schema_version")
-    return row["v"] or 0 if row else 0
 
 
 def ensure_database(pool: TiDBPool) -> None:
@@ -70,33 +279,7 @@ def ensure_database(pool: TiDBPool) -> None:
         conn.close()
 
 
-def run_migrations(pool: TiDBPool) -> list[int]:
-    """Run all pending migrations in order. Returns list of applied versions."""
+def ensure_schema(pool: TiDBPool) -> None:
+    """Create the current MySwat schema if it does not already exist."""
     ensure_database(pool)
-    ensure_schema_version_table(pool)
-    current = get_current_version(pool)
-    applied = []
-
-    for module_path in MIGRATION_MODULES:
-        mod = importlib.import_module(module_path)
-        if mod.VERSION <= current:
-            continue
-
-        # Execute all statements in this migration
-        for stmt in mod.STATEMENTS:
-            if isinstance(stmt, tuple):
-                # Parameterized: (sql, params)
-                pool.execute(stmt[0], stmt[1])
-            else:
-                stmt = stmt.strip()
-                if stmt:
-                    pool.execute(stmt)
-
-        # Record the migration
-        pool.execute(
-            "INSERT INTO schema_version (version, description) VALUES (%s, %s)",
-            (mod.VERSION, mod.DESCRIPTION),
-        )
-        applied.append(mod.VERSION)
-
-    return applied
+    pool.execute_many(SCHEMA_STATEMENTS)

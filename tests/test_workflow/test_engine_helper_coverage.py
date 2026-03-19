@@ -112,29 +112,7 @@ def test_load_completed_phases_skips_non_phase_rows_and_filtered_rows():
     ]
     engine, _, _, _ = _make_engine(store=store)
 
-    assert engine._load_completed_phases(before_phase=4) == [
-        PhaseResult(
-            name="Phase 1",
-            summary="(completed in prior run, no artifact recorded)",
-            review_iterations=0,
-            review_passed=True,
-            committed=True,
-        ),
-        PhaseResult(
-            name="Phase 2",
-            summary="(completed in prior run, no artifact recorded)",
-            review_iterations=0,
-            review_passed=True,
-            committed=True,
-        ),
-        PhaseResult(
-            name="Phase 3",
-            summary="(completed in prior run, no artifact recorded)",
-            review_iterations=0,
-            review_passed=True,
-            committed=True,
-        ),
-    ]
+    assert engine._load_completed_phases(before_phase=4) == []
 
 
 def test_load_completed_phases_returns_empty_when_no_expected_phases_exist():

@@ -81,7 +81,7 @@ def test_history_command_renders_rows(mock_settings_cls, mock_pool_cls, mock_sto
     assert "[developer] [2026-03-18 12:00:00] assistant: hello world" in result.output
 
 
-@patch("myswat.db.schema.run_migrations")
+@patch("myswat.db.schema.ensure_schema")
 @patch("myswat.db.connection.TiDBPool")
 @patch("myswat.config.settings.MySwatSettings")
 def test_reset_aborts_when_confirmation_does_not_match(mock_settings_cls, mock_pool_cls, mock_migrations):
@@ -99,7 +99,7 @@ def test_reset_aborts_when_confirmation_does_not_match(mock_settings_cls, mock_p
     mock_pool_cls.assert_not_called()
 
 
-@patch("myswat.db.schema.run_migrations")
+@patch("myswat.db.schema.ensure_schema")
 @patch("myswat.db.connection.TiDBPool")
 @patch("myswat.config.settings.MySwatSettings")
 def test_reset_rejects_unhealthy_connection(mock_settings_cls, mock_pool_cls, mock_migrations):
@@ -117,7 +117,7 @@ def test_reset_rejects_unhealthy_connection(mock_settings_cls, mock_pool_cls, mo
 
 
 @patch("myswat.cli.init_cmd.run_init")
-@patch("myswat.db.schema.run_migrations", return_value=["v001"])
+@patch("myswat.db.schema.ensure_schema", return_value=["v001"])
 @patch("myswat.db.connection.TiDBPool")
 @patch("myswat.config.settings.MySwatSettings")
 def test_reset_recreates_database_and_optionally_reinits_project(

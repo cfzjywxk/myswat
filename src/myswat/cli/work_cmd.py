@@ -25,7 +25,7 @@ from myswat.cli.progress import _run_with_task_monitor
 from myswat.cli.workflow_display import WorkflowDisplay
 from myswat.config.settings import MySwatSettings
 from myswat.db.connection import TiDBPool
-from myswat.db.schema import run_migrations
+from myswat.db.schema import ensure_schema
 from myswat.memory.learn_triggers import submit_workflow_summary_learn_request
 from myswat.memory.store import MemoryStore
 from myswat.workflow.engine import WorkflowEngine
@@ -72,9 +72,7 @@ def _load_project_context(
 ) -> tuple[MySwatSettings, MemoryStore, dict, str | None]:
     settings = MySwatSettings()
     pool = TiDBPool(settings.tidb)
-    applied = run_migrations(pool)
-    if applied:
-        console.print(f"[dim]Applied schema migrations: {applied}[/dim]")
+    ensure_schema(pool)
     store = MemoryStore(
         pool,
         tidb_embedding_model=settings.embedding.tidb_model,

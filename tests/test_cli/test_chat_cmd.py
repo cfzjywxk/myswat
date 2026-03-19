@@ -595,7 +595,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_chat_uses_emacs_prompt_session(
@@ -638,7 +638,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     def test_project_not_found(self, mock_store_cls, mock_mig,
                                 mock_pool_cls, mock_settings_cls,
@@ -655,7 +655,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_quit_command(self, mock_sm_cls,
@@ -689,7 +689,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     @patch("myswat.cli.chat_cmd.console.print")
@@ -730,7 +730,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_status_command(self, mock_sm_cls,
@@ -764,7 +764,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_role_switch(self, mock_sm_cls,
@@ -797,7 +797,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_role_no_arg(self, mock_sm_cls,
@@ -830,7 +830,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_agents_command(self, mock_sm_cls,
@@ -863,7 +863,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_sessions_command(self, mock_sm_cls,
@@ -905,7 +905,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_history_command(self, mock_sm_cls,
@@ -942,7 +942,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_reset_command(self, mock_sm_cls,
@@ -976,7 +976,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_new_command(self, mock_sm_cls,
@@ -1009,7 +1009,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_unknown_command(self, mock_sm_cls,
@@ -1042,7 +1042,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_eof_exits(self, mock_sm_cls,
@@ -1075,7 +1075,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_keyboard_interrupt(self, mock_sm_cls,
@@ -1108,7 +1108,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_empty_input_skipped(self, mock_sm_cls,
@@ -1144,7 +1144,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.submit_chat_learn_request")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_regular_message_success(self, mock_sm_cls,
@@ -1186,7 +1186,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_architect_delegation_auto_starts_develop_workflow(
@@ -1246,7 +1246,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_architect_design_delegation_starts_design_workflow(
@@ -1304,7 +1304,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_qa_testplan_delegation_starts_testplan_workflow(
@@ -1362,7 +1362,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_architect_full_delegation_starts_full_workflow(
@@ -1423,7 +1423,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_qa_develop_delegation_warns_for_unsupported_role(
@@ -1484,7 +1484,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_unknown_delegation_mode_warns_as_unsupported(
@@ -1542,7 +1542,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_regular_message_cancelled(self, mock_sm_cls,
@@ -1581,7 +1581,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_regular_message_error(self, mock_sm_cls,
@@ -1620,7 +1620,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_review_command(self, mock_sm_cls,
@@ -1654,7 +1654,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_review_no_arg(self, mock_sm_cls,
@@ -1688,7 +1688,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_work_command(self, mock_sm_cls,
@@ -1723,7 +1723,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_task_command(self, mock_sm_cls,
@@ -1757,7 +1757,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_work_no_arg(self, mock_sm_cls,
@@ -1790,7 +1790,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_history_no_session(self, mock_sm_cls,
@@ -1824,7 +1824,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_sessions_no_active(self, mock_sm_cls,
@@ -1861,7 +1861,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_reset_no_session(self, mock_sm_cls,
@@ -1898,7 +1898,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
     @patch("myswat.cli.chat_cmd.TiDBPool")
-    @patch("myswat.cli.chat_cmd.run_migrations")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
     def test_history_with_n_param(self, mock_sm_cls,

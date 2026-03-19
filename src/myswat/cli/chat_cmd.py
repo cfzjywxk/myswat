@@ -30,7 +30,7 @@ from myswat.cli.progress import (
 )
 from myswat.config.settings import MySwatSettings
 from myswat.db.connection import TiDBPool
-from myswat.db.schema import run_migrations
+from myswat.db.schema import ensure_schema
 from myswat.large_payloads import maybe_externalize_response, maybe_externalize_summary
 from myswat.memory.embedder import preload_model
 from myswat.memory.learn_triggers import submit_chat_learn_request
@@ -124,7 +124,7 @@ def run_chat(
     threading.Thread(target=preload_model, daemon=True).start()
 
     pool = TiDBPool(settings.tidb)
-    run_migrations(pool)
+    ensure_schema(pool)
     store = MemoryStore(
         pool,
         tidb_embedding_model=settings.embedding.tidb_model,

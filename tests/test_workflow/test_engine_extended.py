@@ -2970,24 +2970,19 @@ class TestResumePhaseCodeReviewPreservesIndex:
         assert engine._resume_phase_index() == 2
 
 
-class TestResumeStubPhases:
-    """Pre-migration items without phase_result artifacts get stub phases."""
-
-    def test_stub_phases_filled_when_artifacts_missing(self):
+class TestResumePhases:
+    def test_completed_phases_empty_when_artifacts_missing(self):
         store = MagicMock()
         store.create_artifact.return_value = 42
         store.create_review_cycle.return_value = 99
-        store.list_artifacts.return_value = []  # no phase_result artifacts
+        store.list_artifacts.return_value = []
 
         engine, _, _ = _make_engine(store=store, mode=WorkMode.develop)
         phases = engine._load_completed_phases(before_phase=4)
 
-        assert len(phases) == 3  # stubs for phases 1, 2, 3
-        for p in phases:
-            assert p.committed is True
-            assert "prior run" in p.summary
+        assert phases == []
 
-    def test_partial_artifacts_filled_with_stubs(self):
+    def test_partial_artifacts_return_only_recorded_phases(self):
         store = MagicMock()
         store.create_artifact.return_value = 42
         store.create_review_cycle.return_value = 99
@@ -3008,29 +3003,11 @@ class TestResumeStubPhases:
         engine, _, _ = _make_engine(store=store, mode=WorkMode.develop)
         phases = engine._load_completed_phases(before_phase=4)
 
-        assert len(phases) == 3
-        assert phases[0].name == "Setup"  # real artifact
-        assert "prior run" in phases[1].summary  # stub
-        assert "prior run" in phases[2].summary  # stub
+        assert len(phases) == 1
+        assert phases[0].name == "Setup"
+        assert phases[0].summary == "Phase 1 done"
 
-    def test_no_before_phase_uses_expected_count(self):
-        """Resuming from ga_test (no before_phase) with expected_count fills stubs."""
-        store = MagicMock()
-        store.create_artifact.return_value = 42
-        store.create_review_cycle.return_value = 99
-        store.list_artifacts.return_value = []  # pre-migration, no artifacts
-
-        engine, _, _ = _make_engine(store=store, mode=WorkMode.develop)
-        phases = engine._load_completed_phases(expected_count=3)
-
-        assert len(phases) == 3
-        for i, p in enumerate(phases, 1):
-            assert p.name == f"Phase {i}"
-            assert p.committed is True
-            assert "prior run" in p.summary
-
-    def test_no_before_phase_uses_max_artifact_index(self):
-        """Without before_phase or expected_count, max artifact index determines count."""
+    def test_no_before_phase_returns_only_recorded_phases(self):
         store = MagicMock()
         store.create_artifact.return_value = 42
         store.create_review_cycle.return_value = 99
@@ -3049,15 +3026,12 @@ class TestResumeStubPhases:
         ]
 
         engine, _, _ = _make_engine(store=store, mode=WorkMode.develop)
-        phases = engine._load_completed_phases()  # no before_phase, no expected_count
+        phases = engine._load_completed_phases()
 
-        assert len(phases) == 3
-        assert "prior run" in phases[0].summary  # stub for phase 1
-        assert "prior run" in phases[1].summary  # stub for phase 2
-        assert phases[2].name == "Final"  # real artifact at phase 3
+        assert len(phases) == 1
+        assert phases[0].name == "Final"
 
-    def test_non_contiguous_artifacts_slotted_correctly(self):
-        """Phase 2 artifact with before_phase=4 puts it at position 2, not 1."""
+    def test_non_contiguous_artifacts_keep_original_order(self):
         store = MagicMock()
         store.create_artifact.return_value = 42
         store.create_review_cycle.return_value = 99
@@ -3078,13 +3052,10 @@ class TestResumeStubPhases:
         engine, _, _ = _make_engine(store=store, mode=WorkMode.develop)
         phases = engine._load_completed_phases(before_phase=4)
 
-        assert len(phases) == 3
-        assert "prior run" in phases[0].summary  # stub for missing phase 1
-        assert phases[1].name == "Two"  # real artifact at correct slot
-        assert "prior run" in phases[2].summary  # stub for missing phase 3
+        assert len(phases) == 1
+        assert phases[0].name == "Two"
 
-    def test_summaries_non_contiguous_numbered_correctly(self):
-        """Phase summaries use correct numbering even with non-contiguous artifacts."""
+    def test_summaries_keep_original_phase_numbers(self):
         store = MagicMock()
         store.create_artifact.return_value = 42
         store.create_review_cycle.return_value = 99
@@ -3105,10 +3076,7 @@ class TestResumeStubPhases:
         engine, _, _ = _make_engine(store=store, mode=WorkMode.develop)
         summaries = engine._load_completed_phase_summaries(before_phase=4)
 
-        assert len(summaries) == 3
-        assert summaries[0].startswith("Phase 1 (Phase 1)")  # stub
-        assert summaries[1].startswith("Phase 2 (Two)")  # real, correct number
-        assert summaries[2].startswith("Phase 3 (Phase 3)")  # stub
+        assert summaries == ["Phase 2 (Two): Phase 2 done"]
 
 
 class TestWorkflowEngineEvents:

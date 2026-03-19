@@ -333,7 +333,7 @@ class TestRunInit:
     @patch("myswat.cli.init_cmd._seed_default_agents")
     @patch("myswat.cli.init_cmd.MySwatSettings")
     @patch("myswat.cli.init_cmd.TiDBPool")
-    @patch("myswat.cli.init_cmd.run_migrations")
+    @patch("myswat.cli.init_cmd.ensure_schema")
     @patch("myswat.cli.init_cmd.MemoryStore")
     def test_health_check_failure(self, mock_store_cls, mock_mig,
                                    mock_pool_cls, mock_settings_cls,
@@ -349,7 +349,7 @@ class TestRunInit:
     @patch("myswat.cli.init_cmd._seed_default_agents")
     @patch("myswat.cli.init_cmd.MySwatSettings")
     @patch("myswat.cli.init_cmd.TiDBPool")
-    @patch("myswat.cli.init_cmd.run_migrations")
+    @patch("myswat.cli.init_cmd.ensure_schema")
     @patch("myswat.cli.init_cmd.MemoryStore")
     def test_new_project(self, mock_store_cls, mock_mig,
                           mock_pool_cls, mock_settings_cls, mock_seed,
@@ -376,7 +376,7 @@ class TestRunInit:
     @patch("myswat.cli.init_cmd._seed_default_agents")
     @patch("myswat.cli.init_cmd.MySwatSettings")
     @patch("myswat.cli.init_cmd.TiDBPool")
-    @patch("myswat.cli.init_cmd.run_migrations")
+    @patch("myswat.cli.init_cmd.ensure_schema")
     @patch("myswat.cli.init_cmd.MemoryStore")
     def test_existing_project(self, mock_store_cls, mock_mig,
                                mock_pool_cls, mock_settings_cls, mock_seed,
@@ -399,9 +399,9 @@ class TestRunInit:
     @patch("myswat.cli.init_cmd._seed_default_agents")
     @patch("myswat.cli.init_cmd.MySwatSettings")
     @patch("myswat.cli.init_cmd.TiDBPool")
-    @patch("myswat.cli.init_cmd.run_migrations")
+    @patch("myswat.cli.init_cmd.ensure_schema")
     @patch("myswat.cli.init_cmd.MemoryStore")
-    def test_migrations_applied(self, mock_store_cls, mock_mig,
+    def test_schema_bootstrap_runs(self, mock_store_cls, mock_mig,
                                  mock_pool_cls, mock_settings_cls, mock_seed,
                                  mock_seed_wf):
         pool = MagicMock()
@@ -421,9 +421,9 @@ class TestRunInit:
     @patch("myswat.cli.init_cmd._seed_default_agents")
     @patch("myswat.cli.init_cmd.MySwatSettings")
     @patch("myswat.cli.init_cmd.TiDBPool")
-    @patch("myswat.cli.init_cmd.run_migrations")
+    @patch("myswat.cli.init_cmd.ensure_schema")
     @patch("myswat.cli.init_cmd.MemoryStore")
-    def test_no_migrations_needed(self, mock_store_cls, mock_mig,
+    def test_schema_bootstrap_still_runs_when_idempotent(self, mock_store_cls, mock_mig,
                                    mock_pool_cls, mock_settings_cls,
                                    mock_seed, mock_seed_wf):
         pool = MagicMock()

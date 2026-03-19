@@ -14,7 +14,7 @@ from myswat.agents.session_manager import SessionManager
 from myswat.cli.progress import _fmt_duration, _run_with_task_monitor, _send_with_timer
 from myswat.config.settings import MySwatSettings
 from myswat.db.connection import TiDBPool
-from myswat.db.schema import run_migrations
+from myswat.db.schema import ensure_schema
 from myswat.memory.learn_triggers import submit_workflow_summary_learn_request
 from myswat.memory.store import MemoryStore
 
@@ -30,7 +30,7 @@ def run_single(
     """Run a single-agent task with session persistence."""
     settings = MySwatSettings()
     pool = TiDBPool(settings.tidb)
-    run_migrations(pool)
+    ensure_schema(pool)
     store = MemoryStore(
         pool,
         tidb_embedding_model=settings.embedding.tidb_model,
@@ -123,7 +123,7 @@ def run_with_review(
 
     settings = MySwatSettings()
     pool = TiDBPool(settings.tidb)
-    run_migrations(pool)
+    ensure_schema(pool)
     store = MemoryStore(
         pool,
         tidb_embedding_model=settings.embedding.tidb_model,

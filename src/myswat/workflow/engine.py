@@ -557,22 +557,11 @@ class WorkflowEngine:
             return None
         return self._store.get_latest_artifact_by_type(self._work_item_id, artifact_type)
 
-    def _load_completed_phases(
+    def _load_completed_phase_records(
         self,
         before_phase: int | None = None,
-        expected_count: int | None = None,
-    ) -> list[PhaseResult]:
-        """Load completed PhaseResult objects from artifacts table.
-
-        If fewer artifacts are found than expected (e.g. pre-migration items
-        without phase_result artifacts), fills in stub PhaseResults at the
-        correct positions so downstream code has accurate phase history.
-
-        Args:
-            before_phase: Only load phases with index < before_phase.
-            expected_count: Total number of phases expected (used when
-                before_phase is None, e.g. resuming from ga_test).
-        """
+    ) -> list[tuple[int, PhaseResult]]:
+        """Load completed phase results with their original phase indexes."""
         if not self._work_item_id:
             return []
         artifacts = self._store.list_artifacts(self._work_item_id)
@@ -591,42 +580,23 @@ class WorkflowEngine:
                 review_passed=meta.get("review_passed", False),
                 committed=meta.get("committed", False),
             )
+        return [(idx, phase_map[idx]) for idx in sorted(phase_map)]
 
-        # Determine how many phases we expect
-        if before_phase is not None and before_phase > 1:
-            expected = before_phase - 1
-        elif expected_count is not None and expected_count > 0:
-            expected = expected_count
-        elif phase_map:
-            expected = max(phase_map.keys())
-        else:
-            expected = 0
-
-        # Build ordered list, filling stubs at missing positions
-        result: list[PhaseResult] = []
-        for idx in range(1, expected + 1):
-            if idx in phase_map:
-                result.append(phase_map[idx])
-            else:
-                result.append(PhaseResult(
-                    name=f"Phase {idx}",
-                    summary="(completed in prior run, no artifact recorded)",
-                    review_iterations=0,
-                    review_passed=True,
-                    committed=True,
-                ))
-        return result
+    def _load_completed_phases(
+        self,
+        before_phase: int | None = None,
+    ) -> list[PhaseResult]:
+        """Load completed PhaseResult objects from artifacts table."""
+        return [phase for _, phase in self._load_completed_phase_records(before_phase)]
 
     def _load_completed_phase_summaries(
         self,
         before_phase: int | None = None,
-        expected_count: int | None = None,
     ) -> list[str]:
         """Reconstruct completed_summaries from phase_result artifacts."""
-        phases = self._load_completed_phases(before_phase, expected_count)
         return [
-            f"Phase {i} ({p.name}): {p.summary[:500]}"
-            for i, p in enumerate(phases, 1)
+            f"Phase {idx} ({phase.name}): {phase.summary[:500]}"
+            for idx, phase in self._load_completed_phase_records(before_phase)
         ]
 
     # ════════════════════════════════════════════════════════════════
@@ -1174,9 +1144,8 @@ class WorkflowEngine:
                     return result
         else:
             # All phases done — reconstruct from artifacts
-            phase_count = len(self._parse_phases(plan)) if plan else 0
-            completed_summaries = self._load_completed_phase_summaries(expected_count=phase_count)
-            result.phases = self._load_completed_phases(expected_count=phase_count)
+            completed_summaries = self._load_completed_phase_summaries()
+            result.phases = self._load_completed_phases()
 
         # ── Stage 6: GA Test ──
         self._emit("stage_start", "GA Test", stage="ga_test")
