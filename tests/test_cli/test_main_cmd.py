@@ -860,7 +860,7 @@ class TestCommandRouting:
 
     @patch("myswat.cli.main._follow_work_item_until_terminal")
     @patch("myswat.server.control_client.DaemonClient")
-    def test_work_command(self, mock_client_cls, mock_follow):
+    def test_work_command_detaches_by_default(self, mock_client_cls, mock_follow):
         from typer.testing import CliRunner
         from myswat.cli.main import app
 
@@ -868,7 +868,6 @@ class TestCommandRouting:
         mock_client.base_url = "http://127.0.0.1:8765"
         mock_client.submit_work.return_value = {"work_item_id": 41, "workers": ["developer", "qa_main"]}
         mock_client_cls.return_value = mock_client
-        mock_follow.return_value = {"status": "completed"}
 
         runner = CliRunner()
         result = runner.invoke(app, ["work", "add feature", "--project", "proj"])
@@ -879,7 +878,7 @@ class TestCommandRouting:
             project="proj",
             requirement="add feature",
         )
-        mock_follow.assert_called_once()
+        mock_follow.assert_not_called()
 
     @patch("myswat.cli.main._follow_work_item_until_terminal")
     @patch("myswat.server.control_client.DaemonClient")
@@ -903,6 +902,7 @@ class TestCommandRouting:
             requirement="add feature",
             skip_ga_test=True,
         )
+        mock_follow.assert_not_called()
 
     @patch("myswat.cli.main._follow_work_item_until_terminal")
     @patch("myswat.server.control_client.DaemonClient")
@@ -935,6 +935,30 @@ class TestCommandRouting:
                 project="proj",
                 requirement="add feature",
             )
+            mock_follow.assert_not_called()
+
+    @patch("myswat.cli.main._follow_work_item_until_terminal")
+    @patch("myswat.server.control_client.DaemonClient")
+    def test_work_command_follow_opt_in(self, mock_client_cls, mock_follow):
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
+
+        mock_client = MagicMock()
+        mock_client.base_url = "http://127.0.0.1:8765"
+        mock_client.submit_work.return_value = {"work_item_id": 41, "workers": ["developer", "qa_main"]}
+        mock_client_cls.return_value = mock_client
+        mock_follow.return_value = {"status": "completed"}
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["work", "add feature", "--project", "proj", "--follow"])
+        assert result.exit_code == 0
+        mock_client.submit_work.assert_called_once_with(
+            workdir=None,
+            mode="full",
+            project="proj",
+            requirement="add feature",
+        )
+        mock_follow.assert_called_once()
 
     @patch("myswat.server.control_client.DaemonClient")
     def test_work_command_rejects_multiple_mode_flags(self, mock_client_cls):
@@ -1050,6 +1074,7 @@ class TestCommandRouting:
             project="proj",
             requirement="add feature",
         )
+        mock_follow.assert_not_called()
 
     @patch("myswat.server.control_client.DaemonClient")
     def test_work_command_interactive_checkpoints(self, mock_client_cls):
@@ -1075,10 +1100,23 @@ class TestCommandRouting:
         mock_follow.side_effect = [KeyboardInterrupt(), {"status": "cancelled"}]
 
         runner = CliRunner()
-        result = runner.invoke(app, ["work", "add feature", "--project", "proj"])
+        result = runner.invoke(app, ["work", "add feature", "--project", "proj", "--follow"])
 
         assert result.exit_code == 130
         mock_client.control_work.assert_called_once_with(project="proj", work_item_id=46, action="cancel")
+
+    @patch("myswat.server.control_client.DaemonClient")
+    def test_work_command_rejects_background_with_follow(self, mock_client_cls):
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
+
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["work", "add feature", "--project", "proj", "--background", "--follow"],
+        )
+        assert result.exit_code != 0
+        mock_client_cls.return_value.submit_work.assert_not_called()
 
     @patch("myswat.cli.work_cmd.run_background_work_item")
     def test_work_background_worker_command(self, mock_run_background_work_item):

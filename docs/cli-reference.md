@@ -9,10 +9,10 @@ This file reflects the current public CLI surface from `myswat --help`.
 | `myswat init <name> [-r repo] [-d desc]` | Initialize a project and seed the default core agents |
 | `myswat chat -p <slug> [--role ROLE] [-w DIR]` | Start the interactive chat REPL |
 | `myswat run [task] -p <slug> [--single] [--role ROLE] [--reviewer ROLE] [-w DIR]` | Run the legacy single-task agent flow; omit `task` to enter chat |
-| `myswat work [requirement] -p <slug> [--background] [--design\|--plan\|--develop\|--dev\|--test\|--ga-test] [--auto-approve] [--resume ID] [-w DIR]` | Run the teamwork workflow in full or a selected mode |
+| `myswat work [requirement] -p <slug> [--follow] [--design\|--plan\|--develop\|--dev\|--test\|--ga-test] [--auto-approve] [--resume ID] [-w DIR]` | Queue the teamwork workflow in full or a selected mode |
 | `myswat status -p <slug> [--details]` | Show project status, active work items, sessions, and agents |
 | `myswat task <id> -p <slug>` | Show detailed status for one work item |
-| `myswat stop <id> -p <slug>` | Request cancellation of a background workflow |
+| `myswat stop <id> -p <slug>` | Request cancellation of a workflow |
 | `myswat search <query> -p <slug> [--category C] [--source-type T] [--mode M] [--profile P] [--limit N] [--no-vector] [--json]` | Search project knowledge |
 | `myswat history -p <slug> [--turns N] [--role ROLE]` | Show recent raw project turns in chronological order |
 | `myswat gc -p <slug> [--grace-days N] [--keep-recent N] [--dry-run]` | Garbage-collect old raw turns from compacted sessions |
@@ -24,7 +24,9 @@ Notes:
 
 - `myswat search ...` is the root-level shortcut for `myswat memory search ...`.
 - `myswat work --resume <id>` resumes a blocked or failed work item; do not pass a new requirement with it.
-- `myswat work --background` is supported for `full`, `develop`, and `test`, but not `design`.
+- `myswat work` now detaches by default after queueing the work item.
+- `myswat work --follow` keeps the client attached and streams progress until the work item reaches a terminal state.
+- `myswat work --background` is retained as a hidden compatibility alias for detached mode.
 
 ## Work Modes
 
@@ -35,7 +37,7 @@ Notes:
 | `develop` | `--develop`, `--dev` | phased development with QA review, report | all phases committed |
 | `test` | `--test`, `--ga-test` | GA test plan/review, execute tests, bug fixes, report | GA passed |
 
-Foreground `myswat work` is interactive by default. Use `--auto-approve` to skip user checkpoints in foreground workflows.
+`myswat work` detaches by default. Use `--follow` when you want the client to stay attached and cancel with `Ctrl-C`.
 
 ## Delegation Mapping
 

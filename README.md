@@ -45,6 +45,9 @@ myswat init "fib-demo" --repo ~/src/requirements/fib-demo
 # Queue a task — the daemon will start managed workers lazily
 myswat work -p fib-demo "Implement bloom filter for compaction"
 
+# Stay attached and stream progress in this client when needed
+myswat work -p fib-demo "Implement bloom filter for compaction" --follow
+
 # Or just chat
 myswat chat -p my-project
 
@@ -83,7 +86,7 @@ myswat search "bloom filter" -p my-project
 
 Internal engine-only modes: `architect_design` and `testplan_design`. They power chat-led orchestration flows and are not user-facing CLI/delegation values.
 
-MySwat does **not** launch agent CLIs from the `work` command anymore. `myswat work` submits to the daemon, the daemon starts managed workers for configured roles when needed, and those workers use the server-side MCP tool surface to claim assignments and publish results.
+MySwat does **not** launch agent CLIs from the `work` command anymore. `myswat work` submits to the daemon, the daemon starts managed workers for configured roles when needed, and those workers use the server-side MCP tool surface to claim assignments and publish results. The CLI detaches after queueing by default; pass `--follow` when you want live polling in the submitting terminal.
 
 ## What Agents Remember
 

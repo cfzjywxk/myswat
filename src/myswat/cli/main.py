@@ -180,10 +180,16 @@ def work(
     requirement: str = typer.Argument(None, help="Requirement description (optional when --resume)"),
     project: str = typer.Option(..., "--project", "-p", help="Project slug"),
     workdir: str = typer.Option(None, "--workdir", "-w", help="Working directory override"),
+    follow: bool = typer.Option(
+        False,
+        "--follow",
+        help="Follow live workflow progress in this client after queueing the work item.",
+    ),
     background: bool = typer.Option(
         False,
         "--background",
-        help="Submit the workflow and return immediately without following progress.",
+        hidden=True,
+        help="Deprecated alias for detached mode; workflows already detach by default.",
     ),
     design_mode: bool = typer.Option(False, "--design", "--plan", help="Run design + planning only."),
     develop_mode: bool = typer.Option(False, "--develop", "--dev", help="Run development only."),
@@ -216,11 +222,14 @@ def work(
                 "The original requirement is loaded from the work item. "
                 "To start fresh with a different requirement, omit --resume."
             )
-        if background:
-            raise typer.BadParameter("--resume cannot be combined with --background.")
+        if follow:
+            raise typer.BadParameter("--resume cannot be combined with --follow.")
     else:
         if not requirement:
             raise typer.BadParameter("Requirement is required when not using --resume.")
+
+    if background and follow:
+        raise typer.BadParameter("--background cannot be combined with --follow.")
 
     if resume is not None:
         raise typer.BadParameter("--resume is not supported through the daemon workflow path yet.")
@@ -254,9 +263,10 @@ def work(
         console.print(f"[dim]Workers: {', '.join(str(worker) for worker in workers)}[/dim]")
     console.print(f"[dim]Server: {client.base_url}[/dim]")
     console.print(f"[dim]Track progress: myswat status -p {project} --details[/dim]")
+    console.print("[dim]Use --follow to keep this client attached for live progress.[/dim]")
 
     work_item_id = int(result.get("work_item_id") or 0)
-    if background or work_item_id <= 0:
+    if background or not follow or work_item_id <= 0:
         return
 
     console.print("[dim]Following workflow progress. Press Ctrl-C to cancel.[/dim]")

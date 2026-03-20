@@ -32,6 +32,7 @@ def test_work_command_requires_requirement_without_resume():
         work(
             project="proj",
             requirement=None,
+            follow=False,
             background=False,
             resume=None,
             design_mode=False,
@@ -49,6 +50,7 @@ def test_work_command_rejects_requirement_with_resume():
         work(
             project="proj",
             requirement="new req",
+            follow=False,
             background=False,
             resume=7,
             design_mode=False,
@@ -59,14 +61,15 @@ def test_work_command_rejects_requirement_with_resume():
         )
 
 
-def test_work_command_rejects_resume_with_background():
+def test_work_command_rejects_resume_with_follow():
     from myswat.cli.main import work
 
-    with pytest.raises(typer.BadParameter, match="--resume cannot be combined with --background"):
+    with pytest.raises(typer.BadParameter, match="--resume cannot be combined with --follow"):
         work(
             project="proj",
             requirement=None,
-            background=True,
+            follow=True,
+            background=False,
             resume=7,
             design_mode=False,
             develop_mode=False,
