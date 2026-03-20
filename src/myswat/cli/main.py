@@ -746,6 +746,8 @@ def _event_badge(entry: dict) -> tuple[str, str]:
         return "CRITICAL", "bold white on red"
     if event_type == "agent_empty_output":
         return "WARNING", "black on yellow"
+    if event_type == "review_skipped":
+        return "LIMIT", "black on yellow"
     if event_type == "review_requested":
         return "REVIEW", "black on cyan"
     if event_type == "status_report":
@@ -767,6 +769,7 @@ def _event_title(entry: dict) -> str:
     return {
         "review_requested": "Review requested",
         "review_verdict": "Review response",
+        "review_skipped": "Review limit reached",
         "status_report": "Status update",
         "artifact_submitted": "Artifact update",
         "daemon_queued": "Workflow queued",

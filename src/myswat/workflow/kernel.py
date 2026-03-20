@@ -145,6 +145,9 @@ class WorkflowKernel:
         self._on_event = on_event
         self._blocked = False
         self._failure_summary = ""
+        self._last_review_limit_reached = False
+        self._last_review_limit_stage = ""
+        self._last_review_limit_summary = ""
         self._assignment_poll_interval_seconds = assignment_poll_interval_seconds
         self._assignment_timeout_seconds = assignment_timeout_seconds
 
@@ -213,6 +216,80 @@ class WorkflowKernel:
                 open_issues=open_issues or [],
                 title=title,
             )
+        )
+
+    def _append_process_event(
+        self,
+        *,
+        event_type: str,
+        title: str,
+        summary: str,
+        from_role: str | None,
+        to_role: str | None = None,
+        updated_by_agent_id: int | None = None,
+    ) -> None:
+        self._store.append_work_item_process_event(
+            self._work_item_id,
+            event_type=event_type,
+            title=title,
+            summary=summary,
+            from_role=from_role,
+            to_role=to_role,
+            updated_by_agent_id=updated_by_agent_id,
+        )
+
+    def _reset_review_loop_state(self) -> None:
+        self._last_review_limit_reached = False
+        self._last_review_limit_stage = ""
+        self._last_review_limit_summary = ""
+
+    def _record_review_limit_reached(
+        self,
+        *,
+        artifact_title: str,
+        stage: str,
+        iteration: int,
+        owner: WorkflowRuntime,
+        issues: list[str],
+    ) -> None:
+        summary = (
+            f"Max review iterations reached for {artifact_title} after {iteration} round(s); "
+            "continuing with the latest artifact without another review round."
+        )
+        unresolved = [issue for issue in issues if issue][:8]
+        event_summary = summary
+        if unresolved:
+            event_summary += "\nUnresolved review issues:\n" + "\n".join(f"- {issue}" for issue in unresolved)
+
+        self._last_review_limit_reached = True
+        self._last_review_limit_stage = stage
+        self._last_review_limit_summary = summary
+
+        self._emit(
+            "warning",
+            summary,
+            stage=stage,
+            agent_role=owner.agent_role,
+            iteration=iteration,
+            max_iterations=self._max_review,
+            issue_count=len(issues),
+            review_skipped=True,
+        )
+        self._store.update_work_item_state(
+            self._work_item_id,
+            current_stage=f"{stage}_skipped",
+            latest_summary=summary,
+            next_todos=["Continue with the latest artifact despite unresolved review issues"],
+            open_issues=issues[:20],
+            updated_by_agent_id=owner.agent_id,
+        )
+        self._append_process_event(
+            event_type="review_skipped",
+            title=f"{artifact_title} review skipped after max iterations",
+            summary=event_summary,
+            from_role="myswat",
+            to_role=owner.agent_role,
+            updated_by_agent_id=owner.agent_id,
         )
 
     def _queue_stage_task(
@@ -362,6 +439,7 @@ class WorkflowKernel:
         review_prompt_builder: Callable[[str, int, str], str],
         revision_prompt_builder: Callable[[str, str], str],
     ) -> tuple[str, int, bool]:
+        self._reset_review_loop_state()
         artifact = initial_artifact
         artifact_id = initial_artifact_id
         for iteration in range(1, self._max_review + 1):
@@ -430,8 +508,13 @@ class WorkflowKernel:
                 return artifact, iteration, True
 
             if iteration >= self._max_review:
-                self._blocked = True
-                self._failure_summary = f"{artifact_title} did not reach LGTM."
+                self._record_review_limit_reached(
+                    artifact_title=artifact_title,
+                    stage=review_stage_name,
+                    iteration=iteration,
+                    owner=owner,
+                    issues=collected_feedback,
+                )
                 return artifact, iteration, False
 
             feedback = "\n".join(f"- {item}" for item in collected_feedback if item)
@@ -571,11 +654,17 @@ class WorkflowKernel:
                 ))
             ),
         )
-        if not passed:
+        review_limit_reached = self._last_review_limit_reached
+        if not passed and not review_limit_reached:
             return reviewed, False
+        checkpoint_prompt = (
+            "Review limit reached for design. Continue with latest design? [Y/n/or type feedback] "
+            if review_limit_reached
+            else "Design approved by reviewers. Accept? [Y/n/or type feedback] "
+        )
         reviewed, ok = self._checkpoint(
             reviewed,
-            prompt="Design approved by reviewers. Accept? [Y/n/or type feedback] ",
+            prompt=checkpoint_prompt,
             stage="design",
             owner=owner,
             focus=requirement,
@@ -630,11 +719,17 @@ class WorkflowKernel:
                 feedback=feedback,
             ),
         )
-        if not passed:
+        review_limit_reached = self._last_review_limit_reached
+        if not passed and not review_limit_reached:
             return reviewed, False
+        checkpoint_prompt = (
+            "Review limit reached for plan. Continue with latest plan? [Y/n/or type feedback] "
+            if review_limit_reached
+            else "Plan approved by reviewers. Accept? [Y/n/or type feedback] "
+        )
         reviewed, ok = self._checkpoint(
             reviewed,
-            prompt="Plan approved by reviewers. Accept? [Y/n/or type feedback] ",
+            prompt=checkpoint_prompt,
             stage="plan",
             owner=owner,
             focus=requirement + "\n\n" + design[:4000],
@@ -708,7 +803,8 @@ class WorkflowKernel:
                 feedback=feedback,
             ),
         )
-        if not passed:
+        review_limit_reached = self._last_review_limit_reached
+        if not passed and not review_limit_reached:
             return PhaseResult(
                 name=phase_name,
                 summary=reviewed_summary,
@@ -721,7 +817,7 @@ class WorkflowKernel:
             name=phase_name,
             summary=reviewed_summary,
             review_iterations=review_iterations,
-            review_passed=True,
+            review_passed=passed,
             committed=True,
         )
 
@@ -765,11 +861,17 @@ class WorkflowKernel:
                 feedback=feedback,
             ),
         )
-        if not passed:
+        review_limit_reached = self._last_review_limit_reached
+        if not passed and not review_limit_reached:
             return GATestResult(test_plan=reviewed_plan)
+        checkpoint_prompt = (
+            "Review limit reached for test plan. Continue with latest test plan? [Y/n/or type feedback] "
+            if review_limit_reached
+            else "Test plan approved. Start testing? [Y/n/or type feedback] "
+        )
         reviewed_plan, ok = self._checkpoint(
             reviewed_plan,
-            prompt="Test plan approved. Start testing? [Y/n/or type feedback] ",
+            prompt=checkpoint_prompt,
             stage="test_plan",
             owner=qa_lead,
             focus=requirement + "\n\n" + design[:4000],

@@ -358,6 +358,65 @@ def test_plan_review_feedback_builds_revision_prompt_with_collected_issues():
     assert "Phase 1: Implement fibonacci" in revised_plan_stage.task_prompt
 
 
+def test_review_loop_reaching_max_iterations_records_skip_without_blocking():
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+
+    service.wait_for_review_verdicts.return_value = [
+        ReviewVerdictEnvelope(
+            cycle_id=2000,
+            reviewer_role="qa_main",
+            verdict="changes_requested",
+            summary="Need logging coverage.",
+            issues=["Add coverage for log_filter."],
+        ),
+    ]
+
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=10,
+        mode=WorkMode.develop,
+        auto_approve=True,
+        max_review_iterations=1,
+    )
+
+    reviewed, iterations, passed = kernel._run_review_loop(
+        owner_stage_name="plan",
+        review_stage_name="plan_review",
+        artifact_type="implementation_plan",
+        artifact_title="Implementation plan",
+        initial_artifact="Phase 1: Ship it",
+        initial_artifact_id=1000,
+        owner=dev,
+        reviewers=[qa],
+        focus="ctx",
+        review_prompt_builder=lambda artifact, iteration, reviewer_role: artifact,
+        revision_prompt_builder=lambda artifact, feedback: artifact + feedback,
+    )
+
+    assert reviewed == "Phase 1: Ship it"
+    assert iterations == 1
+    assert passed is False
+    assert kernel._blocked is False
+    assert kernel._last_review_limit_reached is True
+    assert kernel._last_review_limit_stage == "plan_review"
+    assert "Max review iterations reached for Implementation plan" in kernel._last_review_limit_summary
+    assert any(
+        call.kwargs.get("current_stage") == "plan_review_skipped"
+        for call in store.update_work_item_state.call_args_list
+    )
+    assert any(
+        call.kwargs.get("event_type") == "review_skipped"
+        for call in store.append_work_item_process_event.call_args_list
+    )
+
+
 def test_phase_and_code_review_prompts_include_requirement_design_plan_and_summary():
     store = _store()
     store.get_latest_artifact_by_type.side_effect = lambda work_item_id, artifact_type: (
@@ -601,6 +660,81 @@ def test_large_plan_and_phase_summary_survive_phase_and_code_review_prompt_build
     assert "PLAN-TAIL-MARKER" in phase_stage.task_prompt
     assert "PLAN-TAIL-MARKER" in code_review_request.task_prompt
     assert "PHASE-SUMMARY-TAIL-MARKER" in code_review_request.task_prompt
+
+
+def test_test_mode_continues_after_review_limit_and_can_still_finish():
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+
+    service.wait_for_stage_run_completion.side_effect = [
+        StageRunCompletion(
+            stage_run_id=100,
+            work_item_id=15,
+            stage_name="test_plan",
+            status="completed",
+            summary="Test plan drafted.",
+            artifact_id=1000,
+            artifact_content="# GA Plan\nRun tests.\n",
+        ),
+        StageRunCompletion(
+            stage_run_id=101,
+            work_item_id=15,
+            stage_name="ga_test",
+            status="completed",
+            summary="GA tests passed.",
+            artifact_id=1001,
+            artifact_content='{"status":"pass","summary":"All tests passed."}',
+        ),
+        StageRunCompletion(
+            stage_run_id=102,
+            work_item_id=15,
+            stage_name="report",
+            status="completed",
+            summary="Final report generated.",
+            artifact_id=1002,
+            artifact_content="Final report text",
+        ),
+    ]
+    service.wait_for_review_verdicts.side_effect = [
+        [
+            ReviewVerdictEnvelope(
+                cycle_id=2000,
+                reviewer_role="developer",
+                verdict="changes_requested",
+                summary="Need log_filter coverage.",
+                issues=["Cover the implemented log_filter setting."],
+            ),
+        ],
+    ]
+
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=15,
+        mode=WorkMode.test,
+        auto_approve=True,
+        max_review_iterations=1,
+    )
+
+    result = kernel.run("implement an echo server")
+
+    assert result.success is True
+    assert result.blocked is False
+    assert result.failure_summary == ""
+    assert result.ga_test is not None
+    assert result.ga_test.passed is True
+    assert result.final_report == "Final report text"
+    assert service.start_stage_run.call_count == 3
+    assert service.request_review.call_count == 1
+    assert any(
+        call.kwargs.get("event_type") == "review_skipped"
+        for call in store.append_work_item_process_event.call_args_list
+    )
 
 
 def test_code_review_feedback_builds_phase_revision_prompt():
