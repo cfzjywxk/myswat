@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.exceptions import Exit as ClickExit
 from rich.console import Console
-from rich.tree import Tree
 from typer.testing import CliRunner
 
 from myswat.cli.main import (
@@ -169,6 +168,7 @@ def test_parse_verdict_payload_handles_dict_string_and_invalid_input():
 
 def test_build_teamwork_flow_entries_prefers_process_log():
     pool = MagicMock()
+    pool.fetch_all.return_value = []
     item = {
         "id": 7,
         "metadata_json": {
@@ -178,8 +178,9 @@ def test_build_teamwork_flow_entries_prefers_process_log():
         },
     }
 
-    assert _build_teamwork_flow_entries(pool, item) == [{"type": "task_request"}]
-    pool.fetch_all.assert_not_called()
+    entries = _build_teamwork_flow_entries(pool, item)
+
+    assert entries[0]["type"] == "task_request"
 
 
 def test_build_teamwork_flow_entries_reconstructs_from_review_cycles():
@@ -188,12 +189,15 @@ def test_build_teamwork_flow_entries_reconstructs_from_review_cycles():
         {
             "iteration": 1,
             "verdict": "changes_requested",
+            "created_at": "2026-03-18 12:00:00",
+            "updated_at": "2026-03-18 12:01:00",
+            "completed_at": "2026-03-18 12:01:00",
+            "stage_name": "design",
             "verdict_json": '{"summary":"Needs fixes","issues":["missing tests"]}',
             "proposer_role": "developer",
             "reviewer_role": "qa_main",
             "artifact_title": "Iteration 1",
             "artifact_type": "proposal",
-            "artifact_content": "draft design",
         }
     ]
     item = {"id": 7, "description": "Build auth"}
@@ -201,23 +205,21 @@ def test_build_teamwork_flow_entries_reconstructs_from_review_cycles():
     entries = _build_teamwork_flow_entries(pool, item)
 
     assert entries[0]["type"] == "task_request"
-    assert entries[1]["type"] == "review_request"
-    assert entries[2]["type"] == "review_response"
+    assert entries[1]["type"] == "review_requested"
+    assert entries[2]["type"] == "review_verdict"
     assert "missing tests" in entries[2]["summary"]
 
 
-def test_print_message_flow_handles_reaction_and_summary():
-    tree = Tree("root")
+def test_print_message_flow_handles_summary_entries():
+    console = Console(record=True, force_terminal=False, width=120)
     _print_message_flow(
-        tree,
+        console,
         [
-            {"type": "review_request", "from_role": "developer", "to_role": "qa_main", "title": "Draft", "summary": "Ready"},
-            {"type": "reaction", "from_role": "myswat", "summary": "Ask for revision"},
+            {"type": "review_requested", "from_role": "developer", "to_role": "qa_main", "title": "Draft", "summary": "Ready"},
+            {"type": "status_report", "from_role": "myswat", "summary": "Ask for revision"},
         ],
     )
 
-    console = Console(record=True, force_terminal=False)
-    console.print(tree)
     rendered = console.export_text()
     assert "Draft" in rendered
     assert "Ask for revision" in rendered

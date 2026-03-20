@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 
 from myswat.server.daemon import ManagedWorkerProcess, MySwatDaemon
@@ -420,3 +421,139 @@ def test_supervise_workers_once_does_not_restart_when_project_has_no_active_work
 
     assert daemon._workers == {}
     daemon._start_worker.assert_not_called()
+
+
+def test_should_log_slow_request_filters_noisy_polling_paths_and_mcp_tools():
+    daemon = MySwatDaemon.__new__(MySwatDaemon)
+
+    assert daemon._should_log_slow_request(
+        path="/api/work-item",
+        payload={"project": "fib-demo", "work_item_id": 7},
+        duration=2.5,
+    ) is False
+
+    assert daemon._should_log_slow_request(
+        path="/mcp",
+        payload={
+            "method": "tools/call",
+            "params": {
+                "name": "claim_next_assignment",
+                "arguments": {"project_id": 1, "agent_role": "developer"},
+            },
+        },
+        duration=2.5,
+    ) is False
+
+    assert daemon._should_log_slow_request(
+        path="/mcp",
+        payload={
+            "method": "tools/call",
+            "params": {
+                "name": "complete_stage_task",
+                "arguments": {"project_id": 1, "work_item_id": 7, "stage_name": "design"},
+            },
+        },
+        duration=2.5,
+    ) is True
+
+    assert daemon._should_log_slow_request(
+        path="/mcp",
+        payload={
+            "method": "tools/call",
+            "params": {
+                "name": "claim_next_assignment",
+                "arguments": {"project_id": 1, "agent_role": "developer"},
+            },
+        },
+        duration=12.0,
+    ) is True
+
+
+def test_project_snapshot_line_includes_work_item_worker_health_and_session_note():
+    now = datetime.now()
+    runtime = type(
+        "Runtime",
+        (),
+        {
+            "id": 11,
+            "agent_id": 3,
+            "agent_role": "developer",
+            "runtime_name": "fib-demo-developer",
+            "status": "online",
+            "last_heartbeat_at": now - timedelta(seconds=12),
+            "lease_expires_at": now + timedelta(seconds=240),
+            "created_at": now - timedelta(minutes=5),
+            "updated_at": now,
+        },
+    )()
+    stage_run = type(
+        "StageRun",
+        (),
+        {
+            "claimed_by_runtime_id": 11,
+            "status": "claimed",
+            "stage_name": "design",
+        },
+    )()
+    session = type(
+        "Session",
+        (),
+        {
+            "purpose": "[turn 2, 15s] Inspect repository layout -> drafting technical design",
+        },
+    )()
+
+    daemon = MySwatDaemon.__new__(MySwatDaemon)
+    daemon._lock = threading.Lock()
+    daemon._workers = {}
+    daemon._workflow_controls = {}
+    daemon._store = Mock()
+    daemon._store.get_project_by_slug.return_value = {"id": 1, "slug": "fib-demo"}
+    daemon._store.list_work_items.return_value = [
+        {
+            "id": 7,
+            "project_id": 1,
+            "status": "in_progress",
+            "title": "Implement fibonacci",
+            "metadata_json": {
+                "task_state": {
+                    "current_stage": "design",
+                    "latest_summary": "Produce technical design for fibonacci workflow",
+                }
+            },
+        }
+    ]
+    daemon._store.list_runtime_registrations.return_value = [runtime]
+    daemon._store.list_stage_runs.return_value = [stage_run]
+    daemon._store.get_review_cycles.return_value = []
+    daemon._store.get_active_session.return_value = session
+
+    line = daemon._project_snapshot_line("fib-demo")
+
+    assert line is not None
+    assert "project=fib-demo" in line
+    assert "work_item=#7 status=in_progress stage=design" in line
+    assert 'summary="Produce technical design for fibonacci workflow"' in line
+    assert "developer:busy(" in line
+    assert "healthy/12s" in line
+    assert "stage=design work_item=#7" in line
+    assert 'drafting technical design' in line
+
+
+def test_heartbeat_label_treats_naive_runtime_timestamps_as_utc():
+    now_utc = datetime.now(timezone.utc)
+    runtime = type(
+        "Runtime",
+        (),
+        {
+            "status": "online",
+            "last_heartbeat_at": (now_utc - timedelta(seconds=12)).replace(tzinfo=None),
+            "lease_expires_at": (now_utc + timedelta(seconds=240)).replace(tzinfo=None),
+        },
+    )()
+
+    daemon = MySwatDaemon.__new__(MySwatDaemon)
+
+    label = daemon._heartbeat_label(runtime, now=now_utc.astimezone())
+
+    assert label.startswith("healthy/")

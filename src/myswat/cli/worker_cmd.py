@@ -33,6 +33,15 @@ _KEEPALIVE_INTERVAL_SECONDS = 60.0
 LOGGER = logging.getLogger(__name__)
 
 
+def _configure_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    logging.getLogger().setLevel(logging.INFO)
+
+
 def _build_default_runtime_name(project_slug: str, role: str) -> str:
     return f"{project_slug}-{role}"
 
@@ -357,6 +366,7 @@ def run_worker(
     runner: Any | None = None,
     mcp_client: MCPHTTPClient | None = None,
 ) -> dict[str, int]:
+    _configure_logging()
     settings = settings or MySwatSettings()
     if store is None and (project_row is None or agent_row is None):
         pool = TiDBPool(settings.tidb)

@@ -1,5 +1,6 @@
 """MySwat CLI — main entry point."""
 
+from datetime import datetime, timezone
 import json
 import time
 
@@ -14,6 +15,9 @@ app = typer.Typer(
     help="Multi-AI agent co-working system for code development.",
     no_args_is_help=True,
 )
+
+_ACTIVE_RUNTIME_WORK_STATUSES = frozenset({"pending", "in_progress", "review"})
+_MAX_AWARE_DATETIME = datetime.max.replace(tzinfo=timezone.utc)
 
 app.add_typer(memory_app, name="memory", help="Search and manage project knowledge")
 
@@ -562,211 +566,627 @@ def _parse_verdict_payload(value) -> dict:
     return {}
 
 
-def _build_teamwork_flow_entries(pool, item: dict) -> list[dict]:
-    metadata = item.get("metadata_json") if isinstance(item, dict) else None
-    task_state = metadata.get("task_state") if isinstance(metadata, dict) else {}
-    if isinstance(task_state, dict):
-        process_log = task_state.get("process_log")
-        if isinstance(process_log, list) and process_log:
-            return [event for event in process_log if isinstance(event, dict)]
+def _compact_text(value, limit: int = 180) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    if limit <= 3:
+        return text[:limit]
+    return text[: limit - 3] + "..."
 
-    rows = pool.fetch_all(
-        "SELECT rc.iteration, rc.verdict, rc.verdict_json, "
-        "a1.role AS proposer_role, a2.role AS reviewer_role, "
-        "art.title AS artifact_title, art.artifact_type, art.content AS artifact_content "
-        "FROM review_cycles rc "
-        "JOIN agents a1 ON rc.proposer_agent_id = a1.id "
-        "JOIN agents a2 ON rc.reviewer_agent_id = a2.id "
-        "LEFT JOIN artifacts art ON rc.artifact_id = art.id "
-        "WHERE rc.work_item_id = %s "
-        "ORDER BY rc.created_at, rc.id",
-        (item["id"],),
+
+def _task_state_dict(item: dict) -> dict:
+    metadata = item.get("metadata_json") if isinstance(item, dict) else None
+    if not isinstance(metadata, dict):
+        return {}
+    task_state = metadata.get("task_state")
+    return task_state if isinstance(task_state, dict) else {}
+
+
+def _process_log_entries(item: dict) -> list[dict]:
+    task_state = _task_state_dict(item)
+    process_log = task_state.get("process_log")
+    if not isinstance(process_log, list):
+        return []
+    return [entry for entry in process_log if isinstance(entry, dict)]
+
+
+def _safe_list(value) -> list:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return []
+
+
+def _local_timezone():
+    return datetime.now().astimezone().tzinfo or timezone.utc
+
+
+def _normalize_datetime(value: datetime, *, assume_utc_for_naive: bool) -> datetime:
+    if value.tzinfo is None:
+        if assume_utc_for_naive:
+            return value.replace(tzinfo=timezone.utc).astimezone(_local_timezone())
+        return value.replace(tzinfo=_local_timezone())
+    return value.astimezone(_local_timezone())
+
+
+def _coerce_datetime(value):
+    if isinstance(value, datetime):
+        return _normalize_datetime(value, assume_utc_for_naive=True)
+    if not value:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return _normalize_datetime(
+                datetime.fromisoformat(text.replace("Z", "+00:00")),
+                assume_utc_for_naive=False,
+            )
+        except ValueError:
+            pass
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                return _normalize_datetime(
+                    datetime.strptime(text, fmt),
+                    assume_utc_for_naive=False,
+                )
+            except ValueError:
+                continue
+    return None
+
+
+def _now_like(value) -> datetime:
+    dt = _coerce_datetime(value)
+    if dt is not None:
+        return datetime.now(dt.tzinfo)
+    return datetime.now(_local_timezone())
+
+
+def _seconds_since(value) -> float | None:
+    dt = _coerce_datetime(value)
+    if dt is None:
+        return None
+    return max(0.0, (_now_like(dt) - dt).total_seconds())
+
+
+def _seconds_until(value) -> float | None:
+    dt = _coerce_datetime(value)
+    if dt is None:
+        return None
+    return (dt - _now_like(dt)).total_seconds()
+
+
+def _format_age_compact(seconds: float | None) -> str:
+    if seconds is None:
+        return "n/a"
+    total = int(max(0.0, seconds))
+    if total < 60:
+        return f"{total}s"
+    minutes, secs = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes}m{secs:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m"
+
+
+def _format_timestamp_short(value) -> str:
+    dt = _coerce_datetime(value)
+    if dt is None:
+        return "--"
+    return dt.strftime("%m-%d %H:%M:%S")
+
+
+def _format_last_seen(value) -> str:
+    age = _seconds_since(value)
+    if age is None:
+        return "never"
+    return f"{_format_age_compact(age)} ago"
+
+
+def _style_for_item_status(status: str) -> str:
+    return {
+        "completed": "green",
+        "approved": "green",
+        "in_progress": "yellow",
+        "review": "cyan",
+        "pending": "blue",
+        "paused": "yellow",
+        "cancelled": "red",
+        "blocked": "red",
+    }.get(status, "white")
+
+
+def _markup_for_item_status(status: str) -> str:
+    style = _style_for_item_status(status)
+    return f"[{style}]{status}[/{style}]"
+
+
+def _role_label(role: str | None) -> str:
+    if not role:
+        return "System"
+    return {
+        "user": "User",
+        "myswat": "MySwat",
+        "architect": "Architect",
+        "developer": "Developer",
+        "qa_main": "QA",
+        "qa_vice": "QA (Vice)",
+        "request": "Request",
+    }.get(role, str(role).replace("_", " ").title())
+
+
+def _role_style(role: str | None) -> str:
+    return {
+        "user": "green",
+        "myswat": "magenta",
+        "architect": "bright_blue",
+        "developer": "bright_cyan",
+        "qa_main": "bright_green",
+        "qa_vice": "green",
+    }.get(role, "white")
+
+
+def _event_badge(entry: dict) -> tuple[str, str]:
+    verdict = str(entry.get("verdict") or "")
+    event_type = str(entry.get("type") or "")
+    verdict_hint = f"{entry.get('title') or ''} {entry.get('summary') or ''}".lower()
+    if not verdict:
+        if "changes_requested" in verdict_hint or "request changes" in verdict_hint:
+            verdict = "changes_requested"
+        elif "lgtm" in verdict_hint:
+            verdict = "lgtm"
+    if verdict == "lgtm":
+        return "LGTM", "black on green"
+    if verdict == "changes_requested":
+        return "REQUEST CHANGES", "bold white on red"
+    if event_type in {"agent_stall", "stage_blocked"}:
+        return "CRITICAL", "bold white on red"
+    if event_type == "agent_empty_output":
+        return "WARNING", "black on yellow"
+    if event_type == "review_requested":
+        return "REVIEW", "black on cyan"
+    if event_type == "status_report":
+        return "STATUS", "black on blue"
+    if event_type in {"artifact_submitted", "phase_summary"}:
+        return "UPDATE", "black on bright_blue"
+    if event_type == "daemon_queued":
+        return "QUEUED", "black on white"
+    if event_type in {"workflow_completed", "stage_completed"}:
+        return "DONE", "black on green"
+    return "", ""
+
+
+def _event_title(entry: dict) -> str:
+    title = _compact_text(entry.get("title") or "", 90)
+    if title:
+        return title
+    event_type = str(entry.get("type") or "")
+    return {
+        "review_requested": "Review requested",
+        "review_verdict": "Review response",
+        "status_report": "Status update",
+        "artifact_submitted": "Artifact update",
+        "daemon_queued": "Workflow queued",
+        "stage_blocked": "Stage blocked",
+        "agent_stall": "Agent stalled",
+        "agent_empty_output": "Agent returned empty output",
+    }.get(event_type, event_type.replace("_", " ").title() or "Update")
+
+
+def _event_summary(entry: dict) -> str:
+    parts: list[str] = []
+    summary = str(entry.get("summary") or "").strip()
+    if summary:
+        parts.append(summary)
+    issues = entry.get("issues")
+    if isinstance(issues, list) and issues:
+        issue_text = "; ".join(_compact_text(issue, 80) for issue in issues[:3])
+        if issue_text:
+            parts.append(f"Issues: {issue_text}")
+    return _compact_text(" ".join(parts), 320)
+
+
+def _build_review_cycle_flow_entries(pool, item_id: int) -> list[dict]:
+    rows = _safe_list(
+        pool.fetch_all(
+            "SELECT rc.iteration, rc.stage_name, rc.verdict, rc.verdict_json, "
+            "rc.created_at, rc.updated_at, rc.completed_at, "
+            "a1.role AS proposer_role, a2.role AS reviewer_role, "
+            "art.title AS artifact_title, art.artifact_type "
+            "FROM review_cycles rc "
+            "JOIN agents a1 ON rc.proposer_agent_id = a1.id "
+            "JOIN agents a2 ON rc.reviewer_agent_id = a2.id "
+            "LEFT JOIN artifacts art ON rc.artifact_id = art.id "
+            "WHERE rc.work_item_id = %s "
+            "ORDER BY rc.created_at, rc.id",
+            (item_id,),
+        )
     )
 
-    if not rows:
-        return []
-
     events: list[dict] = []
-    description = item.get("description")
-    if description:
-        events.append({
-            "type": "task_request",
-            "from_role": "request",
-            "to_role": rows[0].get("proposer_role") or "developer",
-            "title": "Task request",
-            "summary": description,
-        })
-
+    sequence = 0
     for row in rows:
-        artifact_summary = row.get("artifact_content") or row.get("artifact_title") or row.get("artifact_type") or ""
-        events.append({
-            "type": "review_request",
-            "from_role": row.get("proposer_role"),
-            "to_role": row.get("reviewer_role"),
-            "title": row.get("artifact_title") or row.get("artifact_type") or f"Iteration {row.get('iteration')}",
-            "summary": artifact_summary,
-        })
+        artifact_title = str(row.get("artifact_title") or row.get("artifact_type") or "artifact")
+        detail_parts = [artifact_title]
+        if row.get("stage_name"):
+            detail_parts.append(f"stage {row['stage_name']}")
+        if row.get("iteration"):
+            detail_parts.append(f"iteration {row['iteration']}")
+        events.append(
+            {
+                "at": row.get("created_at"),
+                "type": "review_requested",
+                "from_role": row.get("proposer_role"),
+                "to_role": row.get("reviewer_role"),
+                "title": "Review requested",
+                "summary": " | ".join(detail_parts),
+                "_sequence": sequence,
+            }
+        )
+        sequence += 1
 
+        verdict = str(row.get("verdict") or "")
+        if not verdict or verdict == "pending":
+            continue
         verdict_payload = _parse_verdict_payload(row.get("verdict_json"))
-        verdict_summary = verdict_payload.get("summary") or row.get("verdict") or ""
-        issues = verdict_payload.get("issues")
-        if isinstance(issues, list) and issues:
-            issue_text = "; ".join(str(issue) for issue in issues[:6])
-            verdict_summary = f"{verdict_summary} Issues: {issue_text}" if verdict_summary else f"Issues: {issue_text}"
-        events.append({
-            "type": "review_response",
-            "from_role": row.get("reviewer_role"),
-            "to_role": row.get("proposer_role"),
-            "title": f"Verdict: {row.get('verdict', '?')}",
-            "summary": verdict_summary or row.get("verdict") or "",
-        })
-
+        events.append(
+            {
+                "at": row.get("completed_at") or row.get("updated_at") or row.get("created_at"),
+                "type": "review_verdict",
+                "from_role": row.get("reviewer_role"),
+                "to_role": row.get("proposer_role"),
+                "title": "Review response",
+                "summary": verdict_payload.get("summary") or verdict,
+                "issues": verdict_payload.get("issues") if isinstance(verdict_payload.get("issues"), list) else [],
+                "verdict": verdict,
+                "_sequence": sequence,
+            }
+        )
+        sequence += 1
     return events
 
 
-def _print_message_flow(tree, flow_entries: list[dict]) -> None:
-    flow_branch = tree.add("[bold]Message Flow[/bold]")
-    last_node = None
-    for entry in flow_entries[-20:]:
-        if not isinstance(entry, dict):
+def _build_teamwork_flow_entries(pool, item: dict) -> list[dict]:
+    review_entries = _build_review_cycle_flow_entries(pool, int(item.get("id") or 0))
+    timeline: list[dict] = []
+    process_entries = _process_log_entries(item)
+
+    description = str(item.get("description") or "").strip()
+    if description and not process_entries:
+        timeline.append(
+            {
+                "at": item.get("created_at"),
+                "type": "task_request",
+                "from_role": "user",
+                "to_role": "myswat",
+                "title": "Requirement",
+                "summary": description,
+                "_sequence": -1,
+            }
+        )
+
+    for index, event in enumerate(process_entries):
+        event_type = str(event.get("type") or "")
+        if review_entries and event_type in {"review_requested", "review_verdict"}:
             continue
-        if entry.get("type") == "reaction" and entry.get("from_role") == "myswat" and last_node is not None:
-            summary = str(entry.get("summary") or "").strip()
-            if summary:
-                last_node.add(f"MySwat next: {summary}")
-            continue
-        from_role = entry.get("from_role") or "event"
-        to_role = entry.get("to_role")
-        title = entry.get("title") or entry.get("type") or "Message"
-        header = f"{from_role} -> {to_role}: {title}" if to_role else f"{from_role}: {title}"
-        node = flow_branch.add(header)
-        last_node = node
+        timeline.append(
+            {
+                "at": event.get("at"),
+                "type": event_type,
+                "from_role": event.get("from_role"),
+                "to_role": event.get("to_role"),
+                "title": event.get("title"),
+                "summary": event.get("summary"),
+                "_sequence": index,
+            }
+        )
 
-        summary = str(entry.get("summary") or "").strip()
-        if summary:
-            node.add(summary)
+    timeline.extend(review_entries)
+    return sorted(
+        [entry for entry in timeline if isinstance(entry, dict)],
+        key=lambda entry: (
+            _coerce_datetime(entry.get("at")) or _MAX_AWARE_DATETIME,
+            int(entry.get("_sequence") or 0),
+        ),
+    )
 
 
-def _print_teamwork_details(pool, item, console, details: bool = False) -> None:
-    """Print collaboration details for a teamwork work item."""
+def _build_timeline_actor(entry: dict):
+    from rich.text import Text
+
+    actor = Text()
+    from_role = entry.get("from_role")
+    to_role = entry.get("to_role")
+    actor.append(_role_label(from_role), style=_role_style(from_role))
+    if to_role:
+        actor.append(" -> ", style="dim")
+        actor.append(_role_label(to_role), style=_role_style(to_role))
+    return actor
+
+
+def _build_timeline_message(entry: dict):
+    from rich.text import Text
+
+    badge_text, badge_style = _event_badge(entry)
+    title = _event_title(entry)
+    summary = _event_summary(entry)
+
+    message = Text()
+    if badge_text:
+        message.append(f" {badge_text} ", style=badge_style)
+        message.append(" ")
+    message.append(title, style="bold")
+    if summary and summary != title:
+        message.append("\n")
+        message.append(summary, style="dim")
+    return message
+
+
+def _print_message_flow(console, flow_entries: list[dict]) -> None:
+    from rich.panel import Panel
     from rich.table import Table
-    from rich.tree import Tree
 
-    item_id = item["id"]
-    title = item["title"] if details else item["title"][:60]
-
-    tree = Tree(
-        f"[bold]Work Item #{item_id}:[/bold] {title} "
-        f"[{'green' if item['status'] == 'completed' else 'yellow'}]"
-        f"[{item['status']}][/{'green' if item['status'] == 'completed' else 'yellow'}]"
-    )
-
-    # ── Review cycles (chronological) ──
-    all_cycles = pool.fetch_all(
-        "SELECT rc.iteration, rc.verdict, rc.created_at, "
-        "a1.role AS proposer_role, a1.display_name AS proposer_name, "
-        "a2.role AS reviewer_role, a2.display_name AS reviewer_name "
-        "FROM review_cycles rc "
-        "JOIN agents a1 ON rc.proposer_agent_id = a1.id "
-        "JOIN agents a2 ON rc.reviewer_agent_id = a2.id "
-        "WHERE rc.work_item_id = %s "
-        "ORDER BY rc.created_at",
-        (item_id,),
-    )
-
-    if all_cycles:
-        # Group consecutive cycles by (proposer_role, reviewer_role) into review rounds
-        rounds: list[dict] = []
-        current_round = None
-        for cyc in all_cycles:
-            key = (cyc["proposer_role"], cyc["reviewer_role"])
-            if current_round is None or current_round["key"] != key:
-                current_round = {
-                    "key": key,
-                    "proposer": cyc["proposer_name"],
-                    "reviewer": cyc["reviewer_name"],
-                    "proposer_role": cyc["proposer_role"],
-                    "reviewer_role": cyc["reviewer_role"],
-                    "verdicts": [],
-                    "iterations": 0,
-                }
-                rounds.append(current_round)
-            current_round["verdicts"].append(cyc["verdict"])
-            current_round["iterations"] += 1
-
-        # Infer stage names from the round patterns
-        review_branch = tree.add("[bold]Review Rounds[/bold]")
-        stage_labels = _infer_stage_labels(rounds)
-        for i, (rd, label) in enumerate(zip(rounds, stage_labels)):
-            final_verdict = rd["verdicts"][-1] if rd["verdicts"] else "?"
-            verdict_style = "green" if final_verdict == "lgtm" else "red" if final_verdict == "changes_requested" else "dim"
-            iters = rd["iterations"]
-            iter_note = f"{iters} iter{'s' if iters > 1 else ''}"
-
-            review_branch.add(
-                f"[dim]{label}:[/dim] "
-                f"{rd['proposer']} [dim]proposed →[/dim] {rd['reviewer']} "
-                f"[dim]reviewed:[/dim] [{verdict_style}]{final_verdict}[/{verdict_style}] "
-                f"[dim]({iter_note})[/dim]"
+    entries = [entry for entry in flow_entries if isinstance(entry, dict)]
+    if not entries:
+        console.print(
+            Panel(
+                "[dim]No recorded message flow yet.[/dim]",
+                title="[bold]Message Flow[/bold]",
+                border_style="cyan",
             )
+        )
+        return
 
-    if details:
-        flow_entries = _build_teamwork_flow_entries(pool, item)
-        if flow_entries:
-            _print_message_flow(tree, flow_entries)
+    grid = Table.grid(expand=True, padding=(0, 1))
+    grid.add_column(style="dim", width=14, no_wrap=True)
+    grid.add_column(width=22)
+    grid.add_column(ratio=1)
 
-    # ── Artifacts ──
-    artifacts = pool.fetch_all(
-        "SELECT a.artifact_type, a.title, a.iteration, a.created_at, "
-        "ag.role AS agent_role, ag.display_name AS agent_name "
-        "FROM artifacts a "
-        "JOIN agents ag ON a.agent_id = ag.id "
-        "WHERE a.work_item_id = %s "
-        "ORDER BY a.created_at",
-        (item_id,),
+    for entry in entries[-30:]:
+        grid.add_row(
+            _format_timestamp_short(entry.get("at")),
+            _build_timeline_actor(entry),
+            _build_timeline_message(entry),
+        )
+
+    console.print(
+        Panel(
+            grid,
+            title="[bold]Message Flow[/bold]",
+            border_style="cyan",
+            padding=(0, 1),
+        )
+    )
+
+
+def _runtime_health(runtime) -> tuple[str, str]:
+    status = str(getattr(runtime, "status", "") or "unknown")
+    heartbeat_age = _seconds_since(getattr(runtime, "last_heartbeat_at", None))
+    lease_left = _seconds_until(getattr(runtime, "lease_expires_at", None))
+    metadata = getattr(runtime, "metadata_json", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+
+    if status != "online":
+        stop_reason = str(metadata.get("stop_reason") or "")
+        if stop_reason in {"worker_process_exited", "worker_error"}:
+            return "quit", "red"
+        return status, "dim"
+    if (lease_left is not None and lease_left <= 0) or (heartbeat_age is not None and heartbeat_age >= 300):
+        return "stalled", "red"
+    if (lease_left is not None and lease_left <= 60) or (heartbeat_age is not None and heartbeat_age >= 120):
+        return "late", "yellow"
+    return "healthy", "green"
+
+
+def _latest_runtime_rows(store, project_id: int, items: list[dict]) -> list[dict]:
+    runtimes = _safe_list(store.list_runtime_registrations(project_id))
+    selected: dict[str, object] = {}
+    for runtime in runtimes:
+        role = str(getattr(runtime, "agent_role", None) or getattr(runtime, "runtime_name", "runtime"))
+        existing = selected.get(role)
+        runtime_updated = _coerce_datetime(getattr(runtime, "updated_at", None)) or _coerce_datetime(
+            getattr(runtime, "last_heartbeat_at", None)
+        )
+        existing_updated = _coerce_datetime(getattr(existing, "updated_at", None)) or _coerce_datetime(
+            getattr(existing, "last_heartbeat_at", None)
+        ) if existing is not None else None
+        if existing is None or existing_updated is None or (runtime_updated is not None and runtime_updated >= existing_updated):
+            selected[role] = runtime
+
+    assignments: dict[int, dict] = {}
+    for item in items:
+        if str(item.get("status") or "") not in _ACTIVE_RUNTIME_WORK_STATUSES:
+            continue
+        work_item_id = int(item.get("id") or 0)
+        for stage_run in _safe_list(store.list_stage_runs(work_item_id)):
+            runtime_id = int(getattr(stage_run, "claimed_by_runtime_id", 0) or 0)
+            if runtime_id <= 0 or str(getattr(stage_run, "status", "") or "") != "claimed":
+                continue
+            assignments[runtime_id] = {
+                "work_item_id": work_item_id,
+                "activity": f"stage {getattr(stage_run, 'stage_name', '-') or '-'} on #{work_item_id}",
+            }
+        for cycle in _safe_list(store.get_review_cycles(work_item_id)):
+            runtime_id = int(cycle.get("claimed_by_runtime_id") or 0)
+            if runtime_id <= 0 or str(cycle.get("status") or "") != "claimed":
+                continue
+            stage_name = str(cycle.get("stage_name") or "review")
+            assignments[runtime_id] = {
+                "work_item_id": work_item_id,
+                "activity": f"review {stage_name} on #{work_item_id}",
+            }
+
+    rows: list[dict] = []
+    for role in sorted(selected):
+        runtime = selected[role]
+        runtime_id = int(getattr(runtime, "id", 0) or 0)
+        activity = assignments.get(runtime_id, {}).get("activity", "idle")
+        work_item_id = int(assignments.get(runtime_id, {}).get("work_item_id", 0) or 0)
+        note = ""
+        agent_id = int(getattr(runtime, "agent_id", 0) or 0)
+        if agent_id > 0 and work_item_id > 0:
+            try:
+                session = store.get_active_session(agent_id, work_item_id)
+            except Exception:
+                session = None
+            if session is not None:
+                note = _compact_text(getattr(session, "purpose", ""), 90)
+        health, style = _runtime_health(runtime)
+        metadata = getattr(runtime, "metadata_json", None)
+        metadata = metadata if isinstance(metadata, dict) else {}
+        stop_reason = str(metadata.get("stop_reason") or "").replace("_", " ")
+        exit_code = metadata.get("exit_code")
+        if stop_reason and exit_code is not None:
+            stop_reason = f"{stop_reason} (exit {exit_code})"
+        rows.append(
+            {
+                "role": role,
+                "health": health,
+                "health_style": style,
+                "last_seen": _format_last_seen(getattr(runtime, "last_heartbeat_at", None)),
+                "activity": activity,
+                "note": note,
+                "runtime_name": str(getattr(runtime, "runtime_name", "") or "-"),
+                "stop_reason": stop_reason,
+            }
+        )
+    return rows
+
+
+def _collect_project_alerts(items: list[dict], runtime_rows: list[dict]) -> list[dict]:
+    alerts: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    for row in runtime_rows:
+        health = str(row.get("health") or "")
+        if health == "healthy":
+            continue
+        severity = "critical" if health in {"stalled", "quit"} else "warning"
+        message = f"{_role_label(row.get('role'))} worker is {health}"
+        if row.get("activity") and row.get("activity") != "idle":
+            message += f" while handling {row['activity']}"
+        if row.get("last_seen"):
+            message += f" (last heartbeat {row['last_seen']})"
+        if row.get("stop_reason"):
+            message += f"; {row['stop_reason']}"
+        key = (severity, message)
+        if key not in seen:
+            alerts.append({"severity": severity, "message": message})
+            seen.add(key)
+
+    for item in items:
+        work_item_id = int(item.get("id") or 0)
+        for event in _process_log_entries(item)[-12:]:
+            event_type = str(event.get("type") or "")
+            if event_type not in {"agent_stall", "agent_empty_output", "stage_blocked"}:
+                continue
+            severity = "critical" if event_type in {"agent_stall", "stage_blocked"} else "warning"
+            message = f"Work item #{work_item_id}: {_compact_text(event.get('summary') or _event_title(event), 180)}"
+            key = (severity, message)
+            if key not in seen:
+                alerts.append({"severity": severity, "message": message})
+                seen.add(key)
+    return alerts[:8]
+
+
+def _print_alerts(console, alerts: list[dict]) -> None:
+    from rich.panel import Panel
+    from rich.text import Text
+
+    body = Text()
+    border_style = "green"
+    if alerts:
+        border_style = "red" if any(alert.get("severity") == "critical" for alert in alerts) else "yellow"
+        for index, alert in enumerate(alerts):
+            severity = str(alert.get("severity") or "warning")
+            badge = "CRITICAL" if severity == "critical" else "WARNING"
+            badge_style = "bold white on red" if severity == "critical" else "black on yellow"
+            text_style = "red" if severity == "critical" else "yellow"
+            body.append(f" {badge} ", style=badge_style)
+            body.append(" ")
+            body.append(str(alert.get("message") or ""), style=text_style)
+            if index < len(alerts) - 1:
+                body.append("\n")
+    else:
+        body.append("No critical worker or agent alerts.", style="green")
+
+    console.print(Panel(body, title="[bold]Alerts[/bold]", border_style=border_style, padding=(0, 1)))
+
+
+def _print_worker_health(console, runtime_rows: list[dict]) -> None:
+    from rich.table import Table
+
+    if not runtime_rows:
+        console.print("[dim]Worker Health: no active runtime registrations yet.[/dim]")
+        return
+
+    table = Table(title="Worker Health")
+    table.add_column("Role")
+    table.add_column("Health")
+    table.add_column("Heartbeat")
+    table.add_column("Activity")
+    table.add_column("Progress", max_width=70)
+    for row in runtime_rows:
+        health_style = str(row.get("health_style") or "white")
+        health_text = f"[{health_style}]{row.get('health')}[/{health_style}]"
+        heartbeat = str(row.get("last_seen") or "never")
+        if row.get("stop_reason"):
+            heartbeat += f" | {row['stop_reason']}"
+        progress = row.get("note") or row.get("runtime_name") or "-"
+        table.add_row(
+            _role_label(row.get("role")),
+            health_text,
+            heartbeat,
+            str(row.get("activity") or "idle"),
+            str(progress),
+        )
+    console.print(table)
+
+
+def _print_teamwork_details(pool, item, console, details: bool = False, show_header: bool = True) -> None:
+    from rich.table import Table
+
+    item_id = int(item.get("id") or 0)
+    status = str(item.get("status") or "unknown")
+    if show_header:
+        console.print(
+            f"\n[bold]Work Item #{item_id}[/bold] — {item.get('title', '')} "
+            f"{_markup_for_item_status(status)}"
+        )
+
+    flow_entries = _build_teamwork_flow_entries(pool, item)
+    _print_message_flow(console, flow_entries if details else flow_entries[-12:])
+
+    artifacts = _safe_list(
+        pool.fetch_all(
+            "SELECT a.artifact_type, a.title, a.iteration, a.created_at, "
+            "ag.role AS agent_role, ag.display_name AS agent_name "
+            "FROM artifacts a "
+            "JOIN agents ag ON a.agent_id = ag.id "
+            "WHERE a.work_item_id = %s "
+            "ORDER BY a.created_at",
+            (item_id,),
+        )
     )
     if artifacts:
-        art_branch = tree.add("[bold]Artifacts[/bold]")
-        for art in artifacts:
-            art_branch.add(
-                f"[dim]{art['artifact_type']}[/dim] "
-                f"\"{art['title'] or '-'}\" "
-                f"[dim]by[/dim] {art['agent_name']} "
-                f"[dim](v{art['iteration']})[/dim]"
+        table = Table(title="Artifacts")
+        table.add_column("When", style="dim", no_wrap=True)
+        table.add_column("Type")
+        table.add_column("Title", max_width=48)
+        table.add_column("By")
+        table.add_column("Version", justify="right")
+        for art in artifacts[-8:]:
+            table.add_row(
+                _format_timestamp_short(art.get("created_at")),
+                str(art.get("artifact_type") or "-"),
+                str(art.get("title") or "-"),
+                str(art.get("agent_name") or art.get("agent_role") or "-"),
+                f"v{art.get('iteration') or 1}",
             )
-
-    # ── Agent contributions (sessions + turns) ──
-    agent_effort = pool.fetch_all(
-        "SELECT a.role, a.display_name, "
-        "COUNT(DISTINCT s.id) AS session_count, "
-        "COUNT(st.id) AS turn_count, "
-        "(SELECT COALESCE(SUM(s2.token_count_est), 0) "
-        " FROM sessions s2 WHERE s2.agent_id = a.id AND s2.work_item_id = %s"
-        ") AS total_tokens "
-        "FROM sessions s "
-        "JOIN agents a ON s.agent_id = a.id "
-        "LEFT JOIN session_turns st ON st.session_id = s.id "
-        "WHERE s.work_item_id = %s "
-        "GROUP BY a.id, a.role, a.display_name "
-        "ORDER BY turn_count DESC",
-        (item_id, item_id),
-    )
-    if agent_effort:
-        effort_branch = tree.add("[bold]Agent Contributions[/bold]")
-        for ae in agent_effort:
-            tokens = ae["total_tokens"]
-            if tokens > 1000:
-                token_str = f"{tokens // 1000}k tokens"
-            else:
-                token_str = f"{tokens} tokens"
-            effort_branch.add(
-                f"{ae['display_name']} [dim]({ae['role']})[/dim] — "
-                f"{ae['turn_count']} turns, "
-                f"{ae['session_count']} session{'s' if ae['session_count'] > 1 else ''}, "
-                f"~{token_str}"
-            )
-
-    console.print(tree)
+        console.print(table)
 
 
 def _work_mode_value(item: dict) -> str | None:
@@ -785,7 +1205,7 @@ def _display_mode(item: dict, fallback: str) -> str:
 def _print_task_state(console, item: dict) -> None:
     metadata = item.get("metadata_json") if isinstance(item, dict) else None
     background = metadata.get("background") if isinstance(metadata, dict) else {}
-    task_state = metadata.get("task_state") if isinstance(metadata, dict) else {}
+    task_state = _task_state_dict(item)
     work_mode = _work_mode_value(item)
     if work_mode:
         console.print(f"[bold]Workflow mode:[/bold] {work_mode}")
@@ -814,7 +1234,7 @@ def _print_task_state(console, item: dict) -> None:
     if task_state.get("current_stage"):
         console.print(f"[bold]Stage:[/bold] {task_state['current_stage']}")
     if task_state.get("latest_summary"):
-        console.print(f"[bold]Latest summary:[/bold] {str(task_state['latest_summary'])[:600]}")
+        console.print(f"[bold]Latest summary:[/bold] {_compact_text(task_state['latest_summary'], 600)}")
     if task_state.get("next_todos"):
         console.print("[bold]Next TODOs:[/bold]")
         for todo in task_state["next_todos"][:10]:
@@ -822,16 +1242,7 @@ def _print_task_state(console, item: dict) -> None:
     if task_state.get("open_issues"):
         console.print("[bold]Open issues:[/bold]")
         for issue in task_state["open_issues"][:10]:
-            console.print(f"  - {issue}")
-    process_log = task_state.get("process_log")
-    if isinstance(process_log, list) and process_log:
-        console.print("[bold]Process Log:[/bold]")
-        for event in process_log[-20:]:
-            if not isinstance(event, dict):
-                continue
-            timestamp = event.get("at")
-            prefix = f"[{timestamp}] " if timestamp else ""
-            console.print(f"  - {prefix}{_describe_process_event(event, 160)}")
+            console.print(f"  - [yellow]{_compact_text(issue, 220)}[/yellow]")
     console.print()
 
 
@@ -933,7 +1344,12 @@ def status(
         console.print(table)
 
     # Work items — with work mode (solo vs teamwork)
-    items = store.list_work_items(proj["id"])
+    items = _safe_list(store.list_work_items(proj["id"]))
+    runtime_rows = _latest_runtime_rows(store, int(proj["id"]), items) if details else []
+    if details:
+        _print_alerts(console, _collect_project_alerts(items, runtime_rows))
+        _print_worker_health(console, runtime_rows)
+
     if items:
         table = Table(title="Work Items")
         table.add_column("ID")
@@ -943,7 +1359,6 @@ def status(
         table.add_column("Type")
         table.add_column("Agents")
         table.add_column("Title", max_width=50)
-        teamwork_items = []  # collect for detailed display below
         for item in items[:20]:
             # Determine work mode from review_cycles
             cycles = pool.fetch_all(
@@ -962,7 +1377,6 @@ def status(
                     agent_names.add(c["proposer_role"])
                     agent_names.add(c["reviewer_role"])
                 agents_str = ", ".join(sorted(agent_names))
-                teamwork_items.append(item)
             else:
                 # Solo — find the assigned agent or session agent
                 assigned = item.get("assigned_agent_id")
@@ -986,19 +1400,19 @@ def status(
             task_state = metadata.get("task_state") if isinstance(metadata, dict) else {}
             stage = task_state.get("current_stage", "-") if isinstance(task_state, dict) else "-"
             table.add_row(
-                str(item["id"]), item["status"], stage, mode,
+                str(item["id"]), _markup_for_item_status(str(item["status"])), stage, mode,
                 item["item_type"], agents_str, item["title"][:50],
             )
         console.print(table)
 
         if details:
             for item in items[:10]:
-                console.print(f"\n[bold]Work Item #{item['id']} State[/bold] — {item['title'][:80]}")
+                console.print(
+                    f"\n[bold]Work Item #{item['id']}[/bold] — {item['title'][:80]} "
+                    f"{_markup_for_item_status(str(item.get('status') or 'unknown'))}"
+                )
                 _print_task_state(console, item)
-
-            # ── Teamwork details for recent work items ──
-            for item in teamwork_items[:10]:
-                _print_teamwork_details(pool, item, console, details=True)
+                _print_teamwork_details(pool, item, console, details=True, show_header=False)
     else:
         console.print("\n[dim]No work items yet.[/dim]")
 
@@ -1152,14 +1566,19 @@ def task(
         console.print(f"[red]Work item {work_item_id} not found in project '{project}'.[/red]")
         raise typer.Exit(1)
 
-    console.print(f"\n[bold]Work Item #{item['id']}[/bold] — {item['title']}")
-    console.print(f"[bold]Status:[/bold] {item['status']}")
+    console.print(
+        f"\n[bold]Work Item #{item['id']}[/bold] — {item['title']} "
+        f"{_markup_for_item_status(str(item.get('status') or 'unknown'))}"
+    )
     console.print(f"[bold]Type:[/bold] {item['item_type']}")
     if item.get("description"):
         console.print(f"[bold]Description:[/bold] {item['description'][:500]}")
 
+    runtime_rows = _latest_runtime_rows(store, int(proj["id"]), [item])
+    _print_alerts(console, _collect_project_alerts([item], runtime_rows))
+    _print_worker_health(console, runtime_rows)
     _print_task_state(console, item)
-    _print_teamwork_details(pool, item, console, details=True)
+    _print_teamwork_details(pool, item, console, details=True, show_header=False)
 
 
 if __name__ == "__main__":

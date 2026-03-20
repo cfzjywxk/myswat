@@ -26,40 +26,35 @@ class TestPrintTeamworkDetails:
     def test_with_review_cycles(self):
         pool = MagicMock()
         pool.fetch_all.side_effect = [
-            # all_cycles
             [
                 {
                     "iteration": 1, "verdict": "changes_requested",
                     "created_at": "2026-03-07",
-                    "proposer_role": "developer", "proposer_name": "Dev",
-                    "reviewer_role": "qa_main", "reviewer_name": "QA",
+                    "updated_at": "2026-03-07",
+                    "completed_at": "2026-03-07",
+                    "stage_name": "design",
+                    "proposer_role": "developer",
+                    "reviewer_role": "qa_main",
+                    "artifact_title": "Design",
+                    "artifact_type": "proposal",
                 },
                 {
                     "iteration": 2, "verdict": "lgtm",
                     "created_at": "2026-03-07",
-                    "proposer_role": "developer", "proposer_name": "Dev",
-                    "reviewer_role": "qa_main", "reviewer_name": "QA",
+                    "updated_at": "2026-03-07",
+                    "completed_at": "2026-03-07",
+                    "stage_name": "design",
+                    "proposer_role": "developer",
+                    "reviewer_role": "qa_main",
+                    "artifact_title": "Design",
+                    "artifact_type": "proposal",
                 },
             ],
-            # artifacts
             [
                 {
                     "artifact_type": "proposal", "title": "Design",
                     "iteration": 1, "created_at": "2026-03-07",
                     "agent_role": "developer", "agent_name": "Dev",
-                },
-            ],
-            # agent_effort
-            [
-                {
-                    "role": "developer", "display_name": "Dev",
-                    "session_count": 1, "turn_count": 10,
-                    "total_tokens": 50000,
-                },
-                {
-                    "role": "qa_main", "display_name": "QA",
-                    "session_count": 1, "turn_count": 5,
-                    "total_tokens": 800,
                 },
             ],
         ]
@@ -77,7 +72,6 @@ class TestPrintTeamworkDetails:
         pool.fetch_all.side_effect = [
             [],  # no cycles
             [],  # no artifacts
-            [],  # no agent_effort
         ]
 
         item = {
@@ -91,23 +85,31 @@ class TestPrintTeamworkDetails:
     def test_review_rounds_grouping(self):
         pool = MagicMock()
         pool.fetch_all.side_effect = [
-            # Cycles with different proposer/reviewer pairs
             [
                 {
                     "iteration": 1, "verdict": "lgtm",
                     "created_at": "2026-03-07",
-                    "proposer_role": "developer", "proposer_name": "Dev",
-                    "reviewer_role": "qa_main", "reviewer_name": "QA",
+                    "updated_at": "2026-03-07",
+                    "completed_at": "2026-03-07",
+                    "stage_name": "design",
+                    "proposer_role": "developer",
+                    "reviewer_role": "qa_main",
+                    "artifact_title": "Design",
+                    "artifact_type": "proposal",
                 },
                 {
                     "iteration": 2, "verdict": "lgtm",
                     "created_at": "2026-03-07",
-                    "proposer_role": "qa_main", "proposer_name": "QA",
-                    "reviewer_role": "developer", "reviewer_name": "Dev",
+                    "updated_at": "2026-03-07",
+                    "completed_at": "2026-03-07",
+                    "stage_name": "test_plan",
+                    "proposer_role": "qa_main",
+                    "reviewer_role": "developer",
+                    "artifact_title": "Test plan",
+                    "artifact_type": "test_plan",
                 },
             ],
             [],  # artifacts
-            [],  # agent effort
         ]
 
         item = {
@@ -124,24 +126,38 @@ class TestPrintTeamworkDetails:
                 {
                     "iteration": 1, "verdict": "changes_requested",
                     "created_at": "2026-03-07",
-                    "proposer_role": "developer", "proposer_name": "Dev",
-                    "reviewer_role": "qa_main", "reviewer_name": "QA",
+                    "updated_at": "2026-03-07",
+                    "completed_at": "2026-03-07",
+                    "stage_name": "design",
+                    "proposer_role": "developer",
+                    "reviewer_role": "qa_main",
+                    "artifact_title": "Design",
+                    "artifact_type": "proposal",
                 },
                 {
                     "iteration": 2, "verdict": "changes_requested",
                     "created_at": "2026-03-07",
-                    "proposer_role": "developer", "proposer_name": "Dev",
-                    "reviewer_role": "qa_main", "reviewer_name": "QA",
+                    "updated_at": "2026-03-07",
+                    "completed_at": "2026-03-07",
+                    "stage_name": "design",
+                    "proposer_role": "developer",
+                    "reviewer_role": "qa_main",
+                    "artifact_title": "Design",
+                    "artifact_type": "proposal",
                 },
                 {
                     "iteration": 3, "verdict": "lgtm",
                     "created_at": "2026-03-07",
-                    "proposer_role": "developer", "proposer_name": "Dev",
-                    "reviewer_role": "qa_main", "reviewer_name": "QA",
+                    "updated_at": "2026-03-07",
+                    "completed_at": "2026-03-07",
+                    "stage_name": "design",
+                    "proposer_role": "developer",
+                    "reviewer_role": "qa_main",
+                    "artifact_title": "Design",
+                    "artifact_type": "proposal",
                 },
             ],
             [],  # artifacts
-            [],  # agent effort
         ]
 
         item = {
@@ -158,23 +174,16 @@ class TestPrintTeamworkDetails:
                 {
                     "iteration": 1, "verdict": "changes_requested",
                     "created_at": "2026-03-07",
-                    "proposer_role": "developer", "proposer_name": "Dev",
-                    "reviewer_role": "qa_main", "reviewer_name": "QA",
-                },
-            ],
-            [
-                {
-                    "iteration": 1,
-                    "verdict": "changes_requested",
-                    "verdict_json": '{"verdict":"changes_requested","summary":"Needs more detail","issues":["add phase scope"]}',
+                    "updated_at": "2026-03-07",
+                    "completed_at": "2026-03-07",
+                    "stage_name": "design",
                     "proposer_role": "developer",
                     "reviewer_role": "qa_main",
                     "artifact_title": "Iteration 1",
                     "artifact_type": "proposal",
-                    "artifact_content": "Initial design draft",
+                    "verdict_json": '{"verdict":"changes_requested","summary":"Needs more detail","issues":["add phase scope"]}',
                 },
             ],
-            [],
             [],
         ]
 
@@ -191,21 +200,26 @@ class TestPrintTeamworkDetails:
 
         rendered = output.getvalue()
         assert "Message Flow" in rendered
-        assert "developer -> qa_main" in rendered
-        assert "qa_main -> developer" in rendered
+        assert "Developer -> QA" in rendered
+        assert "QA -> Developer" in rendered
+        assert "REQUEST CHANGES" in rendered
 
-    def test_architect_design_round_label_rendered(self):
+    def test_architect_review_flow_uses_role_labels(self):
         pool = MagicMock()
         pool.fetch_all.side_effect = [
             [
                 {
                     "iteration": 1, "verdict": "lgtm",
                     "created_at": "2026-03-07",
-                    "proposer_role": "architect", "proposer_name": "Architect",
-                    "reviewer_role": "developer", "reviewer_name": "Dev",
+                    "updated_at": "2026-03-07",
+                    "completed_at": "2026-03-07",
+                    "stage_name": "design",
+                    "proposer_role": "architect",
+                    "reviewer_role": "developer",
+                    "artifact_title": "Design",
+                    "artifact_type": "proposal",
                 },
             ],
-            [],
             [],
         ]
         item = {"id": 1, "title": "Design task", "status": "completed"}
@@ -215,20 +229,25 @@ class TestPrintTeamworkDetails:
         _print_teamwork_details(pool, item, console)
 
         rendered = output.getvalue()
-        assert "Architect Design Review" in rendered
+        assert "Architect -> Developer" in rendered
+        assert "LGTM" in rendered
 
-    def test_test_plan_round_label_with_architect_reviewer_rendered(self):
+    def test_test_plan_flow_with_architect_reviewer_rendered(self):
         pool = MagicMock()
         pool.fetch_all.side_effect = [
             [
                 {
                     "iteration": 1, "verdict": "lgtm",
                     "created_at": "2026-03-07",
-                    "proposer_role": "qa_main", "proposer_name": "QA",
-                    "reviewer_role": "architect", "reviewer_name": "Architect",
+                    "updated_at": "2026-03-07",
+                    "completed_at": "2026-03-07",
+                    "stage_name": "test_plan",
+                    "proposer_role": "qa_main",
+                    "reviewer_role": "architect",
+                    "artifact_title": "Test plan",
+                    "artifact_type": "test_plan",
                 },
             ],
-            [],
             [],
         ]
         item = {"id": 2, "title": "Test plan task", "status": "completed"}
@@ -238,18 +257,21 @@ class TestPrintTeamworkDetails:
         _print_teamwork_details(pool, item, console)
 
         rendered = output.getvalue()
-        assert "Test Plan Review" in rendered
+        assert "QA -> Architect" in rendered
+        assert "Test plan" in rendered
 
-    def test_tokens_under_1000(self):
+    def test_artifacts_table_renders(self):
         pool = MagicMock()
         pool.fetch_all.side_effect = [
             [],  # cycles
-            [],  # artifacts
             [
                 {
-                    "role": "developer", "display_name": "Dev",
-                    "session_count": 1, "turn_count": 2,
-                    "total_tokens": 500,  # under 1000
+                    "artifact_type": "design_doc",
+                    "title": "Technical design",
+                    "iteration": 2,
+                    "created_at": "2026-03-07",
+                    "agent_role": "architect",
+                    "agent_name": "Architect",
                 },
             ],
         ]
@@ -257,9 +279,14 @@ class TestPrintTeamworkDetails:
         item = {
             "id": 1, "title": "Small task", "status": "completed",
         }
-        console = MagicMock()
+        output = io.StringIO()
+        console = Console(file=output, force_terminal=False, width=120)
 
         _print_teamwork_details(pool, item, console)
+
+        rendered = output.getvalue()
+        assert "Artifacts" in rendered
+        assert "Technical design" in rendered
 
 
 # ---------------------------------------------------------------------------

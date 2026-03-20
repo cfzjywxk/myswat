@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 import json
 from unittest.mock import MagicMock, patch
 
@@ -11,15 +11,16 @@ import pymysql.err
 import typer
 from click.exceptions import Exit as ClickExit
 from rich.console import Console
-from rich.tree import Tree
 from typer.testing import CliRunner
 
 from myswat.cli.main import (
     _build_teamwork_flow_entries,
+    _format_timestamp_short,
     _format_history_timestamp,
     _infer_stage_labels,
     _print_message_flow,
     _print_task_state,
+    _runtime_health,
     app,
 )
 
@@ -147,18 +148,55 @@ def test_build_teamwork_flow_entries_returns_empty_without_rows():
     assert _build_teamwork_flow_entries(pool, {"id": 7, "description": ""}) == []
 
 
-def test_print_message_flow_skips_non_dict_entries():
-    tree = Tree("root")
+def test_print_message_flow_renders_timeline_panel():
+    output = Console(record=True, force_terminal=False, width=120)
 
-    _print_message_flow(tree, ["skip-me", {"type": "review_request", "from_role": "dev", "to_role": "qa"}])
+    _print_message_flow(
+        output,
+        [
+            "skip-me",
+            {
+                "type": "review_verdict",
+                "verdict": "changes_requested",
+                "from_role": "developer",
+                "to_role": "architect",
+                "summary": "Need more detail",
+                "at": "2026-03-18T10:00:00",
+            },
+        ],
+    )
 
-    console = Console(record=True, force_terminal=False)
-    console.print(tree)
-    rendered = console.export_text()
-    assert "dev -> qa" in rendered
+    rendered = output.export_text()
+    assert "Message Flow" in rendered
+    assert "Developer -> Architect" in rendered
+    assert "REQUEST CHANGES" in rendered
 
 
-def test_print_task_state_renders_background_and_process_log():
+def test_format_timestamp_short_normalizes_db_utc_datetimes_but_keeps_local_strings():
+    with patch("myswat.cli.main._local_timezone", return_value=timezone(timedelta(hours=8))):
+        assert _format_timestamp_short(datetime(2026, 3, 20, 0, 31, 50)) == "03-20 08:31:50"
+        assert _format_timestamp_short("2026-03-20T08:25:59") == "03-20 08:25:59"
+
+
+def test_runtime_health_does_not_mark_recent_utc_heartbeat_as_stalled():
+    now_utc = datetime.now(timezone.utc)
+    runtime = type(
+        "Runtime",
+        (),
+        {
+            "status": "online",
+            "last_heartbeat_at": (now_utc - timedelta(seconds=30)).replace(tzinfo=None),
+            "lease_expires_at": (now_utc + timedelta(seconds=240)).replace(tzinfo=None),
+            "metadata_json": {},
+        },
+    )()
+
+    health, style = _runtime_health(runtime)
+
+    assert (health, style) == ("healthy", "green")
+
+
+def test_print_task_state_renders_background_and_open_issues():
     output = []
 
     class _Console:
@@ -184,10 +222,6 @@ def test_print_task_state_renders_background_and_process_log():
                     "latest_summary": "working",
                     "next_todos": ["ship"],
                     "open_issues": ["retry"],
-                    "process_log": [
-                        {"type": "task_request", "summary": "start", "at": "2026-03-18 10:00:00"},
-                        "skip-me",
-                    ],
                 },
             }
         },
@@ -196,7 +230,7 @@ def test_print_task_state_renders_background_and_process_log():
     rendered = "\n".join(output)
     assert "Execution:" in rendered
     assert "Finished:" in rendered
-    assert "Process Log:" in rendered
+    assert "Open issues:" in rendered
 
 
 def test_print_task_state_prints_blank_line_for_background_only():

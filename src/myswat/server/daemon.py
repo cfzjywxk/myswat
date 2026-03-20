@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -31,9 +32,50 @@ from myswat.workflow.modes import WorkMode
 _ACTIVE_WORK_ITEM_STATUSES = frozenset({"pending", "in_progress", "review"})
 _TERMINAL_WORK_ITEM_STATUSES = frozenset({"approved", "blocked", "cancelled", "completed", "paused"})
 _REQUEST_SLOW_SECONDS = 1.0
+_VERBOSE_REQUEST_SECONDS = 10.0
+_PROJECT_SNAPSHOT_INTERVAL_SECONDS = 15.0
+_NOISY_HTTP_PATHS = frozenset({"/api/work-item"})
+_NOISY_MCP_TOOLS = frozenset({
+    "heartbeat_runtime",
+    "renew_stage_run_lease",
+    "renew_review_cycle_lease",
+    "claim_next_assignment",
+})
 
 LOGGER = logging.getLogger(__name__)
 _CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+
+
+def _clip_for_log(value: Any, *, limit: int = 120) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    if limit <= 3:
+        return text[:limit]
+    return text[: limit - 3] + "..."
+
+
+def _format_age(seconds: float | None) -> str:
+    total = int(max(0.0, float(seconds or 0.0)))
+    if total < 60:
+        return f"{total}s"
+    minutes, seconds = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes}m{seconds:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes:02d}m"
+
+
+def _local_timezone():
+    return datetime.now().astimezone().tzinfo or timezone.utc
+
+
+def _normalize_runtime_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc).astimezone(_local_timezone())
+    return value.astimezone(_local_timezone())
 
 
 def _source_root() -> Path:
@@ -89,6 +131,7 @@ class MySwatDaemon:
         self._workflow_controls: dict[int, ManagedWorkflow] = {}
         self._supervisor_stop_event = threading.Event()
         self._supervisor_thread: threading.Thread | None = None
+        self._last_project_snapshot_at = 0.0
 
     @property
     def base_url(self) -> str:
@@ -162,6 +205,14 @@ class MySwatDaemon:
         finally:
             log_file.close()
         self._workers[key] = ManagedWorkerProcess(process=proc, workdir=workdir)
+        LOGGER.info(
+            "Worker started: project=%s role=%s pid=%s workdir=%s log=%s",
+            project_slug,
+            role,
+            proc.pid,
+            workdir or "-",
+            log_path,
+        )
 
     def _stop_worker_process(self, proc: subprocess.Popen) -> None:
         if proc.poll() is not None:
@@ -184,6 +235,13 @@ class MySwatDaemon:
             ]
             for key, _proc in to_stop:
                 self._workers.pop(key, None)
+
+        if to_stop:
+            LOGGER.info(
+                "Stopping project workers: project=%s workers=%s",
+                project_slug,
+                ", ".join(sorted(str(key[1]) for key, _proc in to_stop)),
+            )
 
         for _key, proc in to_stop:
             self._stop_worker_process(proc)
@@ -248,7 +306,17 @@ class MySwatDaemon:
                     pid=worker.process.pid,
                     exit_code=exit_code,
                 )
-            if self._find_active_work_item(project_slug) is not None:
+            active_item = self._find_active_work_item(project_slug)
+            should_restart = active_item is not None
+            LOGGER.warning(
+                "Worker exited: project=%s role=%s pid=%s exit_code=%s restart=%s",
+                project_slug,
+                role,
+                worker.process.pid,
+                exit_code,
+                "yes" if should_restart else "no",
+            )
+            if should_restart:
                 with self._lock:
                     self._start_worker(project_slug=project_slug, role=role, workdir=worker.workdir)
 
@@ -270,8 +338,314 @@ class MySwatDaemon:
         while not self._supervisor_stop_event.wait(_WORKER_SUPERVISION_INTERVAL_SECONDS):
             try:
                 self._supervise_workers_once()
+                self._log_active_project_snapshots()
             except Exception:
                 continue
+
+    @staticmethod
+    def _task_state_from_item(item: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(item, dict):
+            return {}
+        metadata = item.get("metadata_json")
+        if not isinstance(metadata, dict):
+            return {}
+        task_state = metadata.get("task_state")
+        return task_state if isinstance(task_state, dict) else {}
+
+    @staticmethod
+    def _prefer_runtime(candidate, existing) -> bool:
+        candidate_online = str(candidate.status or "") == "online"
+        existing_online = str(existing.status or "") == "online"
+        if candidate_online != existing_online:
+            return candidate_online
+        candidate_updated = _normalize_runtime_datetime(
+            candidate.updated_at or candidate.last_heartbeat_at or candidate.created_at
+        )
+        existing_updated = _normalize_runtime_datetime(
+            existing.updated_at or existing.last_heartbeat_at or existing.created_at
+        )
+        if candidate_updated is None:
+            return False
+        if existing_updated is None:
+            return True
+        return candidate_updated >= existing_updated
+
+    def _latest_runtimes_by_role(self, project_id: int) -> list[Any]:
+        runtimes = self._store.list_runtime_registrations(project_id)
+        selected: dict[str, Any] = {}
+        for runtime in runtimes:
+            role = str(runtime.agent_role or runtime.runtime_name or f"runtime-{runtime.id}")
+            existing = selected.get(role)
+            if existing is None or self._prefer_runtime(runtime, existing):
+                selected[role] = runtime
+        return [selected[role] for role in sorted(selected)]
+
+    def _heartbeat_label(self, runtime: Any, *, now: datetime) -> str:
+        status = str(runtime.status or "unknown")
+        last_heartbeat_at = _normalize_runtime_datetime(runtime.last_heartbeat_at)
+        lease_expires_at = _normalize_runtime_datetime(runtime.lease_expires_at)
+
+        heartbeat_state = status
+        if status == "online":
+            heartbeat_state = "healthy"
+            if lease_expires_at is not None:
+                seconds_until_expiry = (lease_expires_at - now).total_seconds()
+                if seconds_until_expiry <= 0:
+                    heartbeat_state = "stale"
+                elif seconds_until_expiry <= 60:
+                    heartbeat_state = "late"
+            if heartbeat_state == "healthy" and last_heartbeat_at is not None:
+                heartbeat_age = (now - last_heartbeat_at).total_seconds()
+                if heartbeat_age >= 300:
+                    heartbeat_state = "stale"
+                elif heartbeat_age >= 120:
+                    heartbeat_state = "late"
+
+        if last_heartbeat_at is None:
+            return heartbeat_state
+        return f"{heartbeat_state}/{_format_age((now - last_heartbeat_at).total_seconds())}"
+
+    def _build_assignment_index(self, project_id: int) -> dict[int, dict[str, Any]]:
+        assignments: dict[int, dict[str, Any]] = {}
+        for item in self._store.list_work_items(project_id):
+            if str(item.get("status") or "") not in _ACTIVE_WORK_ITEM_STATUSES:
+                continue
+            work_item_id = int(item.get("id") or 0)
+            if work_item_id <= 0:
+                continue
+            for stage_run in self._store.list_stage_runs(work_item_id):
+                runtime_id = int(stage_run.claimed_by_runtime_id or 0)
+                if runtime_id <= 0 or str(stage_run.status or "") != "claimed":
+                    continue
+                assignments[runtime_id] = {
+                    "kind": "busy",
+                    "work_item_id": work_item_id,
+                    "label": f"stage={stage_run.stage_name} work_item=#{work_item_id}",
+                }
+            for cycle in self._store.get_review_cycles(work_item_id):
+                runtime_id = int(cycle.get("claimed_by_runtime_id") or 0)
+                if runtime_id <= 0 or str(cycle.get("status") or "") != "claimed":
+                    continue
+                stage_name = str(cycle.get("stage_name") or "review")
+                assignments[runtime_id] = {
+                    "kind": "busy",
+                    "work_item_id": work_item_id,
+                    "label": f"review={stage_name} work_item=#{work_item_id}",
+                }
+        return assignments
+
+    def _session_note_for_runtime(self, runtime: Any, *, work_item_id: int) -> str:
+        agent_id = int(runtime.agent_id or 0)
+        if agent_id <= 0 or work_item_id <= 0:
+            return ""
+        try:
+            session = self._store.get_active_session(agent_id, work_item_id)
+        except Exception:
+            return ""
+        if session is None:
+            return ""
+        return _clip_for_log(getattr(session, "purpose", ""), limit=100)
+
+    def _tracked_project_slugs(self) -> list[str]:
+        project_slugs: set[str] = set()
+        lock = getattr(self, "_lock", None)
+        workers = getattr(self, "_workers", {}) or {}
+        controls = getattr(self, "_workflow_controls", {}) or {}
+        if lock is not None:
+            with lock:
+                worker_keys = list(workers.keys())
+                control_values = list(controls.values())
+        else:
+            worker_keys = list(workers.keys())
+            control_values = list(controls.values())
+        for project_slug, _role in worker_keys:
+            project_slugs.add(str(project_slug))
+        for control in control_values:
+            project_slug = getattr(control, "project_slug", None)
+            if project_slug:
+                project_slugs.add(str(project_slug))
+        return sorted(project_slugs)
+
+    def _project_snapshot_line(self, project_slug: str) -> str | None:
+        store = getattr(self, "_store", None)
+        if store is None:
+            return None
+
+        project = store.get_project_by_slug(project_slug)
+        if not project:
+            return f"project={project_slug} status=missing"
+
+        project_id = int(project.get("id") or 0)
+        active_item = self._find_active_work_item(project_slug)
+        task_state = self._task_state_from_item(active_item)
+        stage = str(task_state.get("current_stage") or "-")
+        summary = _clip_for_log(
+            task_state.get("latest_summary") or (active_item or {}).get("title") or "",
+            limit=140,
+        )
+
+        work_item_part = "workflow=idle"
+        if active_item:
+            work_item_part = f"work_item=#{active_item['id']} status={active_item['status']} stage={stage}"
+            if summary:
+                work_item_part += f' summary="{summary}"'
+
+        now = datetime.now(_local_timezone())
+        assignment_index = self._build_assignment_index(project_id) if active_item else {}
+        worker_parts: list[str] = []
+        for runtime in self._latest_runtimes_by_role(project_id):
+            role = str(runtime.agent_role or runtime.runtime_name or f"runtime-{runtime.id}")
+            heartbeat = self._heartbeat_label(runtime, now=now)
+            assignment = assignment_index.get(int(runtime.id or 0))
+            if assignment is None:
+                worker_parts.append(f"{role}:idle({heartbeat})")
+                continue
+            note = self._session_note_for_runtime(
+                runtime,
+                work_item_id=int(assignment.get("work_item_id") or 0),
+            )
+            worker_line = f"{role}:busy({heartbeat}, {assignment['label']}"
+            if note:
+                worker_line += f', note="{note}"'
+            worker_line += ")"
+            worker_parts.append(worker_line)
+
+        if not worker_parts:
+            lock = getattr(self, "_lock", None)
+            workers = getattr(self, "_workers", {}) or {}
+            if lock is not None:
+                with lock:
+                    worker_keys = list(workers.keys())
+            else:
+                worker_keys = list(workers.keys())
+            tracked_roles = sorted(
+                role
+                for slug, role in worker_keys
+                if slug == project_slug
+            )
+            worker_parts = [f"{role}:starting" for role in tracked_roles]
+
+        workers_part = "workers=[" + "; ".join(worker_parts) + "]" if worker_parts else "workers=[]"
+        return f"project={project_slug} {work_item_part} {workers_part}"
+
+    def _log_active_project_snapshots(self, *, force: bool = False, reason: str = "Project status") -> None:
+        if getattr(self, "_store", None) is None:
+            return
+        now = time.monotonic()
+        last_snapshot_at = float(getattr(self, "_last_project_snapshot_at", 0.0) or 0.0)
+        if not force and now - last_snapshot_at < _PROJECT_SNAPSHOT_INTERVAL_SECONDS:
+            return
+        project_slugs = self._tracked_project_slugs()
+        if not project_slugs:
+            self._last_project_snapshot_at = now
+            return
+        for project_slug in project_slugs:
+            line = self._project_snapshot_line(project_slug)
+            if line:
+                LOGGER.info("%s: %s", reason, line)
+        self._last_project_snapshot_at = now
+
+    @staticmethod
+    def _mcp_tool_name(payload: dict[str, Any] | None) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        if str(payload.get("method") or "") != "tools/call":
+            return ""
+        params = payload.get("params")
+        if not isinstance(params, dict):
+            return ""
+        return str(params.get("name") or "")
+
+    def _project_ref(self, *, project_slug: str | None = None, project_id: Any = None) -> str:
+        if project_slug:
+            return f"project={project_slug}"
+        try:
+            parsed_project_id = int(project_id or 0)
+        except (TypeError, ValueError):
+            parsed_project_id = 0
+        if parsed_project_id <= 0:
+            return ""
+        store = getattr(self, "_store", None)
+        if store is None:
+            return f"project_id={parsed_project_id}"
+        try:
+            project = store.get_project(parsed_project_id)
+        except Exception:
+            project = None
+        if isinstance(project, dict) and project.get("slug"):
+            return f"project={project['slug']}"
+        return f"project_id={parsed_project_id}"
+
+    def _describe_request(self, path: str, payload: dict[str, Any] | None) -> str:
+        if not isinstance(payload, dict):
+            payload = {}
+        if path == "/api/work":
+            parts = [self._project_ref(project_slug=str(payload.get("project") or ""))]
+            mode = str(payload.get("mode") or WorkMode.full.value)
+            if mode:
+                parts.append(f"mode={mode}")
+            requirement = _clip_for_log(payload.get("requirement") or "", limit=100)
+            if requirement:
+                parts.append(f'requirement="{requirement}"')
+            return " ".join(part for part in parts if part)
+        if path == "/api/work-item":
+            return " ".join(
+                part for part in [
+                    self._project_ref(project_slug=str(payload.get("project") or "")),
+                    f"work_item_id={int(payload.get('work_item_id') or 0)}" if payload.get("work_item_id") else "",
+                ] if part
+            )
+        if path == "/api/work-control":
+            return " ".join(
+                part for part in [
+                    self._project_ref(project_slug=str(payload.get("project") or "")),
+                    f"work_item_id={int(payload.get('work_item_id') or 0)}" if payload.get("work_item_id") else "",
+                    f"action={payload.get('action')}" if payload.get("action") else "",
+                ] if part
+            )
+        if path == "/api/project-cleanup":
+            return self._project_ref(project_slug=str(payload.get("project") or ""))
+        if path != "/mcp":
+            return ""
+
+        method = str(payload.get("method") or "")
+        if method != "tools/call":
+            return f"method={method}" if method else ""
+
+        params = payload.get("params")
+        if not isinstance(params, dict):
+            return "method=tools/call"
+        arguments = params.get("arguments")
+        if not isinstance(arguments, dict):
+            arguments = {}
+        tool_name = str(params.get("name") or "")
+        parts = [f"tool={tool_name}"] if tool_name else ["method=tools/call"]
+        project_part = self._project_ref(
+            project_slug=str(arguments.get("project") or ""),
+            project_id=arguments.get("project_id"),
+        )
+        if project_part:
+            parts.append(project_part)
+        for key in ("work_item_id", "stage_run_id", "review_cycle_id", "runtime_registration_id", "agent_role", "stage_name", "status"):
+            value = arguments.get(key)
+            if value in (None, "", []):
+                continue
+            parts.append(f"{key}={value}")
+        summary = _clip_for_log(arguments.get("summary") or "", limit=80)
+        if summary and tool_name in {"report_status", "complete_stage_task", "fail_stage_task", "publish_review_verdict"}:
+            parts.append(f'summary="{summary}"')
+        return " ".join(parts)
+
+    def _should_log_slow_request(self, *, path: str, payload: dict[str, Any] | None, duration: float) -> bool:
+        if duration < _REQUEST_SLOW_SECONDS:
+            return False
+        if path in _NOISY_HTTP_PATHS and duration < _VERBOSE_REQUEST_SECONDS:
+            return False
+        if path == "/mcp":
+            tool_name = self._mcp_tool_name(payload)
+            if tool_name in _NOISY_MCP_TOOLS and duration < _VERBOSE_REQUEST_SECONDS:
+                return False
+        return True
 
     def _project_has_live_workflows(
         self,
@@ -416,6 +790,12 @@ class MySwatDaemon:
     def handle_init(self, *, name: str, repo_path: str | None, description: str | None) -> dict:
         run_init(name, repo_path, description)
         slug = _slugify(name)
+        LOGGER.info(
+            'Project initialized: project=%s repo=%s description="%s"',
+            slug,
+            repo_path or "-",
+            _clip_for_log(description or "", limit=100),
+        )
         return {
             "ok": True,
             "project": slug,
@@ -451,6 +831,15 @@ class MySwatDaemon:
                 workdir=workdir,
                 mode=work_mode,
             )
+        LOGGER.info(
+            'Workflow queued: project=%s work_item_id=%s mode=%s workers=%s requirement="%s"',
+            project,
+            work_item_id,
+            work_mode.value,
+            ",".join(roles) if roles else "-",
+            _clip_for_log(requirement, limit=120),
+        )
+        self._log_active_project_snapshots(force=True, reason="Project status")
         return {
             "ok": True,
             "work_item_id": work_item_id,
@@ -520,6 +909,13 @@ class MySwatDaemon:
                 control.requested_status = target_status
                 control.cancel_event.set()
 
+        LOGGER.info(
+            "Workflow control: project=%s work_item_id=%s action=%s new_status=%s",
+            project,
+            work_item_id,
+            action,
+            target_status,
+        )
         self._stop_project_workers(project)
         return {
             "ok": True,
@@ -602,6 +998,13 @@ class MySwatDaemon:
 
         deleted = self._store.delete_project(project_id)
         removed_runtime_paths = self._cleanup_project_runtime_files(project)
+        LOGGER.info(
+            "Project cleanup completed: project=%s work_items=%s deleted=%s removed_paths=%s",
+            project,
+            len(work_item_ids),
+            deleted,
+            removed_runtime_paths,
+        )
         return {
             "ok": True,
             "project": project,
@@ -662,16 +1065,25 @@ class MySwatDaemon:
             def _request_duration(self, started_at: float) -> float:
                 return max(0.0, time.monotonic() - started_at)
 
-            def _log_slow_request(self, *, path: str, status: int, started_at: float) -> None:
+            def _log_slow_request(
+                self,
+                *,
+                path: str,
+                status: int,
+                started_at: float,
+                payload: dict[str, Any] | None = None,
+            ) -> None:
                 duration = self._request_duration(started_at)
-                if duration < _REQUEST_SLOW_SECONDS:
+                if not daemon._should_log_slow_request(path=path, payload=payload, duration=duration):
                     return
+                detail = daemon._describe_request(path, payload)
                 LOGGER.warning(
-                    "Slow daemon request: %s %s status=%s duration=%.3fs",
+                    "Slow daemon request: %s %s status=%s duration=%.3fs%s",
                     self.command,
                     path,
                     status,
                     duration,
+                    f" {detail}" if detail else "",
                 )
 
             def _log_request_failure(
@@ -681,32 +1093,45 @@ class MySwatDaemon:
                 status: int,
                 started_at: float,
                 exc: Exception,
+                payload: dict[str, Any] | None = None,
             ) -> None:
                 duration = self._request_duration(started_at)
+                detail = daemon._describe_request(path, payload)
                 if isinstance(exc, (ValueError, ValidationError)):
                     LOGGER.warning(
-                        "Daemon request failed: %s %s status=%s duration=%.3fs error=%s",
+                        "Daemon request failed: %s %s status=%s duration=%.3fs%s error=%s",
                         self.command,
                         path,
                         status,
                         duration,
+                        f" {detail}" if detail else "",
                         exc,
                     )
                     return
                 LOGGER.exception(
-                    "Daemon request failed: %s %s status=%s duration=%.3fs",
+                    "Daemon request failed: %s %s status=%s duration=%.3fs%s",
                     self.command,
                     path,
                     status,
                     duration,
+                    f" {detail}" if detail else "",
                 )
 
-            def _log_client_disconnect(self, *, path: str, started_at: float, exc: Exception) -> None:
+            def _log_client_disconnect(
+                self,
+                *,
+                path: str,
+                started_at: float,
+                exc: Exception,
+                payload: dict[str, Any] | None = None,
+            ) -> None:
+                detail = daemon._describe_request(path, payload)
                 LOGGER.warning(
-                    "Daemon client disconnected: %s %s duration=%.3fs error=%s",
+                    "Daemon client disconnected: %s %s duration=%.3fs%s error=%s",
                     self.command,
                     path,
                     self._request_duration(started_at),
+                    f" {detail}" if detail else "",
                     exc,
                 )
 
@@ -742,6 +1167,7 @@ class MySwatDaemon:
             def do_POST(self) -> None:
                 started_at = time.monotonic()
                 parsed = urlparse(self.path)
+                payload: dict[str, Any] = {}
                 try:
                     payload = self._read_json()
                     if parsed.path == "/api/init":
@@ -751,7 +1177,7 @@ class MySwatDaemon:
                             description=payload.get("description"),
                         )
                         self._write_json(200, result)
-                        self._log_slow_request(path=parsed.path, status=200, started_at=started_at)
+                        self._log_slow_request(path=parsed.path, status=200, started_at=started_at, payload=payload)
                         return
                     if parsed.path == "/api/work":
                         result = daemon.handle_work(
@@ -761,7 +1187,7 @@ class MySwatDaemon:
                             mode=str(payload.get("mode") or WorkMode.full.value),
                         )
                         self._write_json(200, result)
-                        self._log_slow_request(path=parsed.path, status=200, started_at=started_at)
+                        self._log_slow_request(path=parsed.path, status=200, started_at=started_at, payload=payload)
                         return
                     if parsed.path == "/api/work-item":
                         result = daemon.handle_get_work_item(
@@ -769,7 +1195,7 @@ class MySwatDaemon:
                             work_item_id=int(payload.get("work_item_id") or 0),
                         )
                         self._write_json(200, result)
-                        self._log_slow_request(path=parsed.path, status=200, started_at=started_at)
+                        self._log_slow_request(path=parsed.path, status=200, started_at=started_at, payload=payload)
                         return
                     if parsed.path == "/api/work-control":
                         result = daemon.handle_control_work(
@@ -778,33 +1204,45 @@ class MySwatDaemon:
                             action=str(payload.get("action") or "cancel"),
                         )
                         self._write_json(200, result)
-                        self._log_slow_request(path=parsed.path, status=200, started_at=started_at)
+                        self._log_slow_request(path=parsed.path, status=200, started_at=started_at, payload=payload)
                         return
                     if parsed.path == "/api/project-cleanup":
                         result = daemon.handle_cleanup_project(
                             project=str(payload.get("project") or ""),
                         )
                         self._write_json(200, result)
-                        self._log_slow_request(path=parsed.path, status=200, started_at=started_at)
+                        self._log_slow_request(path=parsed.path, status=200, started_at=started_at, payload=payload)
                         return
                     if parsed.path == "/mcp":
                         response = daemon.handle_mcp_request(payload)
                         if response is None:
                             self._write_json(202, {})
-                            self._log_slow_request(path=parsed.path, status=202, started_at=started_at)
+                            self._log_slow_request(path=parsed.path, status=202, started_at=started_at, payload=payload)
                             return
                         self._write_json(200, response)
-                        self._log_slow_request(path=parsed.path, status=200, started_at=started_at)
+                        self._log_slow_request(path=parsed.path, status=200, started_at=started_at, payload=payload)
                         return
                     self._write_json(404, {"error": "not found"})
-                    self._log_slow_request(path=parsed.path, status=404, started_at=started_at)
+                    self._log_slow_request(path=parsed.path, status=404, started_at=started_at, payload=payload)
                 except (ValueError, ValidationError) as exc:
-                    self._log_request_failure(path=parsed.path, status=400, started_at=started_at, exc=exc)
+                    self._log_request_failure(
+                        path=parsed.path,
+                        status=400,
+                        started_at=started_at,
+                        exc=exc,
+                        payload=payload,
+                    )
                     self._write_json(400, {"error": str(exc)})
                 except _CLIENT_DISCONNECT_ERRORS as exc:
-                    self._log_client_disconnect(path=parsed.path, started_at=started_at, exc=exc)
+                    self._log_client_disconnect(path=parsed.path, started_at=started_at, exc=exc, payload=payload)
                 except Exception as exc:
-                    self._log_request_failure(path=parsed.path, status=500, started_at=started_at, exc=exc)
+                    self._log_request_failure(
+                        path=parsed.path,
+                        status=500,
+                        started_at=started_at,
+                        exc=exc,
+                        payload=payload,
+                    )
                     try:
                         self._write_json(500, {"error": "internal server error"})
                     except _CLIENT_DISCONNECT_ERRORS as disconnect_exc:
@@ -812,6 +1250,7 @@ class MySwatDaemon:
                             path=parsed.path,
                             started_at=started_at,
                             exc=disconnect_exc,
+                            payload=payload,
                         )
 
         httpd = ThreadingHTTPServer(
