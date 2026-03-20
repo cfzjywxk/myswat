@@ -5,7 +5,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from myswat.server.contracts import ReviewVerdictEnvelope, StageRunCompletion
 from myswat.workflow.kernel import WorkflowKernel, _extract_json_block
@@ -858,3 +858,709 @@ def test_extract_json_block_resolves_externalized_json_fields():
     }
     Path(summary_path).unlink(missing_ok=True)
     Path(bug_path).unlink(missing_ok=True)
+
+
+def test_extract_json_block_handles_plain_code_fence_and_externalized_json_text():
+    assert _extract_json_block("Review:\n```\n{\"ok\": true}\n```") == {"ok": True}
+    assert _extract_json_block("```json\n{\"ok\": true}\n```") == {"ok": True}
+    assert _extract_json_block("{broken}") is None
+
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".md") as handle:
+        handle.write('{"status":"pass"}\n')
+        path = handle.name
+    try:
+        assert _extract_json_block(f"The detailed response is in `{path}`.") == {"status": "pass"}
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+def test_kernel_requires_coordinator_emits_events_and_uses_stage_index_fallbacks():
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+
+    try:
+        WorkflowKernel(
+            store=_store(),
+            dev=dev,
+            qas=[qa],
+            project_id=1,
+            work_item_id=1,
+            mode=WorkMode.full,
+        )
+    except ValueError as exc:
+        assert "coordinator is required" in str(exc)
+    else:
+        raise AssertionError("Expected missing coordinator to raise ValueError")
+
+    events = []
+    kernel = WorkflowKernel(
+        store=_store(),
+        service=_service(),
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=1,
+        mode=WorkMode.full,
+        on_event=events.append,
+    )
+    kernel._emit("warning", "hello", stage="phase_x", agent_role="developer", detail="detail", count=2)
+
+    assert events[0].event_type == "warning"
+    assert events[0].message == "hello"
+    assert kernel._stage_index("phase_bad") == 700
+    assert kernel._stage_index("other") == 1000
+
+
+def test_wait_for_stage_result_failure_marks_kernel_blocked():
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+    service.wait_for_stage_run_completion.return_value = StageRunCompletion(
+        stage_run_id=100,
+        work_item_id=7,
+        stage_name="plan",
+        status="failed",
+        summary="plan failed",
+        artifact_id=None,
+        artifact_content="",
+    )
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=7,
+        mode=WorkMode.full,
+        auto_approve=True,
+    )
+
+    result = kernel._wait_for_stage_result(stage_run_id=100, stage_name="plan", owner=dev)
+
+    assert result.status == "failed"
+    assert kernel._blocked is True
+    assert kernel._failure_summary == "plan failed"
+
+
+def test_checkpoint_handles_user_rejection_manual_changes_and_revision_outcomes():
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+
+    reject_kernel = WorkflowKernel(
+        store=_store(),
+        service=_service(),
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=8,
+        mode=WorkMode.full,
+        auto_approve=False,
+        ask_user=lambda _prompt: "n",
+    )
+    artifact, ok = reject_kernel._checkpoint(
+        "draft",
+        prompt="continue?",
+        stage="design",
+        owner=dev,
+        focus="ctx",
+        artifact_type="design_doc",
+        artifact_title="Technical design",
+    )
+    assert artifact == "draft"
+    assert ok is False
+    assert reject_kernel._failure_summary == "User rejected design checkpoint."
+
+    no_builder_kernel = WorkflowKernel(
+        store=_store(),
+        service=_service(),
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=8,
+        mode=WorkMode.full,
+        auto_approve=False,
+        ask_user=lambda _prompt: "please revise",
+    )
+    artifact, ok = no_builder_kernel._checkpoint(
+        "draft",
+        prompt="continue?",
+        stage="plan",
+        owner=dev,
+        focus="ctx",
+        artifact_type="implementation_plan",
+        artifact_title="Implementation plan",
+    )
+    assert artifact == "draft"
+    assert ok is False
+    assert "User requested changes during plan" in no_builder_kernel._failure_summary
+
+    fail_store = _store()
+    fail_store.get_latest_stage_run.return_value = SimpleNamespace(iteration=2)
+    fail_service = _service()
+    fail_service.wait_for_stage_run_completion.return_value = StageRunCompletion(
+        stage_run_id=100,
+        work_item_id=8,
+        stage_name="plan",
+        status="failed",
+        summary="revision failed",
+        artifact_id=None,
+        artifact_content="",
+    )
+    fail_kernel = WorkflowKernel(
+        store=fail_store,
+        service=fail_service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=8,
+        mode=WorkMode.full,
+        auto_approve=False,
+        ask_user=lambda _prompt: "please revise",
+    )
+    artifact, ok = fail_kernel._checkpoint(
+        "draft",
+        prompt="continue?",
+        stage="plan",
+        owner=dev,
+        focus="ctx",
+        artifact_type="implementation_plan",
+        artifact_title="Implementation plan",
+        revision_prompt_builder=lambda artifact, feedback: f"{artifact}\n{feedback}",
+    )
+    assert artifact == "draft"
+    assert ok is False
+    revision_request = fail_service.start_stage_run.call_args.args[0]
+    assert revision_request.iteration == 3
+
+    success_store = _store()
+    success_store.get_latest_stage_run.return_value = SimpleNamespace(iteration=1)
+    success_service = _service()
+    success_service.wait_for_stage_run_completion.return_value = StageRunCompletion(
+        stage_run_id=100,
+        work_item_id=8,
+        stage_name="design",
+        status="completed",
+        summary="revision done",
+        artifact_id=1000,
+        artifact_content="revised artifact",
+    )
+    success_kernel = WorkflowKernel(
+        store=success_store,
+        service=success_service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=8,
+        mode=WorkMode.full,
+        auto_approve=False,
+        ask_user=lambda _prompt: "please revise",
+    )
+    artifact, ok = success_kernel._checkpoint(
+        "draft",
+        prompt="continue?",
+        stage="design",
+        owner=dev,
+        focus="ctx",
+        artifact_type="design_doc",
+        artifact_title="Technical design",
+        revision_prompt_builder=lambda artifact, feedback: f"{artifact}\n{feedback}",
+    )
+    assert artifact == "revised artifact"
+    assert ok is True
+
+    approve_kernel = WorkflowKernel(
+        store=_store(),
+        service=_service(),
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=8,
+        mode=WorkMode.full,
+        auto_approve=False,
+        ask_user=lambda _prompt: "y",
+    )
+    artifact, ok = approve_kernel._checkpoint(
+        "draft",
+        prompt="continue?",
+        stage="design",
+        owner=dev,
+        focus="ctx",
+        artifact_type="design_doc",
+        artifact_title="Technical design",
+    )
+    assert artifact == "draft"
+    assert ok is True
+
+
+def test_review_loop_handles_cancel_missing_artifact_revision_failure_and_zero_limit():
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+
+    cancel_kernel = WorkflowKernel(
+        store=_store(),
+        service=_service(),
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=9,
+        mode=WorkMode.full,
+        auto_approve=True,
+        should_cancel=lambda: True,
+    )
+    artifact, iterations, passed = cancel_kernel._run_review_loop(
+        owner_stage_name="design",
+        review_stage_name="design_review",
+        artifact_type="design_doc",
+        artifact_title="Technical design",
+        initial_artifact="draft",
+        initial_artifact_id=1000,
+        owner=dev,
+        reviewers=[qa],
+        focus="ctx",
+        review_prompt_builder=lambda artifact, iteration, reviewer_role: artifact,
+        revision_prompt_builder=lambda artifact, feedback: artifact + feedback,
+    )
+    assert (artifact, iterations, passed) == ("draft", 1, False)
+    assert cancel_kernel._failure_summary == "Workflow cancelled."
+
+    missing_store = _store()
+    missing_store.get_latest_artifact_by_type.return_value = None
+    missing_kernel = WorkflowKernel(
+        store=missing_store,
+        service=_service(),
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=9,
+        mode=WorkMode.full,
+        auto_approve=True,
+    )
+    artifact, iterations, passed = missing_kernel._run_review_loop(
+        owner_stage_name="plan",
+        review_stage_name="plan_review",
+        artifact_type="implementation_plan",
+        artifact_title="Implementation plan",
+        initial_artifact="draft",
+        initial_artifact_id=None,
+        owner=dev,
+        reviewers=[qa],
+        focus="ctx",
+        review_prompt_builder=lambda artifact, iteration, reviewer_role: artifact,
+        revision_prompt_builder=lambda artifact, feedback: artifact + feedback,
+    )
+    assert (artifact, iterations, passed) == ("draft", 1, False)
+    assert missing_kernel._failure_summary == "Missing artifact for plan_review."
+
+    revision_service = _service()
+    revision_service.wait_for_review_verdicts.return_value = [
+        ReviewVerdictEnvelope(
+            cycle_id=2000,
+            reviewer_role="qa_main",
+            verdict="changes_requested",
+            summary="Need more tests.",
+            issues=["Add tests."],
+        ),
+    ]
+    revision_service.wait_for_stage_run_completion.return_value = StageRunCompletion(
+        stage_run_id=100,
+        work_item_id=9,
+        stage_name="plan",
+        status="failed",
+        summary="revision failed",
+        artifact_id=None,
+        artifact_content="",
+    )
+    revision_kernel = WorkflowKernel(
+        store=_store(),
+        service=revision_service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=9,
+        mode=WorkMode.full,
+        auto_approve=True,
+    )
+    artifact, iterations, passed = revision_kernel._run_review_loop(
+        owner_stage_name="plan",
+        review_stage_name="plan_review",
+        artifact_type="implementation_plan",
+        artifact_title="Implementation plan",
+        initial_artifact="draft",
+        initial_artifact_id=1000,
+        owner=dev,
+        reviewers=[qa],
+        focus="ctx",
+        review_prompt_builder=lambda artifact, iteration, reviewer_role: artifact,
+        revision_prompt_builder=lambda artifact, feedback: artifact + feedback,
+    )
+    assert (artifact, iterations, passed) == ("draft", 1, False)
+
+    exhausted_kernel = WorkflowKernel(
+        store=_store(),
+        service=_service(),
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=9,
+        mode=WorkMode.full,
+        auto_approve=True,
+        max_review_iterations=0,
+    )
+    artifact, iterations, passed = exhausted_kernel._run_review_loop(
+        owner_stage_name="plan",
+        review_stage_name="plan_review",
+        artifact_type="implementation_plan",
+        artifact_title="Implementation plan",
+        initial_artifact="draft",
+        initial_artifact_id=1000,
+        owner=dev,
+        reviewers=[qa],
+        focus="ctx",
+        review_prompt_builder=lambda artifact, iteration, reviewer_role: artifact,
+        revision_prompt_builder=lambda artifact, feedback: artifact + feedback,
+    )
+    assert (artifact, iterations, passed) == ("draft", 0, False)
+    assert exhausted_kernel._failure_summary == "Implementation plan review loop exhausted."
+
+
+def test_kernel_parses_completed_phase_rows_and_phase_names():
+    store = _store()
+    store.list_artifacts.return_value = [
+        {
+            "artifact_type": "phase_result",
+            "iteration": 2,
+            "title": "ignored",
+            "content": "beta summary",
+            "metadata_json": '{"phase_index":2,"phase_name":"Beta","review_iterations":3,"review_passed":false,"committed":false}',
+        },
+        {
+            "artifact_type": "phase_result",
+            "iteration": 1,
+            "title": "Fallback",
+            "content": "alpha summary",
+            "metadata_json": "{",
+        },
+    ]
+    kernel = WorkflowKernel(
+        store=store,
+        service=_service(),
+        dev=_participant(10, "developer"),
+        qas=[_participant(20, "qa_main")],
+        project_id=1,
+        work_item_id=10,
+        mode=WorkMode.develop,
+        auto_approve=True,
+    )
+
+    results = kernel._load_completed_phase_results()
+
+    assert [result.name for result in results] == ["Fallback", "Beta"]
+    assert results[1].review_iterations == 3
+    assert results[1].review_passed is False
+    assert results[1].committed is False
+    assert kernel._parse_phases("\nPhase Alpha\nStep 2) Ship\n") == ["Alpha", "Ship"]
+
+    store.list_artifacts.return_value = [
+        {
+            "artifact_type": "phase_result",
+            "iteration": 1,
+            "title": "DictMeta",
+            "content": "summary",
+            "metadata_json": {
+                "phase_index": 1,
+                "phase_name": "Dict Name",
+                "review_iterations": 4,
+                "review_passed": True,
+                "committed": True,
+            },
+        },
+        {
+            "artifact_type": "phase_result",
+            "iteration": 2,
+            "title": "OtherMeta",
+            "content": "summary",
+            "metadata_json": 7,
+        },
+    ]
+    results = kernel._load_completed_phase_results()
+    assert [result.name for result in results] == ["Dict Name", "OtherMeta"]
+
+
+def test_kernel_generates_report_fallback_and_run_failure_states():
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+
+    report_service = _service()
+    report_service.wait_for_stage_run_completion.return_value = StageRunCompletion(
+        stage_run_id=100,
+        work_item_id=11,
+        stage_name="report",
+        status="failed",
+        summary="report failed",
+        artifact_id=None,
+        artifact_content="",
+    )
+    report_kernel = WorkflowKernel(
+        store=_store(),
+        service=report_service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=11,
+        mode=WorkMode.develop,
+        auto_approve=True,
+    )
+    assert report_kernel._generate_final_report(["Phase 1: done"]) == "Phase 1: done"
+
+    with patch.object(WorkflowKernel, "_run_design", return_value=("", False)):
+        design_result = WorkflowKernel(
+            store=_store(),
+            service=_service(),
+            dev=dev,
+            qas=[qa],
+            project_id=1,
+            work_item_id=11,
+            mode=WorkMode.full,
+            auto_approve=True,
+        ).run("req")
+    assert design_result.blocked is True
+    assert design_result.failure_summary == "Design stage failed."
+
+    with patch.object(WorkflowKernel, "_run_design", return_value=("design", True)):
+        with patch.object(WorkflowKernel, "_run_plan", return_value=("", False)):
+            plan_result = WorkflowKernel(
+                store=_store(),
+                service=_service(),
+                dev=dev,
+                qas=[qa],
+                project_id=1,
+                work_item_id=11,
+                mode=WorkMode.full,
+                auto_approve=True,
+            ).run("req")
+    assert plan_result.blocked is True
+    assert plan_result.failure_summary == "Planning stage failed."
+
+    with patch.object(WorkflowKernel, "_run_phase", return_value=SimpleNamespace(summary="phase failed", committed=False)):
+        phase_kernel = WorkflowKernel(
+            store=_store(),
+            service=_service(),
+            dev=dev,
+            qas=[qa],
+            project_id=1,
+            work_item_id=11,
+            mode=WorkMode.develop,
+            auto_approve=True,
+        )
+        with patch.object(phase_kernel, "_load_latest_artifact", return_value="plan"):
+            with patch.object(phase_kernel, "_parse_phases", return_value=["Implementation"]):
+                phase_result = phase_kernel.run("req")
+    assert phase_result.blocked is True
+    assert phase_result.failure_summary == "Phase 1 failed."
+
+    ga_kernel = WorkflowKernel(
+        store=_store(),
+        service=_service(),
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=11,
+        mode=WorkMode.test,
+        auto_approve=True,
+    )
+    with patch.object(ga_kernel, "_run_test", side_effect=lambda requirement, design, completed: setattr(ga_kernel, "_blocked", True) or setattr(ga_kernel, "_failure_summary", "ga failed") or SimpleNamespace(passed=False)):
+        ga_result = ga_kernel.run("req")
+    assert ga_result.blocked is True
+    assert ga_result.failure_summary == "ga failed"
+
+    cancelled_kernel = WorkflowKernel(
+        store=_store(),
+        service=_service(),
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=11,
+        mode=WorkMode.full,
+        auto_approve=True,
+        should_cancel=lambda: True,
+    )
+    cancelled_result = cancelled_kernel.run("req")
+    assert cancelled_result.blocked is True
+    assert cancelled_result.final_report == "Workflow cancelled before start."
+
+
+def test_run_design_plan_phase_and_test_branch_failures():
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+
+    design_kernel = WorkflowKernel(
+        store=_store(),
+        service=_service(),
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=12,
+        mode=WorkMode.full,
+        auto_approve=True,
+    )
+    with patch.object(design_kernel, "_wait_for_stage_result", return_value=SimpleNamespace(status="failed")):
+        assert design_kernel._run_design("req") == ("", False)
+    with patch.object(design_kernel, "_wait_for_stage_result", return_value=SimpleNamespace(status="completed", artifact_content="draft", artifact_id=1000)):
+        with patch.object(design_kernel, "_run_review_loop", return_value=("draft", 1, False)):
+            design_kernel._last_review_limit_reached = False
+            assert design_kernel._run_design("req") == ("draft", False)
+
+    plan_kernel = WorkflowKernel(
+        store=_store(),
+        service=_service(),
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=12,
+        mode=WorkMode.full,
+        auto_approve=True,
+    )
+    with patch.object(plan_kernel, "_wait_for_stage_result", return_value=SimpleNamespace(status="failed")):
+        assert plan_kernel._run_plan("req", "design") == ("", False)
+    with patch.object(plan_kernel, "_wait_for_stage_result", return_value=SimpleNamespace(status="completed", artifact_content="plan", artifact_id=1000)):
+        with patch.object(plan_kernel, "_run_review_loop", return_value=("plan", 1, False)):
+            plan_kernel._last_review_limit_reached = False
+            assert plan_kernel._run_plan("req", "design") == ("plan", False)
+
+    phase_kernel = WorkflowKernel(
+        store=_store(),
+        service=_service(),
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=12,
+        mode=WorkMode.develop,
+        auto_approve=True,
+    )
+    with patch.object(phase_kernel, "_wait_for_stage_result", return_value=SimpleNamespace(status="failed")):
+        phase_result = phase_kernel._run_phase(
+            requirement="req",
+            design="design",
+            plan="plan",
+            phase_name="Implementation",
+            phase_index=1,
+            total_phases=1,
+            completed_summaries=[],
+        )
+    assert phase_result.summary == "Phase 1 failed."
+    with patch.object(phase_kernel, "_wait_for_stage_result", return_value=SimpleNamespace(status="completed", artifact_content="summary", artifact_id=1000)):
+        with patch.object(phase_kernel, "_run_review_loop", return_value=("summary", 1, False)):
+            phase_kernel._last_review_limit_reached = False
+            phase_result = phase_kernel._run_phase(
+                requirement="req",
+                design="design",
+                plan="plan",
+                phase_name="Implementation",
+                phase_index=1,
+                total_phases=1,
+                completed_summaries=[],
+            )
+    assert phase_result.committed is False
+    assert phase_result.review_passed is False
+
+    test_kernel = WorkflowKernel(
+        store=_store(),
+        service=_service(),
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=12,
+        mode=WorkMode.test,
+        auto_approve=True,
+    )
+    with patch.object(test_kernel, "_wait_for_stage_result", return_value=SimpleNamespace(status="failed")):
+        ga_result = test_kernel._run_test("req", "design", [])
+    assert ga_result.test_plan == ""
+    assert ga_result.test_report == ""
+    assert ga_result.passed is False
+
+    review_fail_kernel = WorkflowKernel(
+        store=_store(),
+        service=_service(),
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=12,
+        mode=WorkMode.test,
+        auto_approve=True,
+    )
+    with patch.object(review_fail_kernel, "_wait_for_stage_result", return_value=SimpleNamespace(status="completed", artifact_content="plan", artifact_id=1000)):
+        with patch.object(review_fail_kernel, "_run_review_loop", return_value=("plan", 1, False)):
+            review_fail_kernel._last_review_limit_reached = False
+            ga_result = review_fail_kernel._run_test("req", "design", [])
+    assert ga_result.test_plan == "plan"
+    assert ga_result.passed is False
+
+    checkpoint_kernel = WorkflowKernel(
+        store=_store(),
+        service=_service(),
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=12,
+        mode=WorkMode.test,
+        auto_approve=True,
+    )
+    with patch.object(checkpoint_kernel, "_wait_for_stage_result", return_value=SimpleNamespace(status="completed", artifact_content="plan", artifact_id=1000)):
+        with patch.object(checkpoint_kernel, "_run_review_loop", return_value=("plan", 1, True)):
+            with patch.object(checkpoint_kernel, "_checkpoint", return_value=("plan", False)):
+                ga_result = checkpoint_kernel._run_test("req", "design", [])
+    assert ga_result.test_plan == "plan"
+    assert ga_result.passed is False
+
+    execute_fail_kernel = WorkflowKernel(
+        store=_store(),
+        service=_service(),
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=12,
+        mode=WorkMode.test,
+        auto_approve=True,
+    )
+    execute_fail_kernel._last_review_limit_reached = False
+    with patch.object(
+        execute_fail_kernel,
+        "_wait_for_stage_result",
+        side_effect=[
+            SimpleNamespace(status="completed", artifact_content="plan", artifact_id=1000),
+            SimpleNamespace(status="failed", artifact_content="", artifact_id=None),
+        ],
+    ):
+        with patch.object(execute_fail_kernel, "_run_review_loop", return_value=("plan", 1, True)):
+            with patch.object(execute_fail_kernel, "_checkpoint", return_value=("plan", True)):
+                ga_result = execute_fail_kernel._run_test("req", "design", [])
+    assert ga_result.test_plan == "plan"
+    assert ga_result.passed is False
+
+    payload_fail_kernel = WorkflowKernel(
+        store=_store(),
+        service=_service(),
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=12,
+        mode=WorkMode.test,
+        auto_approve=True,
+    )
+    payload_fail_kernel._last_review_limit_reached = False
+    with patch.object(
+        payload_fail_kernel,
+        "_wait_for_stage_result",
+        side_effect=[
+            SimpleNamespace(status="completed", artifact_content="plan", artifact_id=1000),
+            SimpleNamespace(status="completed", artifact_content="not-json", artifact_id=1001, summary="ga failed"),
+        ],
+    ):
+        with patch.object(payload_fail_kernel, "_run_review_loop", return_value=("plan", 1, True)):
+            with patch.object(payload_fail_kernel, "_checkpoint", return_value=("plan", True)):
+                ga_result = payload_fail_kernel._run_test("req", "design", [])
+    assert ga_result.passed is False
+    assert payload_fail_kernel._blocked is True
+    assert payload_fail_kernel._failure_summary == "ga failed"

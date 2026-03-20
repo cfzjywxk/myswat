@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from myswat.agents.base import AgentResponse
 from myswat.workflow.engine import (
     GATestResult,
     PhaseResult,
@@ -518,6 +519,143 @@ def test_run_review_loop_cancel_and_low_info_verdict_paths():
         artifact, iters, passed = engine._run_review_loop("artifact", "design")
     assert passed is False
 
+
+def test_validate_reviewable_design_and_invalid_design_noop_branch():
+    engine, _, dev, _ = _make_engine()
+
+    assert engine._validate_reviewable_design("code", "") is None
+    assert engine._validate_reviewable_design("design", "") == "The design draft is empty."
+
+    with patch.object(engine, "_record_blocked_failure") as blocked:
+        engine._record_invalid_design_failure(
+            artifact_type="arch_design",
+            content=_arch_design_doc(),
+            owner=dev,
+            stage="design_draft_blocked",
+            title="noop",
+        )
+
+    blocked.assert_not_called()
+
+
+def test_make_status_callback_emits_agent_empty_output_and_send_agent_handles_signature_failure():
+    engine, store, dev, _ = _make_engine()
+    events = []
+    engine._on_event = events.append
+
+    callback = engine._make_status_callback("design", dev)
+    callback("agent_empty_output", {"attempt": 1, "max_attempts": 2})
+
+    assert any(
+        call.kwargs.get("event_type") == "agent_empty_output"
+        for call in store.append_work_item_process_event.call_args_list
+    )
+    assert any(
+        event.event_type == "agent_working" and "empty output" in event.message
+        for event in events
+    )
+
+    sm = make_fake_session_manager(agent_id=11, agent_role="developer", responses=["ok"], session_id=101)
+    with patch("inspect.signature", side_effect=TypeError("no signature")):
+        response = engine._send_agent(sm, "prompt", task_description="task", stage="design")
+
+    assert response.content == "ok"
+    assert "status_callback" in sm.send.call_args.kwargs
+
+
+@patch.object(WorkflowEngine, "_generate_report", return_value="# report")
+def test_architect_design_mode_review_failure_with_valid_design_records_failed_state(_mock_report):
+    arch = make_fake_session_manager(
+        agent_id=30,
+        agent_role="architect",
+        responses=[_arch_design_doc()],
+        session_id=300,
+    )
+    engine, store, _, _ = _make_engine(mode=WorkMode.architect_design, arch_sm=arch)
+    result = WorkflowResult(requirement="req")
+
+    with patch.object(engine, "_cancelled", return_value=False):
+        with patch.object(engine, "_run_review_loop", return_value=(_arch_design_doc(), 2, False)):
+            result = engine._run_architect_design_mode("req", result)
+
+    assert result.final_report == "# report"
+    assert any(
+        call.kwargs.get("current_stage") == "design_review_failed"
+        for call in store.update_work_item_state.call_args_list
+    )
+
+
+@patch.object(WorkflowEngine, "_generate_report", return_value="# report")
+def test_design_mode_resume_sets_pass_flags_for_checkpoint_and_later_entries(_mock_report):
+    engine, _, _, _ = _make_engine(mode=WorkMode.design, resume_stage="design_user_checkpoint")
+
+    with patch.object(engine, "_load_latest_artifact", side_effect=[{"content": "saved design"}]):
+        with patch.object(engine, "_user_checkpoint", return_value="saved design"):
+            with patch.object(engine, "_run_planning", return_value="plan"):
+                with patch.object(engine, "_run_review_loop", return_value=("plan", 1, True)):
+                    with patch.object(engine, "_cancelled", return_value=False):
+                        result = engine._run_design_mode("req", WorkflowResult(requirement="req"))
+
+    assert result.design_review_passed is True
+
+    later_engine, _, _, _ = _make_engine(mode=WorkMode.design, resume_stage="phase_1_review")
+    with patch.object(later_engine, "_load_latest_artifact", side_effect=[{"content": "saved design"}, {"content": "saved plan"}]):
+        result = later_engine._run_design_mode("req", WorkflowResult(requirement="req"))
+
+    assert result.plan_review_passed is True
+
+
+def test_review_loop_cancel_after_revision_and_invalid_revision_abort():
+    store = MagicMock()
+    store.create_artifact.return_value = 42
+    store.create_review_cycle.return_value = 99
+    store.create_work_item_process_event.return_value = 1
+    engine, _, dev, qas = _make_engine(store=store, max_review_iterations=2)
+    changes = {"verdict": "changes_requested", "summary": "needs work", "issues": ["fix it"]}
+    qas[0].send.return_value = AgentResponse(content=json.dumps(changes), exit_code=0)
+    dev.send.return_value = AgentResponse(content="revised", exit_code=0)
+
+    with patch.object(engine, "_cancelled", side_effect=[False, True]):
+        artifact, iters, passed = engine._run_review_loop(
+            artifact="artifact",
+            artifact_type="design",
+            context="ctx",
+        )
+
+    assert artifact == "artifact"
+    assert iters == 2
+    assert passed is False
+
+    store = MagicMock()
+    store.create_artifact.return_value = 42
+    store.create_review_cycle.return_value = 99
+    store.create_work_item_process_event.return_value = 1
+    arch = make_fake_session_manager(agent_id=30, agent_role="architect", session_id=300)
+    engine, _, _, qas = _make_engine(
+        store=store,
+        mode=WorkMode.architect_design,
+        arch_sm=arch,
+        max_review_iterations=2,
+    )
+    qas[0].send.return_value = AgentResponse(content=json.dumps(changes), exit_code=0)
+    arch.send.return_value = AgentResponse(content="too short", exit_code=0)
+
+    artifact, iters, passed = engine._run_review_loop(
+        artifact=_arch_design_doc(),
+        artifact_type="arch_design",
+        context="ctx",
+        proposer=arch,
+        reviewers=qas,
+        abort_on_agent_failure=True,
+    )
+
+    assert artifact == _arch_design_doc()
+    assert iters == 1
+    assert passed is False
+    assert engine._blocked is True
+    assert "non-reviewable arch_design revision" in engine._failure_summary
+
+    qa = qas[0]
     qa.send.return_value = SimpleNamespace(
         success=False,
         content="boom",
@@ -541,6 +679,37 @@ def test_run_review_loop_cancel_and_low_info_verdict_paths():
     )
     artifact, iters, passed = engine._run_review_loop("artifact", "design", reviewers=[qa])
     assert passed is True
+
+    store = MagicMock()
+    store.create_artifact.return_value = 42
+    store.create_review_cycle.return_value = 99
+    store.create_work_item_process_event.return_value = 1
+    arch = make_fake_session_manager(agent_id=30, agent_role="architect", session_id=300)
+    engine, _, _, qas = _make_engine(
+        store=store,
+        mode=WorkMode.architect_design,
+        arch_sm=arch,
+        max_review_iterations=2,
+    )
+    qas[0].send.return_value = AgentResponse(
+        content=json.dumps({"verdict": "changes_requested", "summary": "needs work", "issues": ["fix it"]}),
+        exit_code=0,
+    )
+    arch.send.return_value = AgentResponse(content="too short", exit_code=0)
+
+    artifact, iters, passed = engine._run_review_loop(
+        artifact=_arch_design_doc(),
+        artifact_type="arch_design",
+        context="ctx",
+        proposer=arch,
+        reviewers=qas,
+        abort_on_agent_failure=False,
+    )
+
+    assert artifact == _arch_design_doc()
+    assert iters == 2
+    assert passed is False
+    assert engine._blocked is False
 
     qa.send.return_value = SimpleNamespace(
         success=True,
