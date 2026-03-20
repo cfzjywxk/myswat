@@ -115,13 +115,34 @@ def _follow_work_item_until_terminal(
     console=None,
 ) -> dict:
     from rich.console import Console
+    from myswat.server.control_client import DaemonClientError
 
     console = console or Console()
     seen_events = 0
     last_stage = ""
     last_status = ""
+    last_poll_error = ""
     while True:
-        payload = client.get_work_item(project=project, work_item_id=work_item_id)
+        try:
+            payload = client.get_work_item(project=project, work_item_id=work_item_id)
+        except DaemonClientError as exc:
+            if not getattr(exc, "retryable", False):
+                raise
+            message = " ".join(str(exc).split())
+            if message != last_poll_error:
+                console.print(f"[yellow]Waiting for daemon response: {message}[/yellow]")
+                last_poll_error = message
+            time.sleep(max(0.1, poll_interval_seconds))
+            continue
+        except TimeoutError as exc:
+            message = " ".join(str(exc).split()) or "timed out"
+            if message != last_poll_error:
+                console.print(f"[yellow]Waiting for daemon response: {message}[/yellow]")
+                last_poll_error = message
+            time.sleep(max(0.1, poll_interval_seconds))
+            continue
+
+        last_poll_error = ""
         item = payload.get("work_item") or {}
         metadata = item.get("metadata_json") if isinstance(item, dict) else {}
         task_state = metadata.get("task_state") if isinstance(metadata, dict) else {}

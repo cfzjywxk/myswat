@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -11,6 +12,10 @@ from myswat.config.settings import MySwatSettings
 
 class DaemonClientError(RuntimeError):
     """Raised when the local daemon cannot be reached or returns an error."""
+
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class DaemonClient:
@@ -67,8 +72,16 @@ class DaemonClient:
             body = exc.read().decode("utf-8", errors="replace")
             message = self._parse_error_body(body) or str(exc)
             raise DaemonClientError(message) from exc
+        except (TimeoutError, socket.timeout) as exc:
+            raise DaemonClientError(
+                f"MySwat daemon request timed out after {timeout}s: {method} {self._base_url + path}",
+                retryable=True,
+            ) from exc
         except URLError as exc:
-            raise DaemonClientError(f"MySwat daemon is unavailable at {self._base_url}: {exc}") from exc
+            raise DaemonClientError(
+                f"MySwat daemon is unavailable at {self._base_url}: {exc}",
+                retryable=True,
+            ) from exc
         if not body:
             return {}
         try:

@@ -49,6 +49,19 @@ def test_request_surfaces_nested_http_error_message(monkeypatch):
         client.cleanup_project(project="fib-demo")
 
 
+def test_request_wraps_timeout_as_retryable_client_error(monkeypatch):
+    monkeypatch.setattr(
+        "myswat.server.control_client.urlopen",
+        lambda request, timeout: (_ for _ in ()).throw(TimeoutError("timed out")),
+    )
+    client = DaemonClient()
+
+    with pytest.raises(DaemonClientError, match="timed out after") as exc_info:
+        client.get_work_item(project="fib-demo", work_item_id=41)
+
+    assert exc_info.value.retryable is True
+
+
 def test_cleanup_project_uses_extended_timeout(monkeypatch):
     observed: dict[str, object] = {}
 

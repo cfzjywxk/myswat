@@ -16,6 +16,7 @@ from myswat.cli.main import (
     _infer_stage_labels,
     _print_teamwork_details,
 )
+from myswat.server.control_client import DaemonClientError
 from myswat.workflow.engine import WorkMode
 
 
@@ -766,6 +767,60 @@ class TestCommandRouting:
         assert "Workflow queued" in rendered
         assert "status=in_progress stage=design" in rendered
         assert "status=completed stage=report" in rendered
+
+    @patch("myswat.cli.main.time.sleep", return_value=None)
+    def test_follow_work_item_until_terminal_retries_retryable_daemon_errors(self, _mock_sleep):
+        client = MagicMock()
+        client.get_work_item.side_effect = [
+            DaemonClientError(
+                "MySwat daemon request timed out after 30s: POST http://127.0.0.1:8765/api/work-item",
+                retryable=True,
+            ),
+            {
+                "work_item": {
+                    "id": 41,
+                    "status": "completed",
+                    "metadata_json": {
+                        "task_state": {
+                            "current_stage": "report",
+                            "latest_summary": "Workflow completed successfully.",
+                            "process_log": [],
+                        }
+                    },
+                }
+            },
+        ]
+        output = io.StringIO()
+        console = Console(file=output, force_terminal=False, width=120)
+
+        item = _follow_work_item_until_terminal(
+            client=client,
+            project="proj",
+            work_item_id=41,
+            poll_interval_seconds=0.01,
+            console=console,
+        )
+
+        assert item["status"] == "completed"
+        rendered = output.getvalue()
+        assert "Waiting for daemon response" in rendered
+        assert "status=completed stage=report" in rendered
+
+    @patch("myswat.cli.main.time.sleep", return_value=None)
+    def test_follow_work_item_until_terminal_raises_non_retryable_daemon_errors(self, _mock_sleep):
+        client = MagicMock()
+        client.get_work_item.side_effect = DaemonClientError("Work item 41 not found")
+        output = io.StringIO()
+        console = Console(file=output, force_terminal=False, width=120)
+
+        with pytest.raises(DaemonClientError, match="Work item 41 not found"):
+            _follow_work_item_until_terminal(
+                client=client,
+                project="proj",
+                work_item_id=41,
+                poll_interval_seconds=0.01,
+                console=console,
+            )
 
     @patch("myswat.cli.chat_cmd.run_chat")
     def test_chat_command(self, mock_run_chat):
