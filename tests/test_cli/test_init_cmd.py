@@ -379,6 +379,7 @@ class TestTeamWorkflowsKnowledge:
 # run_init
 # ---------------------------------------------------------------------------
 class TestRunInit:
+    @patch("myswat.cli.init_cmd._ensure_git_repo")
     @patch("myswat.cli.init_cmd._seed_team_workflows")
     @patch("myswat.cli.init_cmd._seed_default_agents")
     @patch("myswat.cli.init_cmd.MySwatSettings")
@@ -387,7 +388,7 @@ class TestRunInit:
     @patch("myswat.cli.init_cmd.MemoryStore")
     def test_health_check_failure(self, mock_store_cls, mock_mig,
                                    mock_pool_cls, mock_settings_cls,
-                                   mock_seed, mock_seed_wf):
+                                   mock_seed, mock_seed_wf, mock_git):
         pool = MagicMock()
         pool.health_check.return_value = False
         mock_pool_cls.return_value = pool
@@ -395,6 +396,7 @@ class TestRunInit:
         with pytest.raises(ClickExit):
             run_init("My Project", None, None)
 
+    @patch("myswat.cli.init_cmd._ensure_git_repo")
     @patch("myswat.cli.init_cmd._seed_team_workflows")
     @patch("myswat.cli.init_cmd._seed_default_agents")
     @patch("myswat.cli.init_cmd.MySwatSettings")
@@ -403,7 +405,7 @@ class TestRunInit:
     @patch("myswat.cli.init_cmd.MemoryStore")
     def test_new_project(self, mock_store_cls, mock_mig,
                           mock_pool_cls, mock_settings_cls, mock_seed,
-                          mock_seed_wf):
+                          mock_seed_wf, mock_git, tmp_path):
         pool = MagicMock()
         pool.health_check.return_value = True
         mock_pool_cls.return_value = pool
@@ -414,14 +416,18 @@ class TestRunInit:
         mock_store.create_project.return_value = 1
         mock_store_cls.return_value = mock_store
 
-        run_init("My Project", "/tmp/repo", "Test desc")
+        repo_path = tmp_path / "repo"
+
+        run_init("My Project", str(repo_path), "Test desc")
         mock_store.create_project.assert_called_once_with(
             slug="my-project", name="My Project",
-            description="Test desc", repo_path="/tmp/repo",
+            description="Test desc", repo_path=str(repo_path.resolve()),
         )
+        mock_git.assert_called_once_with(str(repo_path.resolve()))
         mock_seed.assert_called_once()
         mock_seed_wf.assert_called_once()
 
+    @patch("myswat.cli.init_cmd._ensure_git_repo")
     @patch("myswat.cli.init_cmd._seed_team_workflows")
     @patch("myswat.cli.init_cmd._seed_default_agents")
     @patch("myswat.cli.init_cmd.MySwatSettings")
@@ -436,6 +442,7 @@ class TestRunInit:
         mock_settings_cls,
         mock_seed,
         mock_seed_wf,
+        mock_git,
         tmp_path,
     ):
         pool = MagicMock()
@@ -459,7 +466,9 @@ class TestRunInit:
             description="Fibonacci demo",
             repo_path=str(repo_path.resolve()),
         )
+        mock_git.assert_called_once_with(str(repo_path.resolve()))
 
+    @patch("myswat.cli.init_cmd._ensure_git_repo")
     @patch("myswat.cli.init_cmd._seed_team_workflows")
     @patch("myswat.cli.init_cmd._seed_default_agents")
     @patch("myswat.cli.init_cmd.MySwatSettings")
@@ -468,7 +477,7 @@ class TestRunInit:
     @patch("myswat.cli.init_cmd.MemoryStore")
     def test_existing_project(self, mock_store_cls, mock_mig,
                                mock_pool_cls, mock_settings_cls, mock_seed,
-                               mock_seed_wf):
+                               mock_seed_wf, mock_git):
         pool = MagicMock()
         pool.health_check.return_value = True
         mock_pool_cls.return_value = pool
@@ -480,9 +489,11 @@ class TestRunInit:
 
         run_init("My Project", None, None)
         mock_store.create_project.assert_not_called()
+        mock_git.assert_called_once_with(None)
         mock_seed.assert_called_once()
         mock_seed_wf.assert_called_once()
 
+    @patch("myswat.cli.init_cmd._ensure_git_repo")
     @patch("myswat.cli.init_cmd._seed_team_workflows")
     @patch("myswat.cli.init_cmd._seed_default_agents")
     @patch("myswat.cli.init_cmd.MySwatSettings")
@@ -491,7 +502,7 @@ class TestRunInit:
     @patch("myswat.cli.init_cmd.MemoryStore")
     def test_schema_bootstrap_runs(self, mock_store_cls, mock_mig,
                                  mock_pool_cls, mock_settings_cls, mock_seed,
-                                 mock_seed_wf):
+                                 mock_seed_wf, mock_git):
         pool = MagicMock()
         pool.health_check.return_value = True
         mock_pool_cls.return_value = pool
@@ -505,6 +516,7 @@ class TestRunInit:
         run_init("Test", None, None)
         mock_mig.assert_called_once()
 
+    @patch("myswat.cli.init_cmd._ensure_git_repo")
     @patch("myswat.cli.init_cmd._seed_team_workflows")
     @patch("myswat.cli.init_cmd._seed_default_agents")
     @patch("myswat.cli.init_cmd.MySwatSettings")
@@ -513,7 +525,7 @@ class TestRunInit:
     @patch("myswat.cli.init_cmd.MemoryStore")
     def test_schema_bootstrap_still_runs_when_idempotent(self, mock_store_cls, mock_mig,
                                    mock_pool_cls, mock_settings_cls,
-                                   mock_seed, mock_seed_wf):
+                                   mock_seed, mock_seed_wf, mock_git):
         pool = MagicMock()
         pool.health_check.return_value = True
         mock_pool_cls.return_value = pool
@@ -525,3 +537,22 @@ class TestRunInit:
         mock_store_cls.return_value = mock_store
 
         run_init("Test", None, None)
+
+    @patch("myswat.cli.init_cmd.ensure_git_repository")
+    def test_ensure_git_repo_tries_git_init_for_non_repo(self, mock_ensure_git_repository, tmp_path):
+        from myswat.repo_ops import GitProbeResult
+
+        repo_path = tmp_path / "repo"
+        repo_path.mkdir()
+        mock_ensure_git_repository.return_value = GitProbeResult(
+            available=True,
+            is_git_repo=True,
+            clean=True,
+            message="Initialized a git repository at /tmp/repo.",
+        )
+
+        from myswat.cli.init_cmd import _ensure_git_repo
+
+        _ensure_git_repo(str(repo_path))
+
+        mock_ensure_git_repository.assert_called_once_with(str(repo_path))

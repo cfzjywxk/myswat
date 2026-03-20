@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 from myswat.large_payloads import resolve_externalized_text, resolve_externalized_value
+from myswat.repo_ops import commit_repo_changes, probe_git_repository, write_design_plan_doc
 from myswat.server import (
     ReviewRequest,
     ReviewWaitRequest,
@@ -132,6 +134,7 @@ class WorkflowKernel:
         assignment_timeout_seconds: float | None = None,
         coordinator: WorkflowCoordinator | None = None,
         service: WorkflowCoordinator | None = None,
+        repo_path: str | None = None,
     ) -> None:
         self._store = store
         self._coordinator = coordinator or service
@@ -206,6 +209,10 @@ class WorkflowKernel:
         self._last_review_limit_summary = ""
         self._assignment_poll_interval_seconds = assignment_poll_interval_seconds
         self._assignment_timeout_seconds = assignment_timeout_seconds
+        self._repo_path = Path(repo_path).expanduser().resolve() if repo_path else None
+        self._repo_commit_ready = False
+        self._repo_commit_checked = False
+        self._repo_commit_skip_reason = ""
 
     def _emit(
         self,
@@ -231,6 +238,168 @@ class WorkflowKernel:
 
     def _cancelled(self) -> bool:
         return bool(self._should_cancel and self._should_cancel())
+
+    def _record_repo_event(
+        self,
+        *,
+        event_type: str,
+        title: str,
+        summary: str,
+        stage: str,
+        warning: bool = False,
+    ) -> None:
+        if self._work_item_id:
+            self._append_process_event(
+                event_type=event_type,
+                title=title,
+                summary=summary,
+                from_role="myswat",
+                to_role="user",
+            )
+        self._emit(
+            "warning" if warning else "info",
+            summary,
+            stage=stage,
+        )
+
+    def _ensure_repo_commit_ready(self) -> None:
+        if self._repo_commit_checked:
+            return
+        self._repo_commit_checked = True
+        if self._repo_path is None:
+            self._repo_commit_skip_reason = "Repository path is not configured; skipping automatic local commits."
+            return
+
+        status = probe_git_repository(self._repo_path)
+        if not status.available:
+            self._repo_commit_skip_reason = status.message or "git CLI is not available; skipping automatic local commits."
+        elif not status.is_git_repo:
+            self._repo_commit_skip_reason = status.message or "Repository is not under git; skipping automatic local commits."
+        elif not status.clean:
+            self._repo_commit_skip_reason = (
+                "Repository has uncommitted changes at workflow start; "
+                "skipping automatic local commits to avoid capturing unrelated edits."
+            )
+        else:
+            self._repo_commit_ready = True
+            return
+
+        if self._repo_commit_skip_reason:
+            self._record_repo_event(
+                event_type="repo_commit_skipped",
+                title="Automatic local commits disabled",
+                summary=self._repo_commit_skip_reason,
+                stage="repo",
+                warning=True,
+            )
+
+    def _export_design_plan_to_docs(
+        self,
+        *,
+        requirement: str,
+        design: str,
+        plan: str,
+    ) -> bool:
+        if self._repo_path is None or not design.strip() or not plan.strip():
+            return True
+
+        try:
+            doc_path = write_design_plan_doc(
+                self._repo_path,
+                requirement=requirement,
+                design=design,
+                plan=plan,
+            )
+        except Exception as exc:
+            self._blocked = True
+            self._failure_summary = f"Failed to export design plan to docs: {exc}"
+            self._record_repo_event(
+                event_type="repo_export_failed",
+                title="Design plan export failed",
+                summary=self._failure_summary,
+                stage="plan",
+                warning=True,
+            )
+            return False
+
+        summary = f"Exported the approved design plan to {doc_path.relative_to(self._repo_path)}."
+        self._record_repo_event(
+            event_type="repo_exported",
+            title="Design plan exported",
+            summary=summary,
+            stage="plan",
+        )
+
+        if not self._repo_commit_ready:
+            return True
+
+        commit_result = commit_repo_changes(
+            self._repo_path,
+            message="docs: sync myswat design plan",
+            paths=[doc_path],
+        )
+        if not commit_result.ok:
+            self._blocked = True
+            self._failure_summary = (
+                "Failed to commit exported design plan docs. "
+                f"{commit_result.message}".strip()
+            )
+            self._record_repo_event(
+                event_type="repo_commit_failed",
+                title="Design plan commit failed",
+                summary=self._failure_summary,
+                stage="plan",
+                warning=True,
+            )
+            return False
+
+        self._record_repo_event(
+            event_type="repo_commit",
+            title="Design plan committed" if commit_result.committed else "Design plan commit skipped",
+            summary=commit_result.message or "No design-plan doc changes to commit.",
+            stage="plan",
+        )
+        return True
+
+    def _commit_phase_changes(self, *, phase_index: int, phase_name: str) -> bool:
+        if self._repo_path is None:
+            return True
+        if not self._repo_commit_ready:
+            self._record_repo_event(
+                event_type="repo_commit_skipped",
+                title=f"Phase {phase_index} local commit skipped",
+                summary=self._repo_commit_skip_reason or "Automatic local commits are disabled.",
+                stage=f"phase_{phase_index}_commit",
+                warning=True,
+            )
+            return True
+
+        commit_result = commit_repo_changes(
+            self._repo_path,
+            message=f"phase {phase_index}: {phase_name}",
+        )
+        if not commit_result.ok:
+            self._blocked = True
+            self._failure_summary = (
+                f"Failed to commit phase {phase_index}: {phase_name}. "
+                f"{commit_result.message}".strip()
+            )
+            self._record_repo_event(
+                event_type="repo_commit_failed",
+                title=f"Phase {phase_index} local commit failed",
+                summary=self._failure_summary,
+                stage=f"phase_{phase_index}_commit",
+                warning=True,
+            )
+            return False
+
+        self._record_repo_event(
+            event_type="repo_commit",
+            title=f"Phase {phase_index} local changes committed" if commit_result.committed else f"Phase {phase_index} local commit skipped",
+            summary=commit_result.message or "No phase changes to commit.",
+            stage=f"phase_{phase_index}_commit",
+        )
+        return True
 
     def _stage_index(self, stage_name: str) -> int:
         if stage_name == "design":
@@ -887,6 +1056,15 @@ class WorkflowKernel:
                 committed=False,
             )
 
+        if not self._commit_phase_changes(phase_index=phase_index, phase_name=phase_name):
+            return PhaseResult(
+                name=phase_name,
+                summary=reviewed_summary,
+                review_iterations=review_iterations,
+                review_passed=passed,
+                committed=False,
+            )
+
         return PhaseResult(
             name=phase_name,
             summary=reviewed_summary,
@@ -1012,6 +1190,7 @@ class WorkflowKernel:
             result.failure_summary = "Workflow cancelled before start."
             result.final_report = result.failure_summary
             return result
+        self._ensure_repo_commit_ready()
 
         design = self._load_latest_artifact("design_doc")
         plan = self._load_latest_artifact("implementation_plan")
@@ -1044,6 +1223,17 @@ class WorkflowKernel:
                 return result
         else:
             result.plan = plan
+
+        if result.design and result.plan:
+            if not self._export_design_plan_to_docs(
+                requirement=requirement,
+                design=result.design,
+                plan=result.plan,
+            ):
+                result.blocked = True
+                result.failure_summary = self._failure_summary or "Failed to export design plan."
+                result.final_report = result.failure_summary
+                return result
 
         if self._mode in {WorkMode.full, WorkMode.develop}:
             phases = self._parse_phases(result.plan or "Phase 1: Implementation")

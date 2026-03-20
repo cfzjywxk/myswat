@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from myswat.repo_ops import GitCommitResult, GitProbeResult
 from myswat.server.contracts import ReviewVerdictEnvelope, StageRunCompletion
 from myswat.workflow.kernel import PhaseResult, WorkflowKernel, _extract_json_block
 from myswat.workflow.modes import WorkMode
@@ -192,6 +193,53 @@ def test_develop_mode_queues_plan_phase_and_final_report():
     assert result.final_report == "Final report text"
     assert service.start_stage_run.call_count == 3
     assert service.request_review.call_count == 2
+
+
+def test_run_exports_design_plan_to_docs_and_commits_when_plan_finalized(tmp_path):
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=81,
+        mode=WorkMode.design,
+        auto_approve=True,
+        repo_path=str(repo_path),
+    )
+
+    with patch("myswat.workflow.kernel.probe_git_repository", return_value=GitProbeResult(True, True, True, "")):
+        with patch.object(kernel, "_run_design", return_value=("approved design", True)):
+            with patch.object(kernel, "_run_plan", return_value=("approved plan", True)):
+                with patch(
+                    "myswat.workflow.kernel.write_design_plan_doc",
+                    return_value=repo_path / "docs" / "myswat-design-plan.md",
+                ) as mock_write:
+                    with patch(
+                        "myswat.workflow.kernel.commit_repo_changes",
+                        return_value=GitCommitResult(True, True, "Committed local changes."),
+                    ) as mock_commit:
+                        result = kernel.run("ship it")
+
+    assert result.success is True
+    mock_write.assert_called_once_with(
+        repo_path.resolve(),
+        requirement="ship it",
+        design="approved design",
+        plan="approved plan",
+    )
+    mock_commit.assert_called_once_with(
+        repo_path.resolve(),
+        message="docs: sync myswat design plan",
+        paths=[repo_path / "docs" / "myswat-design-plan.md"],
+    )
 
 
 def test_kernel_keeps_split_review_limits_separate():
@@ -809,6 +857,120 @@ def test_full_mode_can_skip_ga_test_by_request():
     assert result.success is True
     assert result.ga_test is None
     assert result.final_report == "report"
+
+
+def test_run_phase_commits_local_changes_after_lgtm(tmp_path):
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=82,
+        mode=WorkMode.develop,
+        auto_approve=True,
+        repo_path=str(repo_path),
+    )
+    kernel._repo_commit_checked = True
+    kernel._repo_commit_ready = True
+
+    with patch.object(kernel, "_queue_stage_task", return_value=100):
+        with patch.object(
+            kernel,
+            "_wait_for_stage_result",
+            return_value=StageRunCompletion(
+                stage_run_id=100,
+                work_item_id=82,
+                stage_name="phase_1",
+                status="completed",
+                summary="Phase done.",
+                artifact_id=1001,
+                artifact_content="Phase summary",
+            ),
+        ):
+            with patch.object(kernel, "_run_review_loop", return_value=("Phase summary", 1, True)):
+                with patch(
+                    "myswat.workflow.kernel.commit_repo_changes",
+                    return_value=GitCommitResult(True, True, "Committed local changes."),
+                ) as mock_commit:
+                    result = kernel._run_phase(
+                        requirement="ship it",
+                        design="design",
+                        plan="Phase 1: ship it",
+                        phase_name="Ship it",
+                        phase_index=1,
+                        total_phases=1,
+                        completed_summaries=[],
+                    )
+
+    assert result.committed is True
+    mock_commit.assert_called_once_with(
+        repo_path.resolve(),
+        message="phase 1: Ship it",
+    )
+
+
+def test_run_phase_blocks_when_local_commit_fails(tmp_path):
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=83,
+        mode=WorkMode.develop,
+        auto_approve=True,
+        repo_path=str(repo_path),
+    )
+    kernel._repo_commit_checked = True
+    kernel._repo_commit_ready = True
+
+    with patch.object(kernel, "_queue_stage_task", return_value=100):
+        with patch.object(
+            kernel,
+            "_wait_for_stage_result",
+            return_value=StageRunCompletion(
+                stage_run_id=100,
+                work_item_id=83,
+                stage_name="phase_1",
+                status="completed",
+                summary="Phase done.",
+                artifact_id=1001,
+                artifact_content="Phase summary",
+            ),
+        ):
+            with patch.object(kernel, "_run_review_loop", return_value=("Phase summary", 1, True)):
+                with patch(
+                    "myswat.workflow.kernel.commit_repo_changes",
+                    return_value=GitCommitResult(False, False, "git commit failed."),
+                ):
+                    result = kernel._run_phase(
+                        requirement="ship it",
+                        design="design",
+                        plan="Phase 1: ship it",
+                        phase_name="Ship it",
+                        phase_index=1,
+                        total_phases=1,
+                        completed_summaries=[],
+                    )
+
+    assert result.committed is False
+    assert kernel._blocked is True
+    assert "Failed to commit phase 1" in kernel._failure_summary
 
 
 def test_code_review_feedback_builds_phase_revision_prompt():

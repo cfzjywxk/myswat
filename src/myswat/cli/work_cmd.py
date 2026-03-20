@@ -526,6 +526,7 @@ def _run_workflow(
         assignment_timeout_seconds=(
             None if timeout_seconds_value <= 0 else timeout_seconds_value
         ),
+        repo_path=effective_workdir,
     )
 
     final_status = "blocked"

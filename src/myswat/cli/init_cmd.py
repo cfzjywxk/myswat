@@ -14,6 +14,7 @@ from myswat.config.settings import MySwatSettings
 from myswat.db.connection import TiDBPool
 from myswat.db.schema import ensure_schema
 from myswat.memory.store import MemoryStore
+from myswat.repo_ops import ensure_git_repository
 from myswat.workflow.modes import QA_DELEGATION_MODES
 
 console = Console()
@@ -36,6 +37,17 @@ def _prepare_repo_path(repo_path: str | None) -> str | None:
     return str(path.resolve())
 
 
+def _ensure_git_repo(repo_path: str | None) -> None:
+    if not repo_path:
+        return
+    status = ensure_git_repository(repo_path)
+    if status.available and status.is_git_repo and status.message:
+        console.print(f"[dim]{status.message}[/dim]")
+        return
+    if status.message:
+        console.print(f"[yellow]{status.message}[/yellow]")
+
+
 def run_init(name: str, repo_path: str | None, description: str | None) -> None:
     """Initialize a new MySwat project with TiDB schema and default agents."""
     settings = MySwatSettings()
@@ -54,6 +66,7 @@ def run_init(name: str, repo_path: str | None, description: str | None) -> None:
     # Create project
     slug = _slugify(name)
     prepared_repo_path = _prepare_repo_path(repo_path)
+    _ensure_git_repo(prepared_repo_path)
     store = MemoryStore(
         pool,
         tidb_embedding_model=settings.embedding.tidb_model,
