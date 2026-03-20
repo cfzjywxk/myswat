@@ -508,6 +508,29 @@ class TestWorkflowEngineInit:
         )
         assert engine._max_review == 10
 
+    def test_split_review_limits_are_kept_separate(self, mock_store, mock_dev_sm, mock_qa_sms):
+        engine = WorkflowEngine(
+            store=mock_store,
+            dev_sm=mock_dev_sm,
+            qa_sms=mock_qa_sms,
+            project_id="proj-1",
+            design_plan_review_limit=1,
+            dev_plan_review_limit=2,
+            dev_code_review_limit=3,
+            ga_plan_review_limit=4,
+            ga_test_review_limit=5,
+        )
+
+        assert engine._review_limit_for("arch_design") == 1
+        assert engine._review_limit_for("design") == 1
+        assert engine._review_limit_for("plan") == 2
+        assert engine._review_limit_for("code", stage_prefix="phase_1_code") == 3
+        assert engine._review_limit_for("test_plan") == 4
+        assert engine._review_limit_for("ga_test", stage_prefix="ga_test") == 5
+        assert engine._review_limit_for("other", stage_prefix="ga_test_bug_fixing") == 5
+        assert engine._review_limit_for("other") == 5
+        assert engine._max_review == 5
+
     def test_custom_ask_user(self, mock_store, mock_dev_sm, mock_qa_sms):
         custom_ask = MagicMock(return_value="yes")
         engine = WorkflowEngine(

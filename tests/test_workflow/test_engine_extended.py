@@ -82,6 +82,7 @@ def _make_engine(
     ask_return="y",
     work_item_id=1,
     max_review: int = 5,
+    ga_test_review_limit: int | None = None,
     store=None,
     mode: WorkMode = WorkMode.full,
     resume_stage: str | None = None,
@@ -112,6 +113,7 @@ def _make_engine(
         project_id=1,
         work_item_id=work_item_id,
         max_review_iterations=max_review,
+        ga_test_review_limit=ga_test_review_limit,
         mode=mode,
         ask_user=ask,
         resume_stage=resume_stage,
@@ -1286,6 +1288,7 @@ class TestRunGATestPhase:
             ],
             ask_return="y",
             max_review=1,
+            ga_test_review_limit=2,
         )
         fix_results = [
             BugFixResult(title="b1", fixed=True, summary="f1"),
@@ -1299,6 +1302,33 @@ class TestRunGATestPhase:
         assert result.passed is True
         assert result.bugs_found == 2
         assert result.bugs_fixed == 2
+
+    def test_ga_test_review_limit_stops_automatic_retest_rounds(self):
+        bugs1 = json.dumps({"bugs": [{"title": "b1", "severity": "high"}]})
+        bugs2 = json.dumps({"bugs": [{"title": "b2", "severity": "low"}]})
+        engine, dev, qas = _make_engine(
+            qa_responses=[
+                "test plan",
+                bugs1,
+                bugs2,
+                "final report",
+            ],
+            ask_return="y",
+            max_review=1,
+            ga_test_review_limit=1,
+        )
+
+        with patch.object(engine, "_run_review_loop", return_value=("test plan", 1, True)):
+            with patch.object(
+                engine,
+                "_run_bug_fix",
+                return_value=BugFixResult(title="b1", fixed=True, summary="fixed"),
+            ):
+                result = engine._run_ga_test_phase("req", "design", "plan", "summary")
+
+        assert result.aborted is True
+        assert result.passed is False
+        assert result.bugs_found == 2
 
     def test_report_generated_on_success(self):
         """QA test report is generated after all tests pass."""

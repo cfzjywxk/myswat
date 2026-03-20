@@ -77,3 +77,37 @@ def test_cleanup_project_uses_extended_timeout(monkeypatch):
     assert result == {"ok": True}
     assert observed["url"].endswith("/api/project-cleanup")
     assert observed["timeout"] == 300
+
+
+def test_submit_work_includes_skip_ga_test_when_requested(monkeypatch):
+    observed: dict[str, object] = {}
+
+    class _Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return b'{"ok": true}'
+
+    def _urlopen(request, timeout):
+        observed["payload"] = json.loads(request.data.decode("utf-8"))
+        return _Response()
+
+    monkeypatch.setattr("myswat.server.control_client.urlopen", _urlopen)
+    client = DaemonClient()
+
+    result = client.submit_work(
+        project="fib-demo",
+        requirement="implement fibonacci",
+        workdir=None,
+        mode="full",
+        skip_ga_test=True,
+    )
+
+    assert result == {"ok": True}
+    assert observed["payload"]["skip_ga_test"] is True

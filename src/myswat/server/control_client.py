@@ -102,16 +102,20 @@ class DaemonClient:
         requirement: str,
         workdir: str | None,
         mode: str,
+        skip_ga_test: bool = False,
     ) -> dict:
+        payload = {
+            "project": project,
+            "requirement": requirement,
+            "workdir": workdir,
+            "mode": mode,
+        }
+        if skip_ga_test:
+            payload["skip_ga_test"] = True
         return self._request(
             method="POST",
             path="/api/work",
-            payload={
-                "project": project,
-                "requirement": requirement,
-                "workdir": workdir,
-                "mode": mode,
-            },
+            payload=payload,
         )
 
     def get_work_item(self, *, project: str, work_item_id: int) -> dict:

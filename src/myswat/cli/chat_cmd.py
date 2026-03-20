@@ -29,7 +29,7 @@ from myswat.cli.progress import (
     _send_with_timer,
     _single_line_preview,
 )
-from myswat.config.settings import MySwatSettings
+from myswat.config.settings import MySwatSettings, get_workflow_review_limit
 from myswat.db.connection import TiDBPool
 from myswat.db.schema import ensure_schema
 from myswat.large_payloads import maybe_externalize_response, maybe_externalize_summary
@@ -625,7 +625,10 @@ def _run_inline_review(
     verdict = run_review_loop(
         store=store, dev_sm=dev_sm, reviewer_sm=reviewer_sm,
         task=task, project_id=proj["id"], work_item_id=work_item_id,
-        max_iterations=settings.workflow.max_review_iterations,
+        max_iterations=get_workflow_review_limit(
+            settings.workflow,
+            "dev_code_review_limit",
+        ),
         should_cancel=should_cancel,
     )
 
@@ -748,7 +751,26 @@ def _run_testplan_review(
         arch_sm=arch_sm,
         project_id=proj["id"],
         work_item_id=work_item_id,
-        max_review_iterations=settings.workflow.max_review_iterations,
+        design_plan_review_limit=get_workflow_review_limit(
+            settings.workflow,
+            "design_plan_review_limit",
+        ),
+        dev_plan_review_limit=get_workflow_review_limit(
+            settings.workflow,
+            "dev_plan_review_limit",
+        ),
+        dev_code_review_limit=get_workflow_review_limit(
+            settings.workflow,
+            "dev_code_review_limit",
+        ),
+        ga_plan_review_limit=get_workflow_review_limit(
+            settings.workflow,
+            "ga_plan_review_limit",
+        ),
+        ga_test_review_limit=get_workflow_review_limit(
+            settings.workflow,
+            "ga_test_review_limit",
+        ),
         mode=WorkMode.testplan_design,
         ask_user=ask_user or _make_prompt_callback(prompt_session),
         auto_approve=auto_approve,
@@ -912,7 +934,26 @@ def _run_workflow(
         arch_sm=arch_sm,
         project_id=proj["id"],
         work_item_id=work_item_id,
-        max_review_iterations=settings.workflow.max_review_iterations,
+        design_plan_review_limit=get_workflow_review_limit(
+            settings.workflow,
+            "design_plan_review_limit",
+        ),
+        dev_plan_review_limit=get_workflow_review_limit(
+            settings.workflow,
+            "dev_plan_review_limit",
+        ),
+        dev_code_review_limit=get_workflow_review_limit(
+            settings.workflow,
+            "dev_code_review_limit",
+        ),
+        ga_plan_review_limit=get_workflow_review_limit(
+            settings.workflow,
+            "ga_plan_review_limit",
+        ),
+        ga_test_review_limit=get_workflow_review_limit(
+            settings.workflow,
+            "ga_test_review_limit",
+        ),
         mode=mode,
         ask_user=ask_user or _make_prompt_callback(prompt_session),
         auto_approve=auto_approve,

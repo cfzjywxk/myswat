@@ -184,7 +184,12 @@ class WorkflowEngine:
         qa_sms: list[SessionManager],
         project_id: int,
         work_item_id: int | None = None,
-        max_review_iterations: int = 10,
+        max_review_iterations: int | None = None,
+        design_plan_review_limit: int | None = None,
+        dev_plan_review_limit: int | None = None,
+        dev_code_review_limit: int | None = None,
+        ga_plan_review_limit: int | None = None,
+        ga_test_review_limit: int | None = None,
         mode: WorkMode = WorkMode.full,
         ask_user: Callable[[str], str] | None = None,
         auto_approve: bool = False,
@@ -198,7 +203,56 @@ class WorkflowEngine:
         self._qas = qa_sms
         self._project_id = project_id
         self._work_item_id = work_item_id
-        self._max_review = max_review_iterations
+        default_review_limits = {
+            "design": 10,
+            "dev_plan": 10,
+            "dev_code": 10,
+            "ga_plan": 2,
+            "ga_test": 2,
+        }
+        fallback_review_limit = max_review_iterations
+        self._design_plan_review_limit = (
+            default_review_limits["design"]
+            if design_plan_review_limit is None and fallback_review_limit is None
+            else (
+                fallback_review_limit if design_plan_review_limit is None else design_plan_review_limit
+            )
+        )
+        self._dev_plan_review_limit = (
+            default_review_limits["dev_plan"]
+            if dev_plan_review_limit is None and fallback_review_limit is None
+            else (
+                fallback_review_limit if dev_plan_review_limit is None else dev_plan_review_limit
+            )
+        )
+        self._dev_code_review_limit = (
+            default_review_limits["dev_code"]
+            if dev_code_review_limit is None and fallback_review_limit is None
+            else (
+                fallback_review_limit if dev_code_review_limit is None else dev_code_review_limit
+            )
+        )
+        self._ga_plan_review_limit = (
+            default_review_limits["ga_plan"]
+            if ga_plan_review_limit is None and fallback_review_limit is None
+            else (
+                fallback_review_limit if ga_plan_review_limit is None else ga_plan_review_limit
+            )
+        )
+        self._ga_test_review_limit = (
+            default_review_limits["ga_test"]
+            if ga_test_review_limit is None and fallback_review_limit is None
+            else (
+                fallback_review_limit if ga_test_review_limit is None else ga_test_review_limit
+            )
+        )
+        self._max_review = max(
+            self._design_plan_review_limit,
+            self._dev_plan_review_limit,
+            self._dev_code_review_limit,
+            self._ga_plan_review_limit,
+            self._ga_test_review_limit,
+        )
         self._mode = WorkMode(mode)
         self._arch = arch_sm
         self._resume_stage = resume_stage
@@ -578,6 +632,7 @@ class WorkflowEngine:
         artifact_type: str,
         stage: str,
         iteration: int,
+        max_iterations: int,
         proposer: "SessionManager",
         issues: list[str],
     ) -> None:
@@ -600,7 +655,7 @@ class WorkflowEngine:
             stage=stage,
             agent_role=proposer.agent_role,
             iteration=iteration,
-            max_iterations=self._max_review,
+            max_iterations=max_iterations,
             issue_count=len(issues),
             review_skipped=True,
         )
@@ -2123,9 +2178,33 @@ class WorkflowEngine:
         result.bugs_found = len(bugs)
         self._console.print(f"[bold red]{len(bugs)} bug(s) found in GA test.[/bold red]")
 
+        ga_review_round = 0
         while bugs:
             if self._cancelled():
                 result.aborted = True
+                break
+            ga_review_round += 1
+            if ga_review_round > self._ga_test_review_limit:
+                self._emit(
+                    "warning",
+                    "GA test review limit reached; stopping automatic bug-fix rounds.",
+                    stage="ga_test",
+                    agent_role=qa_lead.agent_role,
+                    iteration=ga_review_round - 1,
+                    max_iterations=self._ga_test_review_limit,
+                    review_skipped=True,
+                )
+                self._console.print(
+                    "[yellow]GA test review limit reached; stopping automatic bug-fix rounds.[/yellow]"
+                )
+                result.aborted = True
+                self._persist_task_state(
+                    current_stage="ga_test_review_limit_reached",
+                    latest_summary=test_output[:4000],
+                    next_todos=["Review unresolved GA findings and decide next action"],
+                    open_issues=[bug.get("title", "Unknown bug") for bug in bugs[:10]],
+                    updated_by_agent_id=qa_lead.agent_id,
+                )
                 break
             if result.bugs_found > MAX_GA_BUGS:
                 self._console.print(
@@ -2478,6 +2557,26 @@ class WorkflowEngine:
         )
         return sub
 
+    def _review_limit_for(
+        self,
+        artifact_type: str,
+        *,
+        stage_prefix: str | None = None,
+    ) -> int:
+        if artifact_type in {"arch_design", "design"}:
+            return self._design_plan_review_limit
+        if artifact_type == "plan":
+            return self._dev_plan_review_limit
+        if artifact_type == "code":
+            return self._dev_code_review_limit
+        if artifact_type == "test_plan":
+            return self._ga_plan_review_limit
+        if artifact_type in {"ga_test", "test_report"}:
+            return self._ga_test_review_limit
+        if stage_prefix and stage_prefix.startswith("ga_test"):
+            return self._ga_test_review_limit
+        return self._max_review
+
     def _parse_bug_estimation(self, output: str) -> str:
         """Parse dev's bug estimation. Returns 'simple_fix' or 'arch_change'."""
         data = _extract_json_block(output)
@@ -2521,14 +2620,20 @@ class WorkflowEngine:
         change_summary: str = ""  # empty on first iteration
         skipped_reviewers: set[int] = set()  # persists across iterations
         sp = stage_prefix or artifact_type  # prefix for current_stage values
+        review_limit = self._review_limit_for(artifact_type, stage_prefix=stage_prefix)
 
-        for iteration in range(1, self._max_review + 1):
+        for iteration in range(1, review_limit + 1):
             if self._cancelled():
                 self._console.print(f"[yellow]{artifact_type} review cancelled by user.[/yellow]")
                 break
-            self._emit("review_start", f"Review iteration {iteration}/{self._max_review}",
-                        stage=sp, iteration=iteration, max_iterations=self._max_review)
-            self._console.print(f"\n[dim]-- Review iteration {iteration}/{self._max_review} --[/dim]")
+            self._emit(
+                "review_start",
+                f"Review iteration {iteration}/{review_limit}",
+                stage=sp,
+                iteration=iteration,
+                max_iterations=review_limit,
+            )
+            self._console.print(f"\n[dim]-- Review iteration {iteration}/{review_limit} --[/dim]")
 
             artifact_id = None
             if persist_artifacts and self._work_item_id:
@@ -2742,11 +2847,12 @@ class WorkflowEngine:
                 )
                 return current, iteration, True
 
-            if iteration >= self._max_review:
+            if iteration >= review_limit:
                 self._record_review_limit_reached(
                     artifact_type=artifact_type,
                     stage=sp,
                     iteration=iteration,
+                    max_iterations=review_limit,
                     proposer=prop,
                     issues=all_issues,
                 )
@@ -2837,7 +2943,7 @@ class WorkflowEngine:
             )
 
         self._console.print(f"[yellow]Max iterations reached for {artifact_type} review.[/yellow]")
-        return current, self._max_review, False
+        return current, review_limit, False
 
     def _review_artifact_type(self, artifact_type: str) -> str:
         if artifact_type in {"design", "arch_design"}:

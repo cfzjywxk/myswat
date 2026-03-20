@@ -115,7 +115,13 @@ class WorkflowKernel:
         project_id: int,
         work_item_id: int,
         mode: WorkMode = WorkMode.full,
-        max_review_iterations: int = 10,
+        skip_ga_test: bool = False,
+        max_review_iterations: int | None = None,
+        design_plan_review_limit: int | None = None,
+        dev_plan_review_limit: int | None = None,
+        dev_code_review_limit: int | None = None,
+        ga_plan_review_limit: int | None = None,
+        ga_test_review_limit: int | None = None,
         ask_user: Callable[[str], str] | None = None,
         auto_approve: bool = True,
         should_cancel: Callable[[], bool] | None = None,
@@ -137,7 +143,57 @@ class WorkflowKernel:
         self._project_id = project_id
         self._work_item_id = work_item_id
         self._mode = WorkMode(mode)
-        self._max_review = max_review_iterations
+        self._skip_ga_test = skip_ga_test
+        default_review_limits = {
+            "design": 10,
+            "dev_plan": 10,
+            "dev_code": 10,
+            "ga_plan": 2,
+            "ga_test": 2,
+        }
+        fallback_review_limit = max_review_iterations
+        self._design_plan_review_limit = (
+            default_review_limits["design"]
+            if design_plan_review_limit is None and fallback_review_limit is None
+            else (
+                fallback_review_limit if design_plan_review_limit is None else design_plan_review_limit
+            )
+        )
+        self._dev_plan_review_limit = (
+            default_review_limits["dev_plan"]
+            if dev_plan_review_limit is None and fallback_review_limit is None
+            else (
+                fallback_review_limit if dev_plan_review_limit is None else dev_plan_review_limit
+            )
+        )
+        self._dev_code_review_limit = (
+            default_review_limits["dev_code"]
+            if dev_code_review_limit is None and fallback_review_limit is None
+            else (
+                fallback_review_limit if dev_code_review_limit is None else dev_code_review_limit
+            )
+        )
+        self._ga_plan_review_limit = (
+            default_review_limits["ga_plan"]
+            if ga_plan_review_limit is None and fallback_review_limit is None
+            else (
+                fallback_review_limit if ga_plan_review_limit is None else ga_plan_review_limit
+            )
+        )
+        self._ga_test_review_limit = (
+            default_review_limits["ga_test"]
+            if ga_test_review_limit is None and fallback_review_limit is None
+            else (
+                fallback_review_limit if ga_test_review_limit is None else ga_test_review_limit
+            )
+        )
+        self._max_review = max(
+            self._design_plan_review_limit,
+            self._dev_plan_review_limit,
+            self._dev_code_review_limit,
+            self._ga_plan_review_limit,
+            self._ga_test_review_limit,
+        )
         self._ask = ask_user or (lambda prompt: input(f"\n{prompt}").strip())
         self._auto_approve = auto_approve
         self._should_cancel = should_cancel
@@ -243,12 +299,26 @@ class WorkflowKernel:
         self._last_review_limit_stage = ""
         self._last_review_limit_summary = ""
 
+    def _review_limit_for(self, review_stage_name: str) -> int:
+        if review_stage_name == "design_review":
+            return self._design_plan_review_limit
+        if review_stage_name == "plan_review":
+            return self._dev_plan_review_limit
+        if review_stage_name == "test_plan_review":
+            return self._ga_plan_review_limit
+        if review_stage_name.startswith("phase_") and review_stage_name.endswith("_review"):
+            return self._dev_code_review_limit
+        if review_stage_name.startswith("ga_test"):
+            return self._ga_test_review_limit
+        return self._max_review
+
     def _record_review_limit_reached(
         self,
         *,
         artifact_title: str,
         stage: str,
         iteration: int,
+        max_iterations: int,
         owner: WorkflowRuntime,
         issues: list[str],
     ) -> None:
@@ -271,7 +341,7 @@ class WorkflowKernel:
             stage=stage,
             agent_role=owner.agent_role,
             iteration=iteration,
-            max_iterations=self._max_review,
+            max_iterations=max_iterations,
             issue_count=len(issues),
             review_skipped=True,
         )
@@ -442,7 +512,8 @@ class WorkflowKernel:
         self._reset_review_loop_state()
         artifact = initial_artifact
         artifact_id = initial_artifact_id
-        for iteration in range(1, self._max_review + 1):
+        review_limit = self._review_limit_for(review_stage_name)
+        for iteration in range(1, review_limit + 1):
             if self._cancelled():
                 self._blocked = True
                 self._failure_summary = "Workflow cancelled."
@@ -458,9 +529,11 @@ class WorkflowKernel:
 
             self._emit(
                 "review_start",
-                f"Queued review iteration {iteration}",
+                f"Queued review iteration {iteration}/{review_limit}",
                 stage=review_stage_name,
                 agent_role=owner.agent_role,
+                iteration=iteration,
+                max_iterations=review_limit,
             )
             cycle_ids: list[int] = []
             for reviewer in reviewers:
@@ -507,11 +580,12 @@ class WorkflowKernel:
             if all_lgtm:
                 return artifact, iteration, True
 
-            if iteration >= self._max_review:
+            if iteration >= review_limit:
                 self._record_review_limit_reached(
                     artifact_title=artifact_title,
                     stage=review_stage_name,
                     iteration=iteration,
+                    max_iterations=review_limit,
                     owner=owner,
                     issues=collected_feedback,
                 )
@@ -546,7 +620,7 @@ class WorkflowKernel:
 
         self._blocked = True
         self._failure_summary = f"{artifact_title} review loop exhausted."
-        return artifact, self._max_review, False
+        return artifact, review_limit, False
 
     def _load_latest_artifact(self, artifact_type: str) -> str:
         artifact = self._store.get_latest_artifact_by_type(self._work_item_id, artifact_type)
@@ -992,7 +1066,7 @@ class WorkflowKernel:
                     result.final_report = result.failure_summary
                     return result
 
-        if self._mode in {WorkMode.full, WorkMode.test}:
+        if self._mode == WorkMode.test or (self._mode == WorkMode.full and not self._skip_ga_test):
             ga_test = self._run_test(
                 requirement,
                 result.design or requirement,
@@ -1004,6 +1078,23 @@ class WorkflowKernel:
                 result.failure_summary = self._failure_summary or "GA testing failed."
                 result.final_report = result.failure_summary
                 return result
+        elif self._mode == WorkMode.full and self._skip_ga_test:
+            skip_summary = "GA test skipped by request."
+            completed_summaries.append(skip_summary)
+            self._store.update_work_item_state(
+                self._work_item_id,
+                current_stage="ga_test_skipped",
+                latest_summary=skip_summary,
+                next_todos=["Generate final report"],
+            )
+            self._append_process_event(
+                event_type="ga_test_skipped",
+                title="GA test skipped",
+                summary=skip_summary,
+                from_role="user",
+                to_role="myswat",
+            )
+            self._emit("warning", skip_summary, stage="ga_test", review_skipped=True)
 
         if self._mode == WorkMode.design:
             result.final_report = (

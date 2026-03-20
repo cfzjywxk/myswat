@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -14,6 +15,7 @@ from myswat.config.settings import (
     MySwatSettings,
     TiDBSettings,
     WorkflowSettings,
+    get_workflow_review_limit,
 )
 
 
@@ -198,12 +200,33 @@ class TestWorkflowSettings:
 
     def test_defaults(self):
         settings = WorkflowSettings()
-        assert settings.max_review_iterations == 10
+        assert settings.design_plan_review_limit == 10
+        assert settings.dev_plan_review_limit == 10
+        assert settings.dev_code_review_limit == 10
+        assert settings.ga_plan_review_limit == 2
+        assert settings.ga_test_review_limit == 2
 
-    def test_env_override_max_review_iterations(self, monkeypatch):
-        monkeypatch.setenv("MYSWAT_WORKFLOW_MAX_REVIEW_ITERATIONS", "10")
+    def test_env_override_split_review_limit(self, monkeypatch):
+        monkeypatch.setenv("MYSWAT_WORKFLOW_DEV_CODE_REVIEW_LIMIT", "4")
         settings = WorkflowSettings()
-        assert settings.max_review_iterations == 10
+        assert settings.dev_code_review_limit == 4
+        assert settings.design_plan_review_limit == 10
+
+    def test_env_override_ga_review_defaults(self, monkeypatch):
+        monkeypatch.setenv("MYSWAT_WORKFLOW_GA_PLAN_REVIEW_LIMIT", "5")
+        monkeypatch.setenv("MYSWAT_WORKFLOW_GA_TEST_REVIEW_LIMIT", "6")
+        settings = WorkflowSettings()
+        assert settings.ga_plan_review_limit == 5
+        assert settings.ga_test_review_limit == 6
+
+    def test_get_workflow_review_limit_uses_split_limit_only(self):
+        settings = WorkflowSettings(dev_plan_review_limit=6)
+        assert get_workflow_review_limit(settings, "dev_plan_review_limit") == 6
+        legacy = MagicMock()
+        legacy.dev_code_review_limit = 4
+        assert get_workflow_review_limit(legacy, "dev_code_review_limit") == 4
+        assert get_workflow_review_limit(object(), "ga_plan_review_limit") == 2
+        assert get_workflow_review_limit(object(), "dev_plan_review_limit", default=9) == 9
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +334,8 @@ class TestMySwatSettings:
         # Spot-check a few nested defaults
         assert settings.tidb.port == 4000
         assert settings.agents.developer_model == "gpt-5.4"
-        assert settings.workflow.max_review_iterations == 10
+        assert settings.workflow.design_plan_review_limit == 10
+        assert settings.workflow.ga_plan_review_limit == 2
         assert settings.compaction.threshold_turns == 50
 
     def test_missing_config_file_no_error(self, tmp_path):
@@ -336,7 +360,11 @@ developer_model = "toml-model-v1"
 architect_model = "toml-model-v2"
 
 [workflow]
-max_review_iterations = 8
+design_plan_review_limit = 8
+dev_plan_review_limit = 7
+dev_code_review_limit = 6
+ga_plan_review_limit = 5
+ga_test_review_limit = 4
 
 [compaction]
 threshold_turns = 300
@@ -359,7 +387,11 @@ async_enabled = false
         assert settings.tidb.database == "toml_db"
         assert settings.agents.developer_model == "toml-model-v1"
         assert settings.agents.architect_model == "toml-model-v2"
-        assert settings.workflow.max_review_iterations == 8
+        assert settings.workflow.design_plan_review_limit == 8
+        assert settings.workflow.dev_plan_review_limit == 7
+        assert settings.workflow.dev_code_review_limit == 6
+        assert settings.workflow.ga_plan_review_limit == 5
+        assert settings.workflow.ga_test_review_limit == 4
         assert settings.compaction.threshold_turns == 300
         assert settings.compaction.compaction_backend == "kimi"
         assert settings.memory_worker.backend == "claude"
@@ -378,7 +410,7 @@ database = "toml_db"
 developer_model = "toml-model"
 
 [workflow]
-max_review_iterations = 8
+dev_code_review_limit = 8
 
 [compaction]
 threshold_turns = 300
@@ -393,7 +425,7 @@ threshold_turns = 300
         assert settings.tidb.port == 3307
         assert settings.tidb.database == "toml_db"
         assert settings.agents.developer_model == "toml-model"
-        assert settings.workflow.max_review_iterations == 8
+        assert settings.workflow.dev_code_review_limit == 8
         assert settings.compaction.threshold_turns == 300
 
     def test_legacy_threshold_tokens_in_toml_is_ignored(self, tmp_path):
@@ -428,7 +460,8 @@ host = "partial-host"
         # Defaults preserved
         assert settings.tidb.port == 4000
         assert settings.agents.developer_model == "gpt-5.4"
-        assert settings.workflow.max_review_iterations == 10
+        assert settings.workflow.design_plan_review_limit == 10
+        assert settings.workflow.ga_test_review_limit == 2
         assert settings.compaction.threshold_turns == 50
 
     def test_config_path_attribute(self, tmp_path):
@@ -448,5 +481,6 @@ host = "partial-host"
         assert settings.tidb.host == ""
         assert settings.tidb.port == 4000
         assert settings.agents.codex_path == "codex"
-        assert settings.workflow.max_review_iterations == 10
+        assert settings.workflow.design_plan_review_limit == 10
+        assert settings.workflow.ga_plan_review_limit == 2
         assert settings.compaction.threshold_turns == 50

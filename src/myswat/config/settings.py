@@ -10,6 +10,15 @@ from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 
 
+WORKFLOW_REVIEW_LIMIT_DEFAULTS = {
+    "design_plan_review_limit": 10,
+    "dev_plan_review_limit": 10,
+    "dev_code_review_limit": 10,
+    "ga_plan_review_limit": 2,
+    "ga_test_review_limit": 2,
+}
+
+
 class TiDBSettings(BaseSettings):
     host: str = ""
     port: int = 4000
@@ -55,8 +64,27 @@ class AgentSettings(BaseSettings):
     model_config = {"env_prefix": "MYSWAT_AGENTS_"}
 
 
+def get_workflow_review_limit(
+    workflow_settings: object,
+    field_name: str,
+    default: int | None = None,
+) -> int:
+    resolved_default = default if default is not None else WORKFLOW_REVIEW_LIMIT_DEFAULTS.get(field_name, 10)
+    value = getattr(workflow_settings, field_name, resolved_default)
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return resolved_default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return resolved_default
+
+
 class WorkflowSettings(BaseSettings):
-    max_review_iterations: int = 10
+    design_plan_review_limit: int = WORKFLOW_REVIEW_LIMIT_DEFAULTS["design_plan_review_limit"]
+    dev_plan_review_limit: int = WORKFLOW_REVIEW_LIMIT_DEFAULTS["dev_plan_review_limit"]
+    dev_code_review_limit: int = WORKFLOW_REVIEW_LIMIT_DEFAULTS["dev_code_review_limit"]
+    ga_plan_review_limit: int = WORKFLOW_REVIEW_LIMIT_DEFAULTS["ga_plan_review_limit"]
+    ga_test_review_limit: int = WORKFLOW_REVIEW_LIMIT_DEFAULTS["ga_test_review_limit"]
     assignment_poll_interval_seconds: float = 1.0
     assignment_timeout_seconds: int = 0
 

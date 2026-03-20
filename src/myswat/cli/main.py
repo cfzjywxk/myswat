@@ -17,6 +17,7 @@ app = typer.Typer(
 )
 
 _ACTIVE_RUNTIME_WORK_STATUSES = frozenset({"pending", "in_progress", "review"})
+_MIN_AWARE_DATETIME = datetime.min.replace(tzinfo=timezone.utc)
 _MAX_AWARE_DATETIME = datetime.max.replace(tzinfo=timezone.utc)
 
 app.add_typer(memory_app, name="memory", help="Search and manage project knowledge")
@@ -166,6 +167,7 @@ def work(
     design_mode: bool = typer.Option(False, "--design", "--plan", help="Run design + planning only."),
     develop_mode: bool = typer.Option(False, "--develop", "--dev", help="Run development only."),
     test_mode: bool = typer.Option(False, "--test", "--ga-test", help="Run GA testing only."),
+    skip_ga_test: bool = typer.Option(False, "--skip-ga-test", help="Skip the GA test stage for the default full workflow."),
     auto_approve: bool = typer.Option(
         True,
         "--auto-approve/--interactive-checkpoints",
@@ -203,17 +205,22 @@ def work(
         raise typer.BadParameter("--resume is not supported through the daemon workflow path yet.")
     if not auto_approve:
         raise typer.BadParameter("--interactive-checkpoints is not supported through the daemon workflow path yet.")
+    if skip_ga_test and mode != WorkMode.full:
+        raise typer.BadParameter("--skip-ga-test can only be used with the default full workflow.")
 
     console = Console()
     settings = MySwatSettings()
     client = DaemonClient(settings)
+    submit_kwargs = {
+        "project": project,
+        "requirement": requirement or "",
+        "workdir": workdir,
+        "mode": mode.value,
+    }
+    if skip_ga_test:
+        submit_kwargs["skip_ga_test"] = True
     try:
-        result = client.submit_work(
-            project=project,
-            requirement=requirement or "",
-            workdir=workdir,
-            mode=mode.value,
-        )
+        result = client.submit_work(**submit_kwargs)
     except DaemonClientError as exc:
         console.print(f"[red]{exc}[/red]")
         console.print(f"[dim]Start the daemon first: myswat server[/dim]")
@@ -269,17 +276,19 @@ def work_background_worker(
     work_item_id: int = typer.Option(..., "--work-item-id", help="Existing work item ID"),
     workdir: str = typer.Option(None, "--workdir", "-w", help="Working directory override"),
     mode: str = typer.Option(WorkMode.full.value, "--mode", help="Workflow mode for detached worker."),
+    skip_ga_test: bool = typer.Option(False, "--skip-ga-test", help="Skip GA test during the detached full workflow."),
 ):
     """Internal detached worker entry point for `myswat work --background`."""
     from myswat.cli.work_cmd import run_background_work_item
 
-    run_background_work_item(
-        project,
-        requirement,
-        work_item_id=work_item_id,
-        workdir=workdir,
-        mode=WorkMode(mode),
-    )
+    kwargs = {
+        "work_item_id": work_item_id,
+        "workdir": workdir,
+        "mode": WorkMode(mode),
+    }
+    if skip_ga_test:
+        kwargs["skip_ga_test"] = True
+    run_background_work_item(project, requirement, **kwargs)
 
 
 @app.command(name="worker", hidden=True)
@@ -786,7 +795,13 @@ def _event_summary(entry: dict) -> str:
         parts.append(summary)
     issues = entry.get("issues")
     if isinstance(issues, list) and issues:
-        issue_text = "; ".join(_compact_text(issue, 80) for issue in issues[:3])
+        summary_lower = summary.lower()
+        unseen_issues = [
+            issue
+            for issue in issues[:3]
+            if isinstance(issue, str) and issue.strip() and issue.strip().lower() not in summary_lower
+        ]
+        issue_text = "; ".join(_compact_text(issue, 80) for issue in unseen_issues)
         if issue_text:
             parts.append(f"Issues: {issue_text}")
     return _compact_text(" ".join(parts), 320)
@@ -835,6 +850,12 @@ def _build_review_cycle_flow_entries(pool, item_id: int) -> list[dict]:
         if not verdict or verdict == "pending":
             continue
         verdict_payload = _parse_verdict_payload(row.get("verdict_json"))
+        issues = verdict_payload.get("issues") if isinstance(verdict_payload.get("issues"), list) else []
+        summary = verdict_payload.get("summary") or verdict
+        if issues:
+            issue_text = "; ".join(str(issue).strip() for issue in issues[:3] if str(issue).strip())
+            if issue_text:
+                summary = f"{summary} Issues: {issue_text}"
         events.append(
             {
                 "at": row.get("completed_at") or row.get("updated_at") or row.get("created_at"),
@@ -842,8 +863,8 @@ def _build_review_cycle_flow_entries(pool, item_id: int) -> list[dict]:
                 "from_role": row.get("reviewer_role"),
                 "to_role": row.get("proposer_role"),
                 "title": "Review response",
-                "summary": verdict_payload.get("summary") or verdict,
-                "issues": verdict_payload.get("issues") if isinstance(verdict_payload.get("issues"), list) else [],
+                "summary": summary,
+                "issues": issues,
                 "verdict": verdict,
                 "_sequence": sequence,
             }
@@ -891,7 +912,10 @@ def _build_teamwork_flow_entries(pool, item: dict) -> list[dict]:
     return sorted(
         [entry for entry in timeline if isinstance(entry, dict)],
         key=lambda entry: (
-            _coerce_datetime(entry.get("at")) or _MAX_AWARE_DATETIME,
+            (
+                _coerce_datetime(entry.get("at"))
+                or (_MIN_AWARE_DATETIME if entry.get("type") == "task_request" else _MAX_AWARE_DATETIME)
+            ),
             int(entry.get("_sequence") or 0),
         ),
     )

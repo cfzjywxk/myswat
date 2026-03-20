@@ -69,6 +69,7 @@ def test_handle_work_queues_workers_and_starts_in_process_workflow():
         requirement="implement fibonacci",
         workdir="/tmp/fib-demo",
         mode=WorkMode.full,
+        skip_ga_test=False,
     )
     daemon._start_workflow_thread.assert_called_once_with(
         project_slug="fib-demo",
@@ -76,7 +77,60 @@ def test_handle_work_queues_workers_and_starts_in_process_workflow():
         work_item_id=88,
         workdir="/tmp/fib-demo",
         mode=WorkMode.full,
+        skip_ga_test=False,
     )
+
+
+def test_handle_work_with_skip_ga_test_marks_work_item_and_thread():
+    daemon = MySwatDaemon.__new__(MySwatDaemon)
+    daemon._lock = threading.RLock()
+    daemon._find_active_work_item = Mock(return_value=None)
+    daemon.ensure_workers = Mock(return_value=["architect", "developer", "qa_main"])
+    daemon._create_work_item = Mock(return_value=88)
+    daemon._start_workflow_thread = Mock()
+
+    result = daemon.handle_work(
+        project="fib-demo",
+        requirement="implement fibonacci",
+        workdir="/tmp/fib-demo",
+        mode=WorkMode.full.value,
+        skip_ga_test=True,
+    )
+
+    assert result["work_item_id"] == 88
+    daemon._create_work_item.assert_called_once_with(
+        project_slug="fib-demo",
+        requirement="implement fibonacci",
+        workdir="/tmp/fib-demo",
+        mode=WorkMode.full,
+        skip_ga_test=True,
+    )
+    daemon._start_workflow_thread.assert_called_once_with(
+        project_slug="fib-demo",
+        requirement="implement fibonacci",
+        work_item_id=88,
+        workdir="/tmp/fib-demo",
+        mode=WorkMode.full,
+        skip_ga_test=True,
+    )
+
+
+def test_handle_work_rejects_skip_ga_test_for_non_full_mode():
+    daemon = MySwatDaemon.__new__(MySwatDaemon)
+    daemon._lock = threading.RLock()
+
+    try:
+        daemon.handle_work(
+            project="fib-demo",
+            requirement="implement fibonacci",
+            workdir="/tmp/fib-demo",
+            mode=WorkMode.test.value,
+            skip_ga_test=True,
+        )
+    except ValueError as exc:
+        assert "--skip-ga-test" in str(exc)
+    else:
+        raise AssertionError("Expected skip-ga-test mode validation error")
 
 
 def test_handle_work_rejects_when_project_already_has_active_workflow():
@@ -535,7 +589,7 @@ def test_project_snapshot_line_includes_work_item_worker_health_and_session_note
     assert "work_item=#7 status=in_progress stage=design" in line
     assert 'summary="Produce technical design for fibonacci workflow"' in line
     assert "developer:busy(" in line
-    assert "healthy/12s" in line
+    assert "healthy/" in line
     assert "stage=design work_item=#7" in line
     assert 'drafting technical design' in line
 

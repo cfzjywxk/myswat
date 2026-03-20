@@ -163,6 +163,64 @@ class TestRunWork:
         mock_submit_learn.assert_called_once()
 
     @patch("myswat.cli.work_cmd.WorkflowEngine")
+    @patch("myswat.cli.work_cmd.submit_workflow_summary_learn_request")
+    @patch("myswat.cli.work_cmd.PromptSession")
+    @patch("myswat.cli.work_cmd.MySwatSettings")
+    @patch("myswat.cli.work_cmd.TiDBPool")
+    @patch("myswat.cli.work_cmd.ensure_schema")
+    @patch("myswat.cli.work_cmd.MemoryStore")
+    @patch("myswat.cli.work_cmd.SessionManager", create=True)
+    def test_success_with_skip_ga_test(
+        self,
+        mock_sm_cls,
+        mock_store_cls,
+        mock_mig,
+        mock_pool_cls,
+        mock_settings_cls,
+        mock_prompt_session_cls,
+        mock_submit_learn,
+        mock_engine_cls,
+    ):
+        settings = MagicMock()
+        settings.compaction.threshold_turns = 200
+        settings.workflow.max_review_iterations = 5
+        mock_settings_cls.return_value = settings
+
+        dev_row = _agent_row("developer")
+        qa_row = _agent_row("qa_main", "kimi")
+
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = {"id": 1, "repo_path": "/tmp"}
+
+        def get_agent_side(pid, role):
+            if role == "developer":
+                return dev_row
+            if role == "qa_main":
+                return qa_row
+            return None
+
+        mock_store.get_agent.side_effect = get_agent_side
+        mock_store.create_work_item.return_value = 42
+        mock_store_cls.return_value = mock_store
+
+        sm = MagicMock()
+        sm.session = SimpleNamespace(session_uuid="uuid")
+        sm._agent_row = qa_row
+        mock_sm_cls.return_value = sm
+
+        engine = MagicMock()
+        engine.run.return_value = SimpleNamespace(success=True)
+        mock_engine_cls.return_value = engine
+
+        run_work("proj", "do stuff", skip_ga_test=True)
+
+        assert mock_engine_cls.call_args.kwargs["skip_ga_test"] is True
+        assert mock_store.create_work_item.call_args.kwargs["metadata_json"] == {
+            "work_mode": "full",
+            "skip_ga_test": True,
+        }
+
+    @patch("myswat.cli.work_cmd.WorkflowEngine")
     @patch("myswat.cli.work_cmd.PromptSession")
     @patch("myswat.cli.work_cmd.MySwatSettings")
     @patch("myswat.cli.work_cmd.TiDBPool")
@@ -562,7 +620,12 @@ class TestRunWork:
             "do stuff",
             workdir=None,
             mode=WorkMode.design,
+            skip_ga_test=False,
         )
+
+    def test_skip_ga_test_rejected_for_non_full_mode(self):
+        with pytest.raises(typer.BadParameter):
+            run_work("proj", "do stuff", mode=WorkMode.test, skip_ga_test=True)
 
     @patch("myswat.cli.work_cmd.subprocess.Popen")
     @patch("myswat.cli.work_cmd.MySwatSettings")
@@ -633,6 +696,58 @@ class TestRunWork:
         rendered = [str(call.args[0]) for call in mock_console_print.call_args_list if call.args]
         assert any("myswat status -p proj" in line for line in rendered)
         assert any("myswat status -p proj --details" in line for line in rendered)
+
+    @patch("myswat.cli.work_cmd.subprocess.Popen")
+    @patch("myswat.cli.work_cmd.MySwatSettings")
+    @patch("myswat.cli.work_cmd.TiDBPool")
+    @patch("myswat.cli.work_cmd.ensure_schema")
+    @patch("myswat.cli.work_cmd.MemoryStore")
+    def test_background_launch_with_skip_ga_test(
+        self,
+        mock_store_cls,
+        mock_mig,
+        mock_pool_cls,
+        mock_settings_cls,
+        mock_popen,
+        tmp_path,
+    ):
+        settings = MagicMock()
+        settings.config_path = tmp_path / "config.toml"
+        settings.embedding.tidb_model = "built-in"
+        mock_settings_cls.return_value = settings
+
+        dev_row = _agent_row("developer")
+        qa_row = _agent_row("qa_main", "kimi")
+
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = {
+            "id": 1,
+            "repo_path": "/tmp",
+        }
+
+        def get_agent_side(pid, role):
+            if role == "developer":
+                return dev_row
+            if role == "qa_main":
+                return qa_row
+            return None
+
+        mock_store.get_agent.side_effect = get_agent_side
+        mock_store.create_work_item.return_value = 42
+        mock_store_cls.return_value = mock_store
+
+        proc = MagicMock()
+        proc.pid = 12345
+        mock_popen.return_value = proc
+
+        run_work("proj", "do stuff", background=True, skip_ga_test=True)
+
+        args, _kwargs = mock_popen.call_args
+        assert "--skip-ga-test" in args[0]
+        assert mock_store.create_work_item.call_args.kwargs["metadata_json"] == {
+            "work_mode": "full",
+            "skip_ga_test": True,
+        }
 
     @patch("myswat.cli.work_cmd.WorkflowEngine")
     @patch("myswat.cli.work_cmd.MySwatSettings")

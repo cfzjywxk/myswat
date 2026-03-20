@@ -828,6 +828,29 @@ class TestCommandRouting:
 
     @patch("myswat.cli.main._follow_work_item_until_terminal")
     @patch("myswat.server.control_client.DaemonClient")
+    def test_work_command_skip_ga_test(self, mock_client_cls, mock_follow):
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
+
+        mock_client = MagicMock()
+        mock_client.base_url = "http://127.0.0.1:8765"
+        mock_client.submit_work.return_value = {"work_item_id": 47, "workers": ["architect", "developer", "qa_main"]}
+        mock_client_cls.return_value = mock_client
+        mock_follow.return_value = {"status": "completed"}
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["work", "add feature", "--project", "proj", "--skip-ga-test"])
+        assert result.exit_code == 0
+        mock_client.submit_work.assert_called_once_with(
+            workdir=None,
+            mode="full",
+            project="proj",
+            requirement="add feature",
+            skip_ga_test=True,
+        )
+
+    @patch("myswat.cli.main._follow_work_item_until_terminal")
+    @patch("myswat.server.control_client.DaemonClient")
     def test_work_command_mode_aliases(self, mock_client_cls, mock_follow):
         from typer.testing import CliRunner
         from myswat.cli.main import app
@@ -870,6 +893,19 @@ class TestCommandRouting:
         )
         assert result.exit_code != 0
         assert result.exception is not None
+        mock_client_cls.return_value.submit_work.assert_not_called()
+
+    @patch("myswat.server.control_client.DaemonClient")
+    def test_work_command_rejects_skip_ga_test_for_non_full_mode(self, mock_client_cls):
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
+
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["work", "add feature", "--project", "proj", "--test", "--skip-ga-test"],
+        )
+        assert result.exit_code != 0
         mock_client_cls.return_value.submit_work.assert_not_called()
 
     @patch("myswat.cli.main._follow_work_item_until_terminal")
@@ -1015,6 +1051,34 @@ class TestCommandRouting:
             work_item_id=42,
             workdir=None,
             mode=WorkMode.develop,
+        )
+
+    @patch("myswat.cli.work_cmd.run_background_work_item")
+    def test_work_background_worker_command_skip_ga_test(self, mock_run_background_work_item):
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
+
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            [
+                "work-background-worker",
+                "add feature",
+                "--project",
+                "proj",
+                "--work-item-id",
+                "42",
+                "--skip-ga-test",
+            ],
+        )
+        assert result.exit_code == 0
+        mock_run_background_work_item.assert_called_once_with(
+            "proj",
+            "add feature",
+            work_item_id=42,
+            workdir=None,
+            mode=WorkMode.full,
+            skip_ga_test=True,
         )
 
     @patch("myswat.server.control_client.DaemonClient")

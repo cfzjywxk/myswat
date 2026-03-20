@@ -584,6 +584,8 @@ class MySwatDaemon:
             mode = str(payload.get("mode") or WorkMode.full.value)
             if mode:
                 parts.append(f"mode={mode}")
+            if payload.get("skip_ga_test"):
+                parts.append("skip_ga_test=true")
             requirement = _clip_for_log(payload.get("requirement") or "", limit=100)
             if requirement:
                 parts.append(f'requirement="{requirement}"')
@@ -692,6 +694,7 @@ class MySwatDaemon:
         requirement: str,
         workdir: str | None,
         mode: WorkMode,
+        skip_ga_test: bool = False,
     ) -> int:
         project = self._store.get_project_by_slug(project_slug)
         if not project:
@@ -706,18 +709,22 @@ class MySwatDaemon:
             else None
         )
 
+        item_metadata: dict[str, object] = {
+            "work_mode": mode.value,
+            "execution_mode": "daemon",
+            "submitted_via": "daemon_api",
+            "requested_workdir": workdir,
+        }
+        if skip_ga_test:
+            item_metadata["skip_ga_test"] = True
+
         work_item_id = self._store.create_work_item(
             project_id=project_id,
             title=requirement[:200],
             description=requirement,
             item_type="design" if mode == WorkMode.design else "code_change",
             assigned_agent_id=int((architect or developer)["id"]),
-            metadata_json={
-                "work_mode": mode.value,
-                "execution_mode": "daemon",
-                "submitted_via": "daemon_api",
-                "requested_workdir": workdir,
-            },
+            metadata_json=item_metadata,
         )
         self._store.update_work_item_state(
             work_item_id,
@@ -743,6 +750,7 @@ class MySwatDaemon:
         work_item_id: int,
         workdir: str | None,
         mode: WorkMode,
+        skip_ga_test: bool = False,
     ) -> None:
         cancel_event = threading.Event()
 
@@ -756,6 +764,7 @@ class MySwatDaemon:
                     show_monitor=False,
                     background_worker=False,
                     mode=mode,
+                    skip_ga_test=skip_ga_test,
                     auto_approve=True,
                     external_cancel_event=cancel_event,
                     emit_console_output=False,
@@ -808,8 +817,11 @@ class MySwatDaemon:
         requirement: str,
         workdir: str | None,
         mode: str,
+        skip_ga_test: bool = False,
     ) -> dict:
         work_mode = WorkMode(mode)
+        if skip_ga_test and work_mode != WorkMode.full:
+            raise ValueError("--skip-ga-test is only supported for full workflow mode.")
         with self._lock:
             active_item = self._find_active_work_item(project)
             if active_item is not None:
@@ -823,6 +835,7 @@ class MySwatDaemon:
                 requirement=requirement,
                 workdir=workdir,
                 mode=work_mode,
+                skip_ga_test=skip_ga_test,
             )
             self._start_workflow_thread(
                 project_slug=project,
@@ -830,12 +843,14 @@ class MySwatDaemon:
                 work_item_id=work_item_id,
                 workdir=workdir,
                 mode=work_mode,
+                skip_ga_test=skip_ga_test,
             )
         LOGGER.info(
-            'Workflow queued: project=%s work_item_id=%s mode=%s workers=%s requirement="%s"',
+            'Workflow queued: project=%s work_item_id=%s mode=%s skip_ga_test=%s workers=%s requirement="%s"',
             project,
             work_item_id,
             work_mode.value,
+            str(skip_ga_test).lower(),
             ",".join(roles) if roles else "-",
             _clip_for_log(requirement, limit=120),
         )
@@ -1185,6 +1200,7 @@ class MySwatDaemon:
                             requirement=str(payload.get("requirement") or ""),
                             workdir=payload.get("workdir"),
                             mode=str(payload.get("mode") or WorkMode.full.value),
+                            skip_ga_test=bool(payload.get("skip_ga_test")),
                         )
                         self._write_json(200, result)
                         self._log_slow_request(path=parsed.path, status=200, started_at=started_at, payload=payload)

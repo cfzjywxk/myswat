@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from myswat.server.contracts import ReviewVerdictEnvelope, StageRunCompletion
-from myswat.workflow.kernel import WorkflowKernel, _extract_json_block
+from myswat.workflow.kernel import PhaseResult, WorkflowKernel, _extract_json_block
 from myswat.workflow.modes import WorkMode
 from myswat.workflow.runtime import WorkflowRuntime
 
@@ -192,6 +192,31 @@ def test_develop_mode_queues_plan_phase_and_final_report():
     assert result.final_report == "Final report text"
     assert service.start_stage_run.call_count == 3
     assert service.request_review.call_count == 2
+
+
+def test_kernel_keeps_split_review_limits_separate():
+    kernel = WorkflowKernel(
+        store=_store(),
+        service=_service(),
+        dev=_participant(10, "developer"),
+        qas=[_participant(20, "qa_main")],
+        arch=_participant(30, "architect"),
+        project_id=1,
+        work_item_id=7,
+        design_plan_review_limit=1,
+        dev_plan_review_limit=2,
+        dev_code_review_limit=3,
+        ga_plan_review_limit=4,
+        ga_test_review_limit=5,
+    )
+
+    assert kernel._review_limit_for("design_review") == 1
+    assert kernel._review_limit_for("plan_review") == 2
+    assert kernel._review_limit_for("phase_1_review") == 3
+    assert kernel._review_limit_for("test_plan_review") == 4
+    assert kernel._review_limit_for("ga_test_review") == 5
+    assert kernel._review_limit_for("misc_review") == 5
+    assert kernel._max_review == 5
 
 
 def test_design_stage_and_review_prompts_include_requirement_and_design_context():
@@ -735,6 +760,55 @@ def test_test_mode_continues_after_review_limit_and_can_still_finish():
         call.kwargs.get("event_type") == "review_skipped"
         for call in store.append_work_item_process_event.call_args_list
     )
+
+
+def test_full_mode_can_skip_ga_test_by_request():
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+    arch = _participant(30, "architect")
+
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa],
+        arch=arch,
+        project_id=1,
+        work_item_id=16,
+        mode=WorkMode.full,
+        skip_ga_test=True,
+        auto_approve=True,
+    )
+
+    with patch.object(kernel, "_run_design", return_value=("design", True)):
+        with patch.object(kernel, "_run_plan", return_value=("plan", True)):
+            with patch.object(kernel, "_parse_phases", return_value=["Implementation"]):
+                with patch.object(
+                    kernel,
+                    "_run_phase",
+                    return_value=PhaseResult(name="Implementation", summary="done", committed=True),
+                ):
+                    with patch.object(kernel, "_run_test") as mock_run_test:
+                        with patch.object(kernel, "_generate_final_report", return_value="report") as mock_report:
+                            result = kernel.run("ship it")
+
+    mock_run_test.assert_not_called()
+    assert "GA test skipped by request." in mock_report.call_args.args[0]
+    store.update_work_item_state.assert_any_call(
+        16,
+        current_stage="ga_test_skipped",
+        latest_summary="GA test skipped by request.",
+        next_todos=["Generate final report"],
+    )
+    assert any(
+        call.kwargs.get("event_type") == "ga_test_skipped"
+        for call in store.append_work_item_process_event.call_args_list
+    )
+    assert result.success is True
+    assert result.ga_test is None
+    assert result.final_report == "report"
 
 
 def test_code_review_feedback_builds_phase_revision_prompt():

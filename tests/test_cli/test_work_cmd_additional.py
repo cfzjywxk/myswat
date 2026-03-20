@@ -224,6 +224,7 @@ def test_run_background_work_item_allows_design_mode(mock_run_workflow):
         show_monitor=False,
         background_worker=True,
         mode=WorkMode.design,
+        skip_ga_test=False,
         auto_approve=True,
     )
 

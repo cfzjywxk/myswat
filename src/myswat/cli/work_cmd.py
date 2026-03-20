@@ -21,7 +21,7 @@ from myswat.agents.base import AgentRunner
 from myswat.cli.prompting import create_prompt_session, make_prompt_callback
 from myswat.cli.progress import TaskMonitorPromptBridge, _run_with_task_monitor
 from myswat.cli.workflow_display import WorkflowDisplay
-from myswat.config.settings import MySwatSettings
+from myswat.config.settings import MySwatSettings, get_workflow_review_limit
 from myswat.db.connection import TiDBPool
 from myswat.db.schema import ensure_schema
 from myswat.memory.learn_triggers import submit_workflow_summary_learn_request
@@ -299,6 +299,7 @@ def _run_workflow(
     show_monitor: bool,
     background_worker: bool,
     mode: WorkMode = WorkMode.full,
+    skip_ga_test: bool = False,
     auto_approve: bool = True,
     resume: int | None = None,
     mode_explicit: bool = False,
@@ -336,6 +337,7 @@ def _run_workflow(
                 item_metadata = {}
 
         stored_mode = item_metadata.get("work_mode")
+        skip_ga_test = bool(item_metadata.get("skip_ga_test"))
         if stored_mode:
             if stored_mode in {m.value for m in INTERNAL_WORK_MODES}:
                 console.print(
@@ -372,13 +374,16 @@ def _run_workflow(
     arch_agent = _get_architect_agent(store, proj["id"]) if mode in {WorkMode.full, WorkMode.design} else None
 
     if work_item_id is None:
+        item_metadata: dict[str, object] = {"work_mode": mode.value}
+        if skip_ga_test:
+            item_metadata["skip_ga_test"] = True
         work_item_id = store.create_work_item(
             project_id=proj["id"],
             title=requirement[:200],
             description=requirement,
             item_type="design" if mode == WorkMode.design else "code_change",
             assigned_agent_id=arch_agent["id"] if arch_agent else dev_agent["id"],
-            metadata_json={"work_mode": mode.value},
+            metadata_json=item_metadata,
         )
     else:
         existing_item = store.get_work_item(work_item_id)
@@ -491,7 +496,27 @@ def _run_workflow(
         project_id=proj["id"],
         work_item_id=work_item_id,
         mode=mode,
-        max_review_iterations=settings.workflow.max_review_iterations,
+        skip_ga_test=skip_ga_test,
+        design_plan_review_limit=get_workflow_review_limit(
+            settings.workflow,
+            "design_plan_review_limit",
+        ),
+        dev_plan_review_limit=get_workflow_review_limit(
+            settings.workflow,
+            "dev_plan_review_limit",
+        ),
+        dev_code_review_limit=get_workflow_review_limit(
+            settings.workflow,
+            "dev_code_review_limit",
+        ),
+        ga_plan_review_limit=get_workflow_review_limit(
+            settings.workflow,
+            "ga_plan_review_limit",
+        ),
+        ga_test_review_limit=get_workflow_review_limit(
+            settings.workflow,
+            "ga_test_review_limit",
+        ),
         auto_approve=(background_worker or auto_approve),
         should_cancel=_should_cancel,
         resume_stage=resume_stage,
@@ -603,18 +628,22 @@ def _launch_background_work(
     *,
     workdir: str | None = None,
     mode: WorkMode = WorkMode.full,
+    skip_ga_test: bool = False,
 ) -> int:
     settings, store, proj, effective_workdir = _load_project_context(project_slug, workdir)
     dev_agent, _qa_agents = _get_workflow_agents(store, proj["id"])
     arch_agent = _get_architect_agent(store, proj["id"]) if mode in {WorkMode.full, WorkMode.design} else None
 
+    item_metadata: dict[str, object] = {"work_mode": mode.value}
+    if skip_ga_test:
+        item_metadata["skip_ga_test"] = True
     work_item_id = store.create_work_item(
         project_id=proj["id"],
         title=requirement[:200],
         description=requirement,
         item_type="design" if mode == WorkMode.design else "code_change",
         assigned_agent_id=arch_agent["id"] if arch_agent else dev_agent["id"],
-        metadata_json={"work_mode": mode.value},
+        metadata_json=item_metadata,
     )
     log_path, pid_path = _background_runtime_paths(settings, project_slug, work_item_id)
 
@@ -656,6 +685,8 @@ def _launch_background_work(
         "--mode",
         mode.value,
     ]
+    if skip_ga_test:
+        command.append("--skip-ga-test")
     if effective_workdir:
         command.extend(["--workdir", effective_workdir])
 
@@ -724,8 +755,11 @@ def run_background_work_item(
     work_item_id: int,
     workdir: str | None = None,
     mode: WorkMode = WorkMode.full,
+    skip_ga_test: bool = False,
 ) -> None:
     """Entry point for the detached workflow worker."""
+    if skip_ga_test and mode != WorkMode.full:
+        raise typer.BadParameter("--skip-ga-test can only be used with the full workflow.")
     _run_workflow(
         project_slug,
         requirement,
@@ -734,6 +768,7 @@ def run_background_work_item(
         show_monitor=False,
         background_worker=True,
         mode=mode,
+        skip_ga_test=skip_ga_test,
         auto_approve=True,
     )
 
@@ -744,13 +779,22 @@ def run_work(
     workdir: str | None = None,
     background: bool = False,
     mode: WorkMode = WorkMode.full,
+    skip_ga_test: bool = False,
     auto_approve: bool = True,
     resume: int | None = None,
     mode_explicit: bool = False,
 ) -> None:
     """Run the full teamwork workflow."""
+    if skip_ga_test and mode != WorkMode.full:
+        raise typer.BadParameter("--skip-ga-test can only be used with the full workflow.")
     if background:
-        _launch_background_work(project_slug, requirement, workdir=workdir, mode=mode)
+        _launch_background_work(
+            project_slug,
+            requirement,
+            workdir=workdir,
+            mode=mode,
+            skip_ga_test=skip_ga_test,
+        )
         return
 
     _run_workflow(
@@ -760,6 +804,7 @@ def run_work(
         show_monitor=True,
         background_worker=False,
         mode=mode,
+        skip_ga_test=skip_ga_test,
         auto_approve=auto_approve,
         resume=resume,
         mode_explicit=mode_explicit,

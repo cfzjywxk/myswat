@@ -12,7 +12,7 @@ from myswat.agents.base import AgentRunner
 from myswat.agents.factory import make_runner_from_row
 from myswat.agents.session_manager import SessionManager
 from myswat.cli.progress import _fmt_duration, _run_with_task_monitor, _send_with_timer
-from myswat.config.settings import MySwatSettings
+from myswat.config.settings import MySwatSettings, get_workflow_review_limit
 from myswat.db.connection import TiDBPool
 from myswat.db.schema import ensure_schema
 from myswat.memory.learn_triggers import submit_workflow_summary_learn_request
@@ -214,7 +214,10 @@ def run_with_review(
                 task=task,
                 project_id=proj["id"],
                 work_item_id=work_item_id,
-                max_iterations=settings.workflow.max_review_iterations,
+                max_iterations=get_workflow_review_limit(
+                    settings.workflow,
+                    "dev_code_review_limit",
+                ),
                 should_cancel=cancel_event.is_set,
             )
 
