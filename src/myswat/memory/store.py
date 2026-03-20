@@ -2981,7 +2981,8 @@ class MemoryStore:
         status: str | None = None,
         claimed_by_runtime_id: int | None = None,
         lease_expires_at: datetime | None = None,
-    ) -> None:
+        only_if_active: bool = False,
+    ) -> bool:
         assignments = [
             "verdict = %s",
             "verdict_json = %s",
@@ -3004,11 +3005,15 @@ class MemoryStore:
             args.append(lease_expires_at)
         if status in {"completed", "blocked", "cancelled"}:
             assignments.append("completed_at = NOW()")
+        where_clauses = ["id = %s"]
+        if only_if_active:
+            where_clauses.append("status NOT IN ('completed', 'blocked', 'cancelled')")
         args.append(cycle_id)
-        self._pool.execute(
-            f"UPDATE review_cycles SET {', '.join(assignments)} WHERE id = %s",
+        updated = self._pool.execute(
+            f"UPDATE review_cycles SET {', '.join(assignments)} WHERE {' AND '.join(where_clauses)}",
             tuple(args),
         )
+        return updated == 1
 
     def get_review_cycle(self, cycle_id: int) -> dict | None:
         row = self._pool.fetch_one(
@@ -3071,6 +3076,70 @@ class MemoryStore:
         )
         return updated == 1
 
+    def list_recent_review_history(
+        self,
+        *,
+        work_item_id: int,
+        stage_name: str,
+        before_iteration: int,
+        round_limit: int = 3,
+    ) -> list[dict]:
+        """Fallback review-history query for callers that do not keep an in-memory cache."""
+        if not stage_name or before_iteration <= 1 or round_limit <= 0:
+            return []
+        rows = self._pool.fetch_all(
+            "SELECT * FROM review_cycles "
+            "WHERE work_item_id = %s AND stage_name = %s AND iteration < %s "
+            "AND status IN ('completed', 'blocked', 'cancelled') "
+            "AND verdict IN ('lgtm', 'changes_requested', 'failed') "
+            "ORDER BY iteration DESC, reviewer_role ASC, id ASC",
+            (
+                work_item_id,
+                stage_name,
+                before_iteration,
+            ),
+        )
+        limited_rows: list[dict] = []
+        iterations: set[int] = set()
+        for row in rows:
+            iteration = int(row.get("iteration") or 0)
+            if iteration <= 0:
+                continue
+            if iteration not in iterations and len(iterations) >= round_limit:
+                continue
+            iterations.add(iteration)
+            if row.get("task_json") is not None:
+                row["task_json"] = self._parse_json_field(row["task_json"])
+            if row.get("verdict_json") is not None:
+                row["verdict_json"] = self._parse_json_field(row["verdict_json"])
+            limited_rows.append(row)
+        return limited_rows
+
+    def cancel_review_cycles_by_ids(
+        self,
+        cycle_ids: list[int],
+        *,
+        summary: str,
+        status: str = "cancelled",
+    ) -> int:
+        if not cycle_ids:
+            return 0
+        verdict_json = json.dumps(
+            {
+                "verdict": "cancelled",
+                "issues": [],
+                "summary": summary[:4000],
+            }
+        )
+        placeholders = ", ".join(["%s"] * len(cycle_ids))
+        updated = self._pool.execute(
+            f"UPDATE review_cycles SET status = %s, verdict = %s, verdict_json = %s, "
+            f"completed_at = NOW(), lease_expires_at = NULL "
+            f"WHERE id IN ({placeholders}) AND status NOT IN ('completed', 'blocked', 'cancelled')",
+            (status, "cancelled", verdict_json, *cycle_ids),
+        )
+        return int(updated or 0)
+
     def cancel_open_review_cycles(
         self,
         work_item_id: int,
@@ -3080,7 +3149,7 @@ class MemoryStore:
     ) -> None:
         verdict_json = json.dumps(
             {
-                "verdict": status,
+                "verdict": "cancelled",
                 "issues": [],
                 "summary": summary[:4000],
             }
@@ -3089,7 +3158,7 @@ class MemoryStore:
             "UPDATE review_cycles SET status = %s, verdict = %s, verdict_json = %s, "
             "completed_at = NOW(), lease_expires_at = NULL "
             "WHERE work_item_id = %s AND status NOT IN ('completed', 'blocked', 'cancelled')",
-            (status, status, verdict_json, work_item_id),
+            (status, "cancelled", verdict_json, work_item_id),
         )
 
     def get_review_cycles(self, work_item_id: int) -> list[dict]:

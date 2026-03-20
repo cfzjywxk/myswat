@@ -7,6 +7,8 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 import myswat.server.service as service_module
 from myswat.memory.store import MemoryStore
 from myswat.models.workflow_runtime import StageRun
@@ -17,9 +19,12 @@ from myswat.server.contracts import (
     DecisionPersistenceRequest,
     KnowledgeSearchRequest,
     RecentArtifactsRequest,
+    ReviewCycleCancellationRequest,
     ReviewCycleLeaseRenewalRequest,
+    ReviewFailureSubmission,
     ReviewRequest,
     ReviewVerdictSubmission,
+    ReviewWaitRequest,
     RuntimeRegistrationRequest,
     RuntimeStatusUpdateRequest,
     StageRunLeaseRenewalRequest,
@@ -504,6 +509,352 @@ def test_claim_next_assignment_preserves_large_context_details_for_worker_extern
     assert "KNOWLEDGE-TAIL-MARKER" in result.system_context
 
 
+def test_claim_next_assignment_review_includes_prior_review_history(monkeypatch):
+    monkeypatch.setattr(service_module, "_SYSTEM_CONTEXT_REVIEW_HISTORY_TEXT_LIMIT", 96)
+
+    store = Mock(spec=MemoryStore)
+    store.claim_stage_run.return_value = None
+    store.claim_review_cycle.return_value = {
+        "id": 88,
+        "work_item_id": 17,
+        "artifact_id": 42,
+        "stage_name": "plan_review",
+        "reviewer_agent_id": 4,
+        "reviewer_role": "qa_main",
+        "iteration": 3,
+        "task_json": {
+            "task_prompt": "Review the plan",
+            "task_focus": "rollback safety",
+        },
+    }
+    store.get_artifact.return_value = {"id": 42, "title": "Implementation plan", "content": "artifact body"}
+    store.get_work_item.return_value = {"id": 17, "project_id": 1}
+    store.get_project.return_value = {"id": 1, "name": "proj", "repo_path": "/tmp/repo"}
+    store.get_work_item_state.return_value = {}
+    store.list_artifacts.return_value = []
+    store.list_coordination_events.return_value = []
+    store.search_knowledge.return_value = []
+    store.get_review_cycles.return_value = [
+        {
+            "id": 1,
+            "work_item_id": 17,
+            "stage_name": "plan_review",
+            "status": "completed",
+            "iteration": 2,
+            "reviewer_role": "qa_main",
+            "verdict": "changes_requested",
+            "verdict_json": {
+                "summary": ("summary-body " * 20) + "SUMMARY-TAIL-MARKER",
+                "issues": [("issue-body " * 20) + "ISSUE-TAIL-MARKER"],
+            },
+        },
+        {
+            "id": 2,
+            "work_item_id": 17,
+            "stage_name": "plan_review",
+            "status": "completed",
+            "iteration": 2,
+            "reviewer_role": "security",
+            "verdict": "lgtm",
+            "verdict_json": {
+                "summary": "Looks safe.",
+                "issues": [],
+            },
+        },
+        {
+            "id": 3,
+            "work_item_id": 17,
+            "stage_name": "plan_review",
+            "status": "completed",
+            "iteration": 1,
+            "reviewer_role": "qa_main",
+            "verdict": "changes_requested",
+            "verdict_json": {
+                "summary": "Need a rollback step.",
+                "issues": ["Add rollback documentation."],
+            },
+        },
+    ]
+    service = MySwatToolService(store)
+
+    result = service.claim_next_assignment(
+        ClaimNextAssignmentRequest(
+            project_id=1,
+            agent_role="qa_main",
+            runtime_registration_id=91,
+        )
+    )
+
+    assert result.assignment_kind == "review"
+    assert "## Prior Review Rounds For This Stage" in result.system_context
+    assert "Iteration 2 / qa_main / changes_requested" in result.system_context
+    assert "Iteration 2 / security / lgtm" in result.system_context
+    assert "Iteration 1 / qa_main / changes_requested" in result.system_context
+    assert "SUMMARY-TAIL-MARKER" in result.system_context
+    assert "ISSUE-TAIL-MARKER" in result.system_context
+    store.get_review_cycles.assert_called_once_with(17)
+
+
+def test_claim_next_assignment_first_review_round_skips_prior_review_history_lookup():
+    store = Mock(spec=MemoryStore)
+    store.claim_stage_run.return_value = None
+    store.claim_review_cycle.return_value = {
+        "id": 89,
+        "work_item_id": 17,
+        "artifact_id": 42,
+        "stage_name": "plan_review",
+        "reviewer_agent_id": 4,
+        "reviewer_role": "qa_main",
+        "iteration": 1,
+        "task_json": {
+            "task_prompt": "Review the plan",
+            "task_focus": "rollback safety",
+        },
+    }
+    store.get_artifact.return_value = {"id": 42, "title": "Implementation plan", "content": "artifact body"}
+    store.get_work_item.return_value = {"id": 17, "project_id": 1}
+    store.get_project.return_value = {"id": 1, "name": "proj", "repo_path": "/tmp/repo"}
+    store.get_work_item_state.return_value = {}
+    store.list_artifacts.return_value = []
+    store.list_coordination_events.return_value = []
+    store.search_knowledge.return_value = []
+    service = MySwatToolService(store)
+
+    result = service.claim_next_assignment(
+        ClaimNextAssignmentRequest(
+            project_id=1,
+            agent_role="qa_main",
+            runtime_registration_id=91,
+        )
+    )
+
+    assert result.assignment_kind == "review"
+    assert "## Prior Review Rounds For This Stage" not in result.system_context
+    store.get_review_cycles.assert_not_called()
+
+
+def test_claim_next_assignment_reuses_cached_review_history_for_later_rounds():
+    store = Mock(spec=MemoryStore)
+    store.claim_stage_run.return_value = None
+    store.claim_review_cycle.side_effect = [
+        {
+            "id": 88,
+            "work_item_id": 17,
+            "artifact_id": 42,
+            "stage_name": "plan_review",
+            "reviewer_agent_id": 4,
+            "reviewer_role": "qa_main",
+            "iteration": 3,
+            "task_json": {
+                "task_prompt": "Review the plan",
+                "task_focus": "rollback safety",
+            },
+        },
+        {
+            "id": 89,
+            "work_item_id": 17,
+            "artifact_id": 43,
+            "stage_name": "plan_review",
+            "reviewer_agent_id": 4,
+            "reviewer_role": "qa_main",
+            "iteration": 4,
+            "task_json": {
+                "task_prompt": "Review the revised plan",
+                "task_focus": "rollback safety",
+            },
+        },
+    ]
+    store.get_artifact.side_effect = [
+        {"id": 42, "title": "Implementation plan", "content": "artifact body"},
+        {"id": 43, "title": "Implementation plan", "content": "artifact body v2"},
+    ]
+    store.get_work_item.return_value = {"id": 17, "project_id": 1}
+    store.get_project.return_value = {"id": 1, "name": "proj", "repo_path": "/tmp/repo"}
+    store.get_work_item_state.return_value = {}
+    store.list_artifacts.return_value = []
+    store.list_coordination_events.return_value = []
+    store.search_knowledge.return_value = []
+    store.get_review_cycles.return_value = [
+        {
+            "id": 1,
+            "work_item_id": 17,
+            "stage_name": "plan_review",
+            "status": "completed",
+            "iteration": 2,
+            "reviewer_role": "qa_main",
+            "verdict": "changes_requested",
+            "verdict_json": {
+                "summary": "Need a rollback step.",
+                "issues": ["Add rollback documentation."],
+            },
+        }
+    ]
+    service = MySwatToolService(store)
+
+    first = service.claim_next_assignment(
+        ClaimNextAssignmentRequest(
+            project_id=1,
+            agent_role="qa_main",
+            runtime_registration_id=91,
+        )
+    )
+    second = service.claim_next_assignment(
+        ClaimNextAssignmentRequest(
+            project_id=1,
+            agent_role="qa_main",
+            runtime_registration_id=92,
+        )
+    )
+
+    assert "Iteration 2 / qa_main / changes_requested" in first.system_context
+    assert "Iteration 2 / qa_main / changes_requested" in second.system_context
+    store.get_review_cycles.assert_called_once_with(17)
+
+
+def test_claim_next_assignment_warms_review_history_cache_for_all_stages_from_one_fetch():
+    store = Mock(spec=MemoryStore)
+    store.claim_stage_run.return_value = None
+    store.claim_review_cycle.side_effect = [
+        {
+            "id": 88,
+            "work_item_id": 17,
+            "artifact_id": 42,
+            "stage_name": "plan_review",
+            "reviewer_agent_id": 4,
+            "reviewer_role": "qa_main",
+            "iteration": 3,
+            "task_json": {
+                "task_prompt": "Review the plan",
+                "task_focus": "rollback safety",
+            },
+        },
+        {
+            "id": 89,
+            "work_item_id": 17,
+            "artifact_id": 43,
+            "stage_name": "design_review",
+            "reviewer_agent_id": 5,
+            "reviewer_role": "architect",
+            "iteration": 3,
+            "task_json": {
+                "task_prompt": "Review the design",
+                "task_focus": "rollback safety",
+            },
+        },
+    ]
+    store.get_artifact.side_effect = [
+        {"id": 42, "title": "Implementation plan", "content": "artifact body"},
+        {"id": 43, "title": "Technical design", "content": "design artifact"},
+    ]
+    store.get_work_item.return_value = {"id": 17, "project_id": 1}
+    store.get_project.return_value = {"id": 1, "name": "proj", "repo_path": "/tmp/repo"}
+    store.get_work_item_state.return_value = {}
+    store.list_artifacts.return_value = []
+    store.list_coordination_events.return_value = []
+    store.search_knowledge.return_value = []
+    store.get_review_cycles.return_value = [
+        {
+            "id": 1,
+            "work_item_id": 17,
+            "stage_name": "plan_review",
+            "status": "completed",
+            "iteration": 2,
+            "reviewer_role": "qa_main",
+            "verdict": "changes_requested",
+            "verdict_json": {
+                "summary": "Need a rollback step.",
+                "issues": ["Add rollback documentation."],
+            },
+        },
+        {
+            "id": 2,
+            "work_item_id": 17,
+            "stage_name": "design_review",
+            "status": "completed",
+            "iteration": 2,
+            "reviewer_role": "architect",
+            "verdict": "lgtm",
+            "verdict_json": {
+                "summary": "Design looks good.",
+                "issues": [],
+            },
+        },
+    ]
+    service = MySwatToolService(store)
+
+    first = service.claim_next_assignment(
+        ClaimNextAssignmentRequest(
+            project_id=1,
+            agent_role="qa_main",
+            runtime_registration_id=91,
+        )
+    )
+    second = service.claim_next_assignment(
+        ClaimNextAssignmentRequest(
+            project_id=1,
+            agent_role="architect",
+            runtime_registration_id=92,
+        )
+    )
+
+    assert "Iteration 2 / qa_main / changes_requested" in first.system_context
+    assert "Iteration 2 / architect / lgtm" in second.system_context
+    store.get_review_cycles.assert_called_once_with(17)
+
+
+def test_review_history_cache_evicts_oldest_entry_when_bounded(monkeypatch):
+    monkeypatch.setattr(service_module, "_REVIEW_HISTORY_CACHE_MAX_ENTRIES", 2)
+
+    store = Mock(spec=MemoryStore)
+    store.get_review_cycles.side_effect = [
+        [
+            {
+                "id": 1,
+                "work_item_id": 17,
+                "stage_name": "plan_review",
+                "status": "completed",
+                "iteration": 1,
+                "reviewer_role": "qa_main",
+                "verdict": "lgtm",
+                "verdict_json": {"summary": "ok", "issues": []},
+            }
+        ],
+        [
+            {
+                "id": 2,
+                "work_item_id": 18,
+                "stage_name": "plan_review",
+                "status": "completed",
+                "iteration": 1,
+                "reviewer_role": "qa_main",
+                "verdict": "lgtm",
+                "verdict_json": {"summary": "ok", "issues": []},
+            }
+        ],
+        [
+            {
+                "id": 3,
+                "work_item_id": 19,
+                "stage_name": "plan_review",
+                "status": "completed",
+                "iteration": 1,
+                "reviewer_role": "qa_main",
+                "verdict": "lgtm",
+                "verdict_json": {"summary": "ok", "issues": []},
+            }
+        ],
+    ]
+    service = MySwatToolService(store)
+
+    assert service._get_recent_review_history(work_item_id=17, stage_name="plan_review", before_iteration=2, round_limit=3)
+    assert service._get_recent_review_history(work_item_id=18, stage_name="plan_review", before_iteration=2, round_limit=3)
+    assert service._get_recent_review_history(work_item_id=19, stage_name="plan_review", before_iteration=2, round_limit=3)
+
+    assert (17, "plan_review") not in service._review_history_cache
+    assert (18, "plan_review") in service._review_history_cache
+    assert (19, "plan_review") in service._review_history_cache
+
+
 def test_report_status_updates_task_state_and_process_log():
     store = Mock(spec=MemoryStore)
     store.append_work_item_process_event.return_value = {"type": "status_report"}
@@ -636,7 +987,168 @@ def test_publish_review_verdict_updates_cycle_and_work_item():
         review_session_id=None,
         status="completed",
         claimed_by_runtime_id=91,
+        only_if_active=True,
     )
+
+
+def test_wait_for_review_verdicts_returns_partial_result_on_failed_cycle():
+    store = Mock(spec=MemoryStore)
+    store.get_review_cycles_by_ids.return_value = [
+        {
+            "id": 88,
+            "reviewer_role": "qa_main",
+            "status": "blocked",
+            "verdict": "failed",
+            "verdict_json": {
+                "summary": "Reviewer crashed twice.",
+                "issues": [],
+            },
+        },
+        {
+            "id": 89,
+            "reviewer_role": "security",
+            "status": "claimed",
+            "verdict": "pending",
+            "verdict_json": None,
+        },
+    ]
+    service = MySwatToolService(store)
+
+    result = service.wait_for_review_verdicts(
+        ReviewWaitRequest(
+            cycle_ids=[88, 89],
+            timeout_seconds=1,
+            return_on_failed=True,
+        )
+    )
+
+    assert result == [
+        service_module.ReviewVerdictEnvelope(
+            cycle_id=88,
+            reviewer_role="qa_main",
+            verdict="failed",
+            issues=[],
+            summary="Reviewer crashed twice.",
+        )
+    ]
+
+
+def test_wait_for_review_verdicts_rejects_unknown_terminal_verdict():
+    store = Mock(spec=MemoryStore)
+    store.get_review_cycles_by_ids.return_value = [
+        {
+            "id": 88,
+            "reviewer_role": "qa_main",
+            "status": "completed",
+            "verdict": "timeout",
+            "verdict_json": {
+                "summary": "Timed out.",
+                "issues": [],
+            },
+        }
+    ]
+    service = MySwatToolService(store)
+
+    with pytest.raises(ValueError, match="Unsupported terminal review verdict"):
+        service.wait_for_review_verdicts(
+            ReviewWaitRequest(
+                cycle_ids=[88],
+                timeout_seconds=1,
+            )
+        )
+
+
+def test_publish_review_verdict_ignores_already_terminal_cycle():
+    store = Mock(spec=MemoryStore)
+    store.update_review_verdict.return_value = False
+    service = MySwatToolService(store)
+
+    result = service.publish_review_verdict(
+        ReviewVerdictSubmission(
+            cycle_id=88,
+            work_item_id=17,
+            reviewer_agent_id=4,
+            reviewer_role="qa_main",
+            verdict="lgtm",
+            summary="Looks good.",
+            runtime_registration_id=91,
+            stage="review",
+        )
+    )
+
+    assert result == {"ok": False, "ignored": True, "cycle_id": 88}
+    store.update_work_item_state.assert_not_called()
+    store.append_work_item_process_event.assert_not_called()
+
+
+def test_fail_review_cycle_marks_review_blocked_and_records_diagnostics():
+    store = Mock(spec=MemoryStore)
+    store.update_review_verdict.return_value = True
+    store.append_work_item_process_event.return_value = {"type": "review_failed"}
+    service = MySwatToolService(store)
+
+    result = service.fail_review_cycle(
+        ReviewFailureSubmission(
+            cycle_id=88,
+            work_item_id=17,
+            reviewer_agent_id=4,
+            reviewer_role="qa_main",
+            stage="plan_review",
+            runtime_registration_id=91,
+            summary="Reviewer returned malformed output twice.",
+            failure_kind="malformed_output",
+            attempts=2,
+            diagnostics={"attempt": 2, "stderr_tail": "traceback"},
+        )
+    )
+
+    assert result == {"type": "review_failed"}
+    store.update_review_verdict.assert_called_once_with(
+        cycle_id=88,
+        verdict="failed",
+        verdict_json={
+            "verdict": "failed",
+            "issues": [],
+            "summary": "Reviewer returned malformed output twice.",
+            "failure_kind": "malformed_output",
+            "attempts": 2,
+            "diagnostics": {"attempt": 2, "stderr_tail": "traceback"},
+        },
+        review_session_id=None,
+        status="blocked",
+        claimed_by_runtime_id=91,
+        only_if_active=True,
+    )
+    store.append_coordination_event.assert_called_once()
+
+
+def test_cancel_review_cycles_delegates_to_store_and_notifies_waiters():
+    store = Mock(spec=MemoryStore)
+    store.cancel_review_cycles_by_ids.return_value = 2
+    store.get_review_cycles_by_ids.return_value = []
+    service = MySwatToolService(store)
+    notified: list[int] = []
+    service._notifier.notify_review = lambda cycle_id: notified.append(cycle_id)
+
+    result = service.cancel_review_cycles(
+        ReviewCycleCancellationRequest(
+            cycle_ids=[88, 89, 88],
+            summary="Sibling review failed.",
+        )
+    )
+
+    assert result == {
+        "ok": True,
+        "updated": 2,
+        "cycle_ids": [88, 89],
+        "status": "cancelled",
+    }
+    store.cancel_review_cycles_by_ids.assert_called_once_with(
+        [88, 89, 88],
+        summary="Sibling review failed.",
+        status="cancelled",
+    )
+    assert notified == [88, 89]
 
 
 def test_renew_review_cycle_lease_delegates_to_store():

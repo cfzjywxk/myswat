@@ -52,7 +52,7 @@ class Artifact(BaseModel):
 
 class ReviewVerdict(BaseModel):
     """Structured verdict from a reviewer — validated on parse."""
-    verdict: str  # 'lgtm' or 'changes_requested'
+    verdict: str  # 'lgtm', 'changes_requested', or terminal 'failed'
     issues: list[str] = []
     summary: str = ""
 
@@ -69,7 +69,7 @@ class ReviewCycle(BaseModel):
     proposal_session_id: int | None = None
     review_session_id: int | None = None
     status: str = "pending"
-    verdict: str = "pending"  # 'pending', 'changes_requested', 'lgtm'
+    verdict: str = "pending"  # 'pending', 'changes_requested', 'lgtm', or terminal 'failed'
     task_json: dict[str, Any] | None = None
     verdict_json: ReviewVerdict | None = None
     claimed_by_runtime_id: int | None = None

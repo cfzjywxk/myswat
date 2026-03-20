@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -23,7 +24,9 @@ from myswat.server.contracts import (
     ProjectLookupRequest,
     ProjectLookupResult,
     RecentArtifactsRequest,
+    ReviewCycleCancellationRequest,
     ReviewCycleLeaseRenewalRequest,
+    ReviewFailureSubmission,
     ReviewRequest,
     ReviewRequestResult,
     ReviewVerdictEnvelope,
@@ -52,8 +55,13 @@ _SYSTEM_CONTEXT_SUMMARY_TEXT_LIMIT = 4_000
 _SYSTEM_CONTEXT_ARTIFACT_TEXT_LIMIT = 8_192
 _SYSTEM_CONTEXT_EVENT_TEXT_LIMIT = 2_000
 _SYSTEM_CONTEXT_KNOWLEDGE_TEXT_LIMIT = 2_000
+_SYSTEM_CONTEXT_REVIEW_HISTORY_ROUND_LIMIT = 3
+_SYSTEM_CONTEXT_REVIEW_HISTORY_ISSUE_LIMIT = 3
+_SYSTEM_CONTEXT_REVIEW_HISTORY_TEXT_LIMIT = 1_000
+_REVIEW_HISTORY_CACHE_MAX_ENTRIES = 256
 _TERMINAL_STAGE_STATUSES = frozenset({"completed", "blocked", "cancelled", "failed"})
 _TERMINAL_REVIEW_STATUSES = frozenset({"completed", "blocked", "cancelled"})
+_VISIBLE_REVIEW_VERDICTS = frozenset({"lgtm", "changes_requested", "failed"})
 
 
 @dataclass(frozen=True)
@@ -64,6 +72,7 @@ class _ContextBundle:
     artifacts: list[dict[str, Any]]
     events: list[Any]
     knowledge: list[dict[str, Any]]
+    review_history: list[dict[str, Any]]
 
 
 class _CoordinationNotifier:
@@ -193,6 +202,8 @@ class MySwatToolService:
     def __init__(self, store: MemoryStore) -> None:
         self._store = store
         self._notifier = _CoordinationNotifier()
+        self._review_history_cache: OrderedDict[tuple[int, str], list[dict[str, Any]]] = OrderedDict()
+        self._review_history_cache_lock = threading.Lock()
 
     @staticmethod
     def _stage_or_none(stage: str) -> str | None:
@@ -211,6 +222,7 @@ class MySwatToolService:
         return max(0.0, remaining)
 
     def notify_work_item_coordination_changed(self, work_item_id: int) -> None:
+        self._invalidate_review_history_cache_for_work_item(work_item_id)
         for stage_run in self._store.list_stage_runs(work_item_id):
             if stage_run.id is None:
                 continue
@@ -281,6 +293,8 @@ class MySwatToolService:
         work_item_id: int,
         stage_name: str | None,
         focus: str,
+        review_stage_name: str | None = None,
+        review_before_iteration: int | None = None,
     ) -> _ContextBundle:
         work_item = self._store.get_work_item(work_item_id) or {}
         project = self._store.get_project(int(work_item.get("project_id") or 0)) or {}
@@ -304,6 +318,14 @@ class MySwatToolService:
                 )
             except Exception:
                 knowledge = []
+        review_history: list[dict[str, Any]] = []
+        if review_stage_name and review_before_iteration and review_before_iteration > 1:
+            review_history = self._get_recent_review_history(
+                work_item_id=work_item_id,
+                stage_name=review_stage_name,
+                before_iteration=review_before_iteration,
+                round_limit=_SYSTEM_CONTEXT_REVIEW_HISTORY_ROUND_LIMIT,
+            )
         return _ContextBundle(
             work_item=work_item,
             project=project,
@@ -311,6 +333,7 @@ class MySwatToolService:
             artifacts=artifacts,
             events=events,
             knowledge=knowledge,
+            review_history=review_history,
         )
 
     def _build_system_context(
@@ -361,6 +384,36 @@ class MySwatToolService:
                 )
             parts.append("## Recent Coordination Events\n" + "\n".join(rendered))
 
+        if bundle.review_history:
+            rendered = []
+            for row in bundle.review_history:
+                verdict = str(row.get("verdict") or "pending")
+                reviewer_role = str(row.get("reviewer_role") or "reviewer")
+                iteration = int(row.get("iteration") or 0)
+                verdict_json = row.get("verdict_json") or {}
+                summary = str(verdict_json.get("summary") or "") if isinstance(verdict_json, dict) else ""
+                issues = (
+                    [str(item) for item in (verdict_json.get("issues") or [])]
+                    if isinstance(verdict_json, dict)
+                    else []
+                )
+                lines = [f"- Iteration {iteration} / {reviewer_role} / {verdict}"]
+                if summary.strip():
+                    lines.append(
+                        "  Summary: "
+                        + _clip_context_text(summary, _SYSTEM_CONTEXT_REVIEW_HISTORY_TEXT_LIMIT)
+                    )
+                clipped_issues = [
+                    _clip_context_text(issue, _SYSTEM_CONTEXT_REVIEW_HISTORY_TEXT_LIMIT)
+                    for issue in issues[:_SYSTEM_CONTEXT_REVIEW_HISTORY_ISSUE_LIMIT]
+                    if issue.strip()
+                ]
+                if clipped_issues:
+                    lines.append("  Issues:")
+                    lines.extend(f"  - {issue}" for issue in clipped_issues)
+                rendered.append("\n".join(lines))
+            parts.append("## Prior Review Rounds For This Stage\n" + "\n".join(rendered))
+
         if bundle.knowledge:
             rendered = []
             for row in bundle.knowledge:
@@ -371,6 +424,145 @@ class MySwatToolService:
             parts.append("## Relevant Project Knowledge\n" + "\n".join(rendered))
 
         return "\n\n".join(part for part in parts if part.strip())
+
+    @staticmethod
+    def _review_history_cache_key(work_item_id: int, stage_name: str | None) -> tuple[int, str] | None:
+        normalized_stage = str(stage_name or "").strip()
+        if work_item_id <= 0 or not normalized_stage:
+            return None
+        return (work_item_id, normalized_stage)
+
+    @staticmethod
+    def _review_history_row(cycle: dict[str, Any]) -> dict[str, Any] | None:
+        work_item_id = int(cycle.get("work_item_id") or 0)
+        stage_name = str(cycle.get("stage_name") or "").strip()
+        verdict = str(cycle.get("verdict") or "pending")
+        status = str(cycle.get("status") or "pending")
+        if (
+            work_item_id <= 0
+            or not stage_name
+            or status not in _TERMINAL_REVIEW_STATUSES
+            or verdict not in _VISIBLE_REVIEW_VERDICTS
+        ):
+            return None
+        normalized = dict(cycle)
+        normalized["work_item_id"] = work_item_id
+        normalized["stage_name"] = stage_name
+        normalized["iteration"] = int(cycle.get("iteration") or 0)
+        normalized["id"] = int(cycle.get("id") or 0)
+        normalized["reviewer_role"] = str(cycle.get("reviewer_role") or "")
+        normalized["verdict"] = verdict
+        verdict_json = cycle.get("verdict_json")
+        normalized["verdict_json"] = dict(verdict_json) if isinstance(verdict_json, dict) else {}
+        return normalized
+
+    @staticmethod
+    def _sort_review_history_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return sorted(
+            rows,
+            key=lambda row: (
+                -int(row.get("iteration") or 0),
+                str(row.get("reviewer_role") or ""),
+                int(row.get("id") or 0),
+            ),
+        )
+
+    def _invalidate_review_history_cache_for_work_item(self, work_item_id: int) -> None:
+        with self._review_history_cache_lock:
+            keys = [key for key in self._review_history_cache if key[0] == work_item_id]
+            for key in keys:
+                self._review_history_cache.pop(key, None)
+
+    def _invalidate_review_history_cache_for_cycle_rows(self, cycles: list[dict[str, Any]]) -> None:
+        work_item_ids = {int(cycle.get("work_item_id") or 0) for cycle in cycles if int(cycle.get("work_item_id") or 0) > 0}
+        for work_item_id in work_item_ids:
+            self._invalidate_review_history_cache_for_work_item(work_item_id)
+
+    def _store_review_history_cache_entry(
+        self,
+        key: tuple[int, str],
+        rows: list[dict[str, Any]],
+    ) -> None:
+        self._review_history_cache[key] = rows
+        self._review_history_cache.move_to_end(key)
+        while len(self._review_history_cache) > _REVIEW_HISTORY_CACHE_MAX_ENTRIES:
+            self._review_history_cache.popitem(last=False)
+
+    def _load_review_history_cache(self, *, work_item_id: int, stage_name: str) -> list[dict[str, Any]]:
+        key = self._review_history_cache_key(work_item_id, stage_name)
+        if key is None:
+            return []
+        with self._review_history_cache_lock:
+            cached = self._review_history_cache.get(key)
+            if cached is not None:
+                self._review_history_cache.move_to_end(key)
+                return list(cached)
+
+        grouped_rows: dict[str, list[dict[str, Any]]] = {}
+        for cycle in self._store.get_review_cycles(work_item_id):
+            normalized = self._review_history_row(cycle)
+            if normalized is None:
+                continue
+            grouped_rows.setdefault(normalized["stage_name"], []).append(normalized)
+        for cached_stage_name in list(grouped_rows):
+            grouped_rows[cached_stage_name] = self._sort_review_history_rows(grouped_rows[cached_stage_name])
+        grouped_rows.setdefault(stage_name, [])
+
+        with self._review_history_cache_lock:
+            for cached_stage_name, rows in grouped_rows.items():
+                cached_key = (work_item_id, cached_stage_name)
+                if cached_key not in self._review_history_cache:
+                    self._store_review_history_cache_entry(cached_key, rows)
+            cached = self._review_history_cache.get(key)
+            if cached is None:
+                self._store_review_history_cache_entry(key, [])
+                return []
+            self._review_history_cache.move_to_end(key)
+            return list(cached)
+
+    def _get_recent_review_history(
+        self,
+        *,
+        work_item_id: int,
+        stage_name: str,
+        before_iteration: int,
+        round_limit: int,
+    ) -> list[dict[str, Any]]:
+        if before_iteration <= 1 or round_limit <= 0:
+            return []
+        rows = self._load_review_history_cache(work_item_id=work_item_id, stage_name=stage_name)
+        selected_iterations: list[int] = []
+        selected_set: set[int] = set()
+        for row in rows:
+            iteration = int(row.get("iteration") or 0)
+            if iteration <= 0 or iteration >= before_iteration or iteration in selected_set:
+                continue
+            selected_iterations.append(iteration)
+            selected_set.add(iteration)
+            if len(selected_iterations) >= round_limit:
+                break
+        if not selected_set:
+            return []
+        return [dict(row) for row in rows if int(row.get("iteration") or 0) in selected_set]
+
+    def _cache_terminal_review_cycle(self, cycle_id: int) -> None:
+        cycle = self._store.get_review_cycle(cycle_id)
+        if not isinstance(cycle, dict):
+            return
+        normalized = self._review_history_row(cycle or {})
+        if normalized is None:
+            self._invalidate_review_history_cache_for_cycle_rows([cycle])
+            return
+        key = self._review_history_cache_key(normalized["work_item_id"], normalized["stage_name"])
+        if key is None:
+            return
+        with self._review_history_cache_lock:
+            cached = self._review_history_cache.get(key)
+            if cached is None:
+                return
+            updated_rows = [row for row in cached if int(row.get("id") or 0) != normalized["id"]]
+            updated_rows.append(normalized)
+            self._store_review_history_cache_entry(key, self._sort_review_history_rows(updated_rows))
 
     def register_runtime(self, request: RuntimeRegistrationRequest) -> RuntimeRegistrationResult:
         runtime_registration_id = self._store.register_runtime(
@@ -582,6 +774,8 @@ class MySwatToolService:
                 work_item_id=int(review["work_item_id"]),
                 stage_name=str(review.get("stage_name") or ""),
                 focus=focus,
+                review_stage_name=str(review.get("stage_name") or "") or None,
+                review_before_iteration=int(review.get("iteration") or 1),
             )
             return AssignmentEnvelope(
                 assignment_kind="review",
@@ -767,6 +961,28 @@ class MySwatToolService:
         )
         return ReviewRequestResult(cycle_id=cycle_id)
 
+    @staticmethod
+    def _review_verdict_envelope(cycle: dict[str, Any]) -> ReviewVerdictEnvelope | None:
+        verdict = str(cycle.get("verdict") or "pending")
+        status = str(cycle.get("status") or "pending")
+        if verdict == "pending" or status not in _TERMINAL_REVIEW_STATUSES:
+            return None
+        if verdict not in _VISIBLE_REVIEW_VERDICTS:
+            raise ValueError(
+                "Unsupported terminal review verdict: "
+                f"cycle_id={int(cycle.get('id') or 0)} verdict={verdict!r} status={status!r}"
+            )
+        verdict_json = cycle.get("verdict_json") or {}
+        issues = verdict_json.get("issues") if isinstance(verdict_json, dict) else []
+        summary = verdict_json.get("summary") if isinstance(verdict_json, dict) else ""
+        return ReviewVerdictEnvelope(
+            cycle_id=int(cycle["id"]),
+            reviewer_role=str(cycle.get("reviewer_role") or ""),
+            verdict=verdict,  # type: ignore[arg-type]
+            issues=[str(item) for item in (issues or [])],
+            summary=str(summary or ""),
+        )
+
     def wait_for_review_verdicts(
         self,
         request: ReviewWaitRequest,
@@ -777,27 +993,22 @@ class MySwatToolService:
             while True:
                 cycles = self._store.get_review_cycles_by_ids(request.cycle_ids)
                 if len(cycles) == len(request.cycle_ids):
-                    terminal = True
+                    all_terminal = True
                     verdicts: list[ReviewVerdictEnvelope] = []
+                    saw_failed = False
                     for cycle in cycles:
                         verdict = str(cycle.get("verdict") or "pending")
                         status = str(cycle.get("status") or "pending")
                         if verdict == "pending" or status not in _TERMINAL_REVIEW_STATUSES:
-                            terminal = False
-                            break
-                        verdict_json = cycle.get("verdict_json") or {}
-                        issues = verdict_json.get("issues") if isinstance(verdict_json, dict) else []
-                        summary = verdict_json.get("summary") if isinstance(verdict_json, dict) else ""
-                        verdicts.append(
-                            ReviewVerdictEnvelope(
-                                cycle_id=int(cycle["id"]),
-                                reviewer_role=str(cycle.get("reviewer_role") or ""),
-                                verdict=verdict,  # type: ignore[arg-type]
-                                issues=[str(item) for item in (issues or [])],
-                                summary=str(summary or ""),
-                            )
-                        )
-                    if terminal:
+                            all_terminal = False
+                            continue
+                        envelope = self._review_verdict_envelope(cycle)
+                        if envelope is None:
+                            continue
+                        verdicts.append(envelope)
+                        if envelope.verdict == "failed":
+                            saw_failed = True
+                    if all_terminal or (request.return_on_failed and saw_failed):
                         return verdicts
 
                 remaining = self._remaining_timeout(started_at, request.timeout_seconds)
@@ -817,14 +1028,17 @@ class MySwatToolService:
             "issues": request.issues,
             "summary": request.summary,
         }
-        self._store.update_review_verdict(
+        updated = self._store.update_review_verdict(
             cycle_id=request.cycle_id,
             verdict=request.verdict,
             verdict_json=verdict_json,
             review_session_id=request.review_session_id,
             status="completed",
             claimed_by_runtime_id=request.runtime_registration_id,
+            only_if_active=True,
         )
+        if not updated:
+            return {"ok": False, "ignored": True, "cycle_id": request.cycle_id}
         self._store.update_work_item_state(
             request.work_item_id,
             current_stage=self._stage_or_none(request.stage),
@@ -839,8 +1053,74 @@ class MySwatToolService:
             from_role=request.reviewer_role,
             updated_by_agent_id=request.reviewer_agent_id,
         )
+        self._cache_terminal_review_cycle(request.cycle_id)
         self._notifier.notify_review(request.cycle_id)
         return event
+
+    def fail_review_cycle(self, request: ReviewFailureSubmission) -> dict[str, Any]:
+        diagnostics = dict(request.diagnostics or {})
+        verdict_json = {
+            "verdict": "failed",
+            "issues": [],
+            "summary": request.summary,
+            "failure_kind": request.failure_kind,
+            "attempts": request.attempts,
+            "diagnostics": diagnostics,
+        }
+        updated = self._store.update_review_verdict(
+            cycle_id=request.cycle_id,
+            verdict="failed",
+            verdict_json=verdict_json,
+            review_session_id=None,
+            status="blocked",
+            claimed_by_runtime_id=request.runtime_registration_id,
+            only_if_active=True,
+        )
+        if not updated:
+            return {"ok": False, "ignored": True, "cycle_id": request.cycle_id}
+        self._store.update_work_item_state(
+            request.work_item_id,
+            current_stage=self._stage_or_none(request.stage),
+            latest_summary=request.summary,
+            open_issues=[],
+            updated_by_agent_id=request.reviewer_agent_id,
+        )
+        self._store.append_coordination_event(
+            work_item_id=request.work_item_id,
+            stage_name=self._stage_or_none(request.stage),
+            event_type="review_failed",
+            summary=request.summary,
+            from_agent_id=request.reviewer_agent_id,
+            from_role=request.reviewer_role,
+            payload_json=verdict_json,
+        )
+        event = self._store.append_work_item_process_event(
+            request.work_item_id,
+            event_type="review_failed",
+            summary=request.summary,
+            from_role=request.reviewer_role,
+            updated_by_agent_id=request.reviewer_agent_id,
+        )
+        self._cache_terminal_review_cycle(request.cycle_id)
+        self._notifier.notify_review(request.cycle_id)
+        return event
+
+    def cancel_review_cycles(self, request: ReviewCycleCancellationRequest) -> dict[str, Any]:
+        existing_cycles = self._store.get_review_cycles_by_ids(request.cycle_ids)
+        updated = self._store.cancel_review_cycles_by_ids(
+            request.cycle_ids,
+            summary=request.summary,
+            status=request.status,
+        )
+        self._invalidate_review_history_cache_for_cycle_rows(existing_cycles)
+        for cycle_id in dict.fromkeys(request.cycle_ids):
+            self._notifier.notify_review(cycle_id)
+        return {
+            "ok": True,
+            "updated": updated,
+            "cycle_ids": list(dict.fromkeys(request.cycle_ids)),
+            "status": request.status,
+        }
 
     def renew_review_cycle_lease(self, request: ReviewCycleLeaseRenewalRequest) -> None:
         renewed = self._store.renew_review_cycle_lease(

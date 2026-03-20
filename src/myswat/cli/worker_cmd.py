@@ -7,6 +7,8 @@ import logging
 import os
 import threading
 import time
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Callable
 
 import typer
@@ -23,14 +25,36 @@ from myswat.large_payloads import (
     resolve_externalized_value,
 )
 from myswat.memory.store import MemoryStore
+from myswat.models.work_item import ReviewVerdict
 from myswat.server.mcp_http_client import MCPHTTPClient
-from myswat.workflow.review_loop import _parse_verdict
+from myswat.workflow.review_parsing import (
+    parse_plain_text_lgtm_verdict,
+    parse_structured_review_verdict,
+)
 
 _RUNTIME_LEASE_SECONDS = 300
 _ASSIGNMENT_LEASE_SECONDS = 300
 _KEEPALIVE_INTERVAL_SECONDS = 60.0
+_REVIEW_MAX_ATTEMPTS = 2
+_REVIEW_DIAGNOSTIC_TEXT_LIMIT = 2_000
+_REVIEW_EXCEPTION_TEXT_LIMIT = 1_000
 
 LOGGER = logging.getLogger(__name__)
+
+
+class ReviewAttemptOutcome(Enum):
+    VALID_VERDICT = "valid_verdict"
+    RETRYABLE_FAILURE = "retryable_failure"
+    NONRETRYABLE_FAILURE = "nonretryable_failure"
+
+
+@dataclass
+class ReviewAttemptResult:
+    outcome: ReviewAttemptOutcome
+    verdict: ReviewVerdict | None = None
+    failure_kind: str | None = None
+    summary: str = ""
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 def _configure_logging() -> None:
@@ -111,6 +135,270 @@ def _resolve_runner_response_content(text: str) -> str:
     if stripped.startswith("```json"):
         return f"```json\n{rendered}\n```"
     return rendered
+
+
+def _clip_diagnostic_text(value: Any, *, limit: int) -> str:
+    text = str(value or "")
+    if limit <= 0 or len(text) <= limit:
+        return text
+    return text[-limit:]
+
+
+def _looks_nonretryable_review_failure(*parts: str) -> bool:
+    text = " ".join(part for part in parts if part).lower()
+    return any(
+        needle in text
+        for needle in (
+            "command not found",
+            "no such file or directory",
+            "permission denied",
+            "unknown model",
+            "model not found",
+            "invalid model",
+            "api key",
+            "authentication failed",
+            "unauthorized",
+            "forbidden",
+            "rate limit",
+            "quota",
+        )
+    )
+
+
+def _classify_review_attempt(
+    *,
+    response: Any | None = None,
+    resolved_content: str = "",
+    error: Exception | None = None,
+) -> ReviewAttemptResult:
+    diagnostics = {
+        "runner_exit_code": getattr(response, "exit_code", None),
+        "cancelled": bool(getattr(response, "cancelled", False)),
+        "stderr_tail": _clip_diagnostic_text(
+            getattr(response, "raw_stderr", ""),
+            limit=_REVIEW_DIAGNOSTIC_TEXT_LIMIT,
+        ),
+        "response_excerpt": _clip_diagnostic_text(
+            resolved_content or getattr(response, "content", ""),
+            limit=_REVIEW_DIAGNOSTIC_TEXT_LIMIT,
+        ),
+        "exception_type": type(error).__name__ if error is not None else "",
+        "exception_message": _clip_diagnostic_text(
+            str(error) if error is not None else "",
+            limit=_REVIEW_EXCEPTION_TEXT_LIMIT,
+        ),
+    }
+    if error is not None:
+        summary = diagnostics["exception_message"] or "Review execution raised an exception."
+        failure_kind = "environment_misconfiguration" if _looks_nonretryable_review_failure(summary) else "runner_exception"
+        return ReviewAttemptResult(
+            outcome=(
+                ReviewAttemptOutcome.RETRYABLE_FAILURE
+                if failure_kind != "environment_misconfiguration"
+                else ReviewAttemptOutcome.NONRETRYABLE_FAILURE
+            ),
+            failure_kind=failure_kind,
+            summary=summary,
+            diagnostics=diagnostics,
+        )
+
+    if bool(getattr(response, "cancelled", False)):
+        return ReviewAttemptResult(
+            outcome=ReviewAttemptOutcome.NONRETRYABLE_FAILURE,
+            failure_kind="cancelled",
+            summary="Review execution was cancelled.",
+            diagnostics=diagnostics,
+        )
+
+    verdict = parse_structured_review_verdict(resolved_content)
+    if verdict is None:
+        verdict = parse_plain_text_lgtm_verdict(
+            resolved_content,
+            summary_limit=_REVIEW_DIAGNOSTIC_TEXT_LIMIT,
+        )
+    if bool(getattr(response, "success", False)) and verdict is not None:
+        return ReviewAttemptResult(
+            outcome=ReviewAttemptOutcome.VALID_VERDICT,
+            verdict=verdict,
+            diagnostics=diagnostics,
+        )
+
+    response_excerpt = str(diagnostics["response_excerpt"] or "").strip()
+    stderr_tail = str(diagnostics["stderr_tail"] or "").strip()
+    failure_text = response_excerpt or stderr_tail
+    if bool(getattr(response, "success", False)):
+        summary = "Reviewer returned empty output." if not failure_text else "Reviewer returned malformed verdict output."
+        return ReviewAttemptResult(
+            outcome=ReviewAttemptOutcome.RETRYABLE_FAILURE,
+            failure_kind="malformed_output",
+            summary=summary,
+            diagnostics=diagnostics,
+        )
+
+    summary = failure_text or "Review execution failed."
+    failure_kind = "environment_misconfiguration" if _looks_nonretryable_review_failure(summary) else "execution_failed"
+    return ReviewAttemptResult(
+        outcome=(
+            ReviewAttemptOutcome.RETRYABLE_FAILURE
+            if failure_kind != "environment_misconfiguration"
+            else ReviewAttemptOutcome.NONRETRYABLE_FAILURE
+        ),
+        failure_kind=failure_kind,
+        summary=summary,
+        diagnostics=diagnostics,
+    )
+
+
+def _build_review_diagnostics(
+    *,
+    attempt_result: ReviewAttemptResult,
+    assignment: dict[str, Any],
+    agent_row: dict[str, Any],
+    role: str,
+    runtime_registration_id: int,
+    runner: Any,
+    attempt: int,
+    attempts: int,
+) -> dict[str, Any]:
+    diagnostics = dict(attempt_result.diagnostics)
+    diagnostics.update(
+        {
+            "failure_kind": attempt_result.failure_kind,
+            "attempt": attempt,
+            "attempts": attempts,
+            "agent_role": role,
+            "agent_id": int(agent_row.get("id") or 0) or None,
+            "stage_name": str(assignment.get("stage_name") or ""),
+            "runtime_registration_id": runtime_registration_id,
+            "worker_pid": os.getpid(),
+            "backend": str(agent_row.get("cli_backend") or ""),
+            "model": str(agent_row.get("model_name") or ""),
+            "workdir": str(getattr(runner, "workdir", "") or ""),
+            "diagnosed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+    )
+    return diagnostics
+
+
+def _append_review_retry_event(
+    *,
+    assignment: dict[str, Any],
+    mcp: MCPHTTPClient,
+    agent_row: dict[str, Any],
+    role: str,
+    summary: str,
+    diagnostics: dict[str, Any],
+) -> None:
+    mcp.call_tool(
+        "append_coordination_event",
+        {
+            "work_item_id": int(assignment["work_item_id"]),
+            "stage_name": assignment.get("stage_name") or "",
+            "event_type": "review_retry",
+            "summary": summary,
+            "from_agent_id": int(agent_row["id"]),
+            "from_role": role,
+            "payload_json": diagnostics,
+        },
+    )
+
+
+def _run_review_with_single_retry(
+    *,
+    assignment: dict[str, Any],
+    runner: Any,
+    mcp: MCPHTTPClient,
+    runtime_registration_id: int,
+    agent_row: dict[str, Any],
+    role: str,
+    prompt: str,
+    system_context: str | None,
+) -> None:
+    work_item_id = int(assignment["work_item_id"])
+    cycle_id = int(assignment["review_cycle_id"])
+    stage_name = str(assignment.get("stage_name") or "")
+
+    for attempt in range(1, _REVIEW_MAX_ATTEMPTS + 1):
+        response: Any | None = None
+        resolved_content = ""
+        error: Exception | None = None
+        runner.reset_session()
+        try:
+            response = _invoke_runner_with_keepalive(
+                assignment=assignment,
+                runner=runner,
+                prompt=prompt,
+                system_context=system_context,
+                mcp=mcp,
+                runtime_registration_id=runtime_registration_id,
+            )
+            resolved_content = _resolve_runner_response_content(str(getattr(response, "content", "") or ""))
+        except Exception as exc:
+            error = exc
+
+        attempt_result = _classify_review_attempt(
+            response=response,
+            resolved_content=resolved_content,
+            error=error,
+        )
+        diagnostics = _build_review_diagnostics(
+            attempt_result=attempt_result,
+            assignment=assignment,
+            agent_row=agent_row,
+            role=role,
+            runtime_registration_id=runtime_registration_id,
+            runner=runner,
+            attempt=attempt,
+            attempts=_REVIEW_MAX_ATTEMPTS,
+        )
+
+        if attempt_result.outcome == ReviewAttemptOutcome.VALID_VERDICT and attempt_result.verdict is not None:
+            mcp.call_tool(
+                "publish_review_verdict",
+                {
+                    "cycle_id": cycle_id,
+                    "work_item_id": work_item_id,
+                    "reviewer_agent_id": int(agent_row["id"]),
+                    "reviewer_role": role,
+                    "verdict": attempt_result.verdict.verdict,
+                    "issues": attempt_result.verdict.issues,
+                    "summary": attempt_result.verdict.summary,
+                    "stage": stage_name,
+                    "runtime_registration_id": runtime_registration_id,
+                },
+            )
+            return
+
+        if attempt_result.outcome == ReviewAttemptOutcome.RETRYABLE_FAILURE and attempt < _REVIEW_MAX_ATTEMPTS:
+            _append_review_retry_event(
+                assignment=assignment,
+                mcp=mcp,
+                agent_row=agent_row,
+                role=role,
+                summary=(
+                    f"{attempt_result.summary} Retrying review execution "
+                    f"({attempt}/{_REVIEW_MAX_ATTEMPTS})."
+                ),
+                diagnostics=diagnostics,
+            )
+            continue
+
+        mcp.call_tool(
+            "fail_review_cycle",
+            {
+                "cycle_id": cycle_id,
+                "work_item_id": work_item_id,
+                "reviewer_agent_id": int(agent_row["id"]),
+                "reviewer_role": role,
+                "stage": stage_name,
+                "runtime_registration_id": runtime_registration_id,
+                "summary": attempt_result.summary,
+                "failure_kind": attempt_result.failure_kind or "review_failed",
+                "attempts": attempt,
+                "diagnostics": diagnostics,
+            },
+        )
+        return
 
 
 def _assignment_keepalive_call(
@@ -321,33 +609,15 @@ def _handle_review_assignment(
         assignment=assignment,
         role=role,
     )
-    runner.reset_session()
-    response = _invoke_runner_with_keepalive(
+    _run_review_with_single_retry(
         assignment=assignment,
         runner=runner,
-        prompt=prompt,
-        system_context=system_context,
         mcp=mcp,
         runtime_registration_id=runtime_registration_id,
-    )
-    resolved_content = _resolve_runner_response_content(response.content)
-
-    work_item_id = int(assignment["work_item_id"])
-    cycle_id = int(assignment["review_cycle_id"])
-    verdict = _parse_verdict(resolved_content if response.success else "")
-    mcp.call_tool(
-        "publish_review_verdict",
-        {
-            "cycle_id": cycle_id,
-            "work_item_id": work_item_id,
-            "reviewer_agent_id": int(agent_row["id"]),
-            "reviewer_role": role,
-            "verdict": verdict.verdict,
-            "issues": verdict.issues,
-            "summary": verdict.summary,
-            "stage": assignment.get("stage_name") or "",
-            "runtime_registration_id": runtime_registration_id,
-        },
+        agent_row=agent_row,
+        role=role,
+        prompt=prompt,
+        system_context=system_context,
     )
 
 

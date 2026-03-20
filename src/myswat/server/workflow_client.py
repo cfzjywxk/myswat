@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from myswat.server.contracts import (
+    ReviewCycleCancellationRequest,
     ReviewRequest,
     ReviewRequestResult,
     ReviewVerdictEnvelope,
@@ -48,6 +49,9 @@ class WorkflowCoordinator(Protocol):
         request: ReviewWaitRequest,
     ) -> list[ReviewVerdictEnvelope]:
         """Wait for review verdicts to reach terminal states."""
+
+    def cancel_review_cycles(self, request: ReviewCycleCancellationRequest) -> dict[str, Any]:
+        """Cancel outstanding review cycles."""
 
 
 class LocalMCPToolClient:
@@ -113,3 +117,10 @@ class MCPWorkflowCoordinator:
         if not isinstance(result, list):
             raise RuntimeError(f"Invalid review verdict payload: {result!r}")
         return [ReviewVerdictEnvelope.model_validate(item) for item in result]
+
+    def cancel_review_cycles(self, request: ReviewCycleCancellationRequest) -> dict[str, Any]:
+        result = self._client.call_tool(
+            "cancel_review_cycles",
+            request.model_dump(exclude_none=True),
+        )
+        return result if isinstance(result, dict) else {}

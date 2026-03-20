@@ -10,6 +10,7 @@ from typing import Callable
 from myswat.large_payloads import resolve_externalized_text, resolve_externalized_value
 from myswat.repo_ops import commit_repo_changes, probe_git_repository, write_design_plan_doc
 from myswat.server import (
+    ReviewCycleCancellationRequest,
     ReviewRequest,
     ReviewWaitRequest,
     StageRunStart,
@@ -660,6 +661,17 @@ class WorkflowKernel:
                 cycle_ids=cycle_ids,
                 poll_interval_seconds=self._assignment_poll_interval_seconds,
                 timeout_seconds=self._assignment_timeout_seconds,
+                return_on_failed=True,
+            )
+        )
+
+    def _cancel_review_cycles(self, cycle_ids: list[int], *, summary: str) -> None:
+        if not cycle_ids:
+            return
+        self._coordinator.cancel_review_cycles(
+            ReviewCycleCancellationRequest(
+                cycle_ids=cycle_ids,
+                summary=summary,
             )
         )
 
@@ -728,6 +740,7 @@ class WorkflowKernel:
                 cycle_ids.append(request.cycle_id)
 
             verdicts = self._wait_for_review_verdicts(cycle_ids)
+            failed_verdicts = [verdict for verdict in verdicts if verdict.verdict == "failed"]
             all_lgtm = True
             collected_feedback: list[str] = []
             for verdict in verdicts:
@@ -745,6 +758,34 @@ class WorkflowKernel:
                     collected_feedback.extend(
                         [f"[{verdict.reviewer_role}] {issue}" for issue in issues if issue]
                     )
+
+            if failed_verdicts:
+                returned_cycle_ids = {verdict.cycle_id for verdict in verdicts}
+                remaining_cycle_ids = [cycle_id for cycle_id in cycle_ids if cycle_id not in returned_cycle_ids]
+                if remaining_cycle_ids:
+                    self._cancel_review_cycles(
+                        remaining_cycle_ids,
+                        summary=(
+                            f"Cancelled remaining {review_stage_name} cycles after a sibling "
+                            f"review failed in iteration {iteration}."
+                        ),
+                    )
+                failed = failed_verdicts[0]
+                failure_summary = failed.summary or "review failed after retry exhaustion."
+                if not failure_summary.lstrip().startswith("["):
+                    failure_summary = f"[{failed.reviewer_role}] {failure_summary}"
+                self._emit(
+                    "error",
+                    failure_summary,
+                    stage=review_stage_name,
+                    agent_role=failed.reviewer_role,
+                    detail=failed.summary,
+                    verdict=failed.verdict,
+                    cancelled_cycle_ids=remaining_cycle_ids,
+                )
+                self._blocked = True
+                self._failure_summary = failure_summary
+                return artifact, iteration, False
 
             if all_lgtm:
                 return artifact, iteration, True

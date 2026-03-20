@@ -54,6 +54,9 @@ def test_list_tools_includes_assignment_tools():
     assert "complete_stage_task" in names
     assert "renew_stage_run_lease" in names
     assert "renew_review_cycle_lease" in names
+    assert "append_coordination_event" in names
+    assert "fail_review_cycle" in names
+    assert "cancel_review_cycles" in names
 
 
 def test_call_tool_validates_and_dispatches():

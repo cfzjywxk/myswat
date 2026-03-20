@@ -336,15 +336,30 @@ class _WorkflowCoordinationService:
         cycle_ids = [int(cycle_id) for cycle_id in request.cycle_ids]
         with self._cond:
             while True:
+                terminal_records = [
+                    self.review_cycles[cycle_id]
+                    for cycle_id in cycle_ids
+                    if self.review_cycles[cycle_id].status in {"completed", "blocked", "cancelled"}
+                ]
+                if request.return_on_failed and any(record.verdict == "failed" for record in terminal_records):
+                    break
                 pending = [
                     self.review_cycles[cycle_id]
                     for cycle_id in cycle_ids
-                    if self.review_cycles[cycle_id].status != "completed"
+                    if self.review_cycles[cycle_id].status not in {"completed", "blocked", "cancelled"}
                 ]
                 if not pending:
                     break
                 self._cond.wait(timeout=request.poll_interval_seconds)
-            records = [self.review_cycles[cycle_id] for cycle_id in cycle_ids]
+            if request.return_on_failed and any(record.verdict == "failed" for record in terminal_records):
+                records = [
+                    self.review_cycles[cycle_id]
+                    for cycle_id in cycle_ids
+                    if self.review_cycles[cycle_id].status in {"completed", "blocked", "cancelled"}
+                    and self.review_cycles[cycle_id].verdict in {"lgtm", "changes_requested", "failed"}
+                ]
+            else:
+                records = [self.review_cycles[cycle_id] for cycle_id in cycle_ids]
         return [
             ReviewVerdictEnvelope(
                 cycle_id=record.cycle_id,
@@ -363,6 +378,32 @@ class _WorkflowCoordinationService:
             record.verdict = str(request.verdict)
             record.issues = list(request.issues)
             record.summary = str(request.summary)
+            self._cond.notify_all()
+        return {"ok": True}
+
+    def append_coordination_event(self, request):
+        return {"ok": True}
+
+    def fail_review_cycle(self, request):
+        with self._cond:
+            record = self.review_cycles[int(request.cycle_id)]
+            record.status = "blocked"
+            record.verdict = "failed"
+            record.issues = []
+            record.summary = str(request.summary)
+            self._cond.notify_all()
+        return {"ok": True}
+
+    def cancel_review_cycles(self, request):
+        with self._cond:
+            for cycle_id in request.cycle_ids:
+                record = self.review_cycles[int(cycle_id)]
+                if record.status in {"completed", "blocked", "cancelled"}:
+                    continue
+                record.status = str(request.status)
+                record.verdict = "cancelled"
+                record.issues = []
+                record.summary = str(request.summary)
             self._cond.notify_all()
         return {"ok": True}
 

@@ -20,7 +20,10 @@ from myswat.server.mcp_stdio import MySwatMCPDispatcher
 
 
 class _FakeRunner:
-    def __init__(self, responses: list[tuple[bool, str]]) -> None:
+    def __init__(
+        self,
+        responses: list[tuple[bool, str] | tuple[bool, str, dict] | Exception | SimpleNamespace],
+    ) -> None:
         self._responses = list(responses)
         self.reset_calls = 0
         self.invocations: list[tuple[str, str | None]] = []
@@ -30,8 +33,17 @@ class _FakeRunner:
 
     def invoke(self, prompt: str, system_context: str | None = None):
         self.invocations.append((prompt, system_context))
-        success, content = self._responses.pop(0)
-        return SimpleNamespace(success=success, content=content)
+        response = self._responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        if isinstance(response, tuple):
+            if len(response) == 2:
+                success, content = response
+                extras = {}
+            else:
+                success, content, extras = response
+            return SimpleNamespace(success=success, content=content, **dict(extras))
+        return response
 
 
 class _BlockingRunner:
@@ -634,7 +646,7 @@ def test_run_worker_resolves_externalized_review_verdict_fields():
     Path(issue_path).unlink(missing_ok=True)
 
 
-def test_run_worker_falls_back_to_changes_requested_for_unstructured_review():
+def test_run_worker_retries_malformed_review_output_once_then_publishes_verdict():
     service = Mock()
     service.register_runtime.return_value = SimpleNamespace(
         model_dump=lambda: {"runtime_registration_id": 10}
@@ -655,10 +667,16 @@ def test_run_worker_falls_back_to_changes_requested_for_unstructured_review():
         )
     )
     service.publish_review_verdict.return_value = {"ok": True}
+    service.append_coordination_event.return_value = {"ok": True}
     service.heartbeat_runtime.return_value = None
     service.update_runtime_status.return_value = {"runtime_registration_id": 10, "status": "offline"}
 
-    runner = _FakeRunner([(True, "Needs better error handling around overflow.")])
+    runner = _FakeRunner(
+        [
+            (True, "Needs better error handling around overflow."),
+            (True, '{"verdict":"changes_requested","issues":["Handle overflow."],"summary":"Need overflow guard."}'),
+        ]
+    )
     result = run_worker(
         project_slug="fib-demo",
         role="qa_main",
@@ -674,7 +692,108 @@ def test_run_worker_falls_back_to_changes_requested_for_unstructured_review():
     request = service.publish_review_verdict.call_args.args[0]
     assert request.cycle_id == 34
     assert request.verdict == "changes_requested"
-    assert request.issues == ["Needs better error handling around overflow."]
+    assert request.issues == ["Handle overflow."]
+    assert runner.reset_calls == 2
+    service.append_coordination_event.assert_called_once()
+    service.fail_review_cycle.assert_not_called()
+
+
+def test_run_worker_marks_review_failed_after_repeated_malformed_output():
+    service = Mock()
+    service.register_runtime.return_value = SimpleNamespace(
+        model_dump=lambda: {"runtime_registration_id": 10}
+    )
+    service.claim_next_assignment.side_effect = _assignment_stream(
+        AssignmentEnvelope(
+            assignment_kind="review",
+            runtime_registration_id=10,
+            project_id=1,
+            work_item_id=13,
+            review_cycle_id=34,
+            stage_name="code_review",
+            agent_id=4,
+            agent_role="qa_main",
+            iteration=2,
+            prompt="Review the implementation",
+            system_context="kind=review;stage=code_review",
+        )
+    )
+    service.append_coordination_event.return_value = {"ok": True}
+    service.fail_review_cycle.return_value = {"ok": True}
+    service.heartbeat_runtime.return_value = None
+    service.update_runtime_status.return_value = {"runtime_registration_id": 10, "status": "offline"}
+
+    runner = _FakeRunner(
+        [
+            (True, "Needs better error handling around overflow."),
+            (True, "Still not returning JSON."),
+        ]
+    )
+    result = run_worker(
+        project_slug="fib-demo",
+        role="qa_main",
+        server_url="http://unused",
+        project_row={"id": 1, "slug": "fib-demo", "repo_path": "/tmp/fib-demo"},
+        agent_row=_agent_row("qa_main"),
+        runner=runner,
+        mcp_client=_DirectMCPClient(service),
+        idle_exit_seconds=0.05,
+    )
+
+    assert result == {"stage_assignments": 0, "review_assignments": 1}
+    request = service.fail_review_cycle.call_args.args[0]
+    assert request.cycle_id == 34
+    assert request.failure_kind == "malformed_output"
+    assert request.attempts == 2
+    assert request.diagnostics["attempt"] == 2
+    assert runner.reset_calls == 2
+    service.publish_review_verdict.assert_not_called()
+    service.append_coordination_event.assert_called_once()
+
+
+def test_run_worker_marks_review_failed_without_retry_for_nonretryable_error():
+    service = Mock()
+    service.register_runtime.return_value = SimpleNamespace(
+        model_dump=lambda: {"runtime_registration_id": 10}
+    )
+    service.claim_next_assignment.side_effect = _assignment_stream(
+        AssignmentEnvelope(
+            assignment_kind="review",
+            runtime_registration_id=10,
+            project_id=1,
+            work_item_id=13,
+            review_cycle_id=34,
+            stage_name="code_review",
+            agent_id=4,
+            agent_role="qa_main",
+            iteration=2,
+            prompt="Review the implementation",
+            system_context="kind=review;stage=code_review",
+        )
+    )
+    service.fail_review_cycle.return_value = {"ok": True}
+    service.heartbeat_runtime.return_value = None
+    service.update_runtime_status.return_value = {"runtime_registration_id": 10, "status": "offline"}
+
+    runner = _FakeRunner([RuntimeError("command not found: codex")])
+    result = run_worker(
+        project_slug="fib-demo",
+        role="qa_main",
+        server_url="http://unused",
+        project_row={"id": 1, "slug": "fib-demo", "repo_path": "/tmp/fib-demo"},
+        agent_row=_agent_row("qa_main"),
+        runner=runner,
+        mcp_client=_DirectMCPClient(service),
+        idle_exit_seconds=0.05,
+    )
+
+    assert result == {"stage_assignments": 0, "review_assignments": 1}
+    request = service.fail_review_cycle.call_args.args[0]
+    assert request.failure_kind == "environment_misconfiguration"
+    assert request.attempts == 1
+    assert runner.reset_calls == 1
+    service.append_coordination_event.assert_not_called()
+    service.publish_review_verdict.assert_not_called()
 
 
 def test_run_worker_marks_runtime_offline_after_idle_exit():

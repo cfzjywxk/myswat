@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 
 AssignmentKind = Literal["none", "stage", "review"]
-ReviewVerdictValue = Literal["lgtm", "changes_requested"]
+ReviewVerdictValue = Literal["lgtm", "changes_requested", "failed"]
 
 
 class ProjectLookupRequest(BaseModel):
@@ -178,6 +178,7 @@ class ReviewWaitRequest(BaseModel):
     cycle_ids: list[int]
     poll_interval_seconds: float = 1.0
     timeout_seconds: float | None = None
+    return_on_failed: bool = False
 
 
 class ReviewVerdictEnvelope(BaseModel):
@@ -199,6 +200,25 @@ class ReviewVerdictSubmission(BaseModel):
     review_session_id: int | None = None
     stage: str = ""
     runtime_registration_id: int | None = None
+
+
+class ReviewFailureSubmission(BaseModel):
+    cycle_id: int
+    work_item_id: int
+    reviewer_agent_id: int
+    reviewer_role: str
+    stage: str = ""
+    runtime_registration_id: int | None = None
+    summary: str
+    failure_kind: str
+    attempts: int
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+
+
+class ReviewCycleCancellationRequest(BaseModel):
+    cycle_ids: list[int]
+    summary: str
+    status: str = "cancelled"
 
 
 class ReviewCycleLeaseRenewalRequest(BaseModel):

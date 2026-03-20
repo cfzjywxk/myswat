@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from myswat.repo_ops import GitCommitResult, GitProbeResult
-from myswat.server.contracts import ReviewVerdictEnvelope, StageRunCompletion
+from myswat.server.contracts import ReviewCycleCancellationRequest, ReviewVerdictEnvelope, StageRunCompletion
 from myswat.workflow.kernel import PhaseResult, WorkflowKernel, _extract_json_block
 from myswat.workflow.modes import WorkMode
 from myswat.workflow.runtime import WorkflowRuntime
@@ -1458,6 +1458,111 @@ def test_review_loop_handles_cancel_missing_artifact_revision_failure_and_zero_l
     )
     assert (artifact, iterations, passed) == ("draft", 0, False)
     assert exhausted_kernel._failure_summary == "Implementation plan review loop exhausted."
+
+
+def test_review_loop_blocks_immediately_on_failed_verdict_and_cancels_siblings():
+    dev = _participant(10, "developer")
+    qa_main = _participant(20, "qa_main")
+    security = _participant(21, "security")
+    service = _service()
+    service.wait_for_review_verdicts.return_value = [
+        ReviewVerdictEnvelope(
+            cycle_id=2000,
+            reviewer_role="qa_main",
+            verdict="failed",
+            summary="review failed after retry exhaustion.",
+        ),
+    ]
+    service.cancel_review_cycles.return_value = {"ok": True}
+
+    kernel = WorkflowKernel(
+        store=_store(),
+        service=service,
+        dev=dev,
+        qas=[qa_main, security],
+        project_id=1,
+        work_item_id=9,
+        mode=WorkMode.full,
+        auto_approve=True,
+    )
+
+    artifact, iterations, passed = kernel._run_review_loop(
+        owner_stage_name="plan",
+        review_stage_name="plan_review",
+        artifact_type="implementation_plan",
+        artifact_title="Implementation plan",
+        initial_artifact="draft",
+        initial_artifact_id=1000,
+        owner=dev,
+        reviewers=[qa_main, security],
+        focus="ctx",
+        review_prompt_builder=lambda artifact, iteration, reviewer_role: artifact,
+        revision_prompt_builder=lambda artifact, feedback: artifact + feedback,
+    )
+
+    assert (artifact, iterations, passed) == ("draft", 1, False)
+    assert kernel._blocked is True
+    assert kernel._failure_summary == "[qa_main] review failed after retry exhaustion."
+    wait_request = service.wait_for_review_verdicts.call_args.args[0]
+    assert wait_request.return_on_failed is True
+    cancel_request = service.cancel_review_cycles.call_args.args[0]
+    assert cancel_request == ReviewCycleCancellationRequest(
+        cycle_ids=[2001],
+        summary="Cancelled remaining plan_review cycles after a sibling review failed in iteration 1.",
+    )
+    assert service.start_stage_run.call_count == 0
+
+
+def test_review_failure_takes_precedence_over_changes_requested():
+    dev = _participant(10, "developer")
+    qa_main = _participant(20, "qa_main")
+    security = _participant(21, "security")
+    service = _service()
+    service.wait_for_review_verdicts.return_value = [
+        ReviewVerdictEnvelope(
+            cycle_id=2000,
+            reviewer_role="qa_main",
+            verdict="failed",
+            summary="review failed after retry exhaustion.",
+        ),
+        ReviewVerdictEnvelope(
+            cycle_id=2001,
+            reviewer_role="security",
+            verdict="changes_requested",
+            summary="Need a rollback plan.",
+            issues=["Add rollback steps."],
+        ),
+    ]
+
+    kernel = WorkflowKernel(
+        store=_store(),
+        service=service,
+        dev=dev,
+        qas=[qa_main, security],
+        project_id=1,
+        work_item_id=9,
+        mode=WorkMode.full,
+        auto_approve=True,
+    )
+
+    artifact, iterations, passed = kernel._run_review_loop(
+        owner_stage_name="plan",
+        review_stage_name="plan_review",
+        artifact_type="implementation_plan",
+        artifact_title="Implementation plan",
+        initial_artifact="draft",
+        initial_artifact_id=1000,
+        owner=dev,
+        reviewers=[qa_main, security],
+        focus="ctx",
+        review_prompt_builder=lambda artifact, iteration, reviewer_role: artifact,
+        revision_prompt_builder=lambda artifact, feedback: artifact + feedback,
+    )
+
+    assert (artifact, iterations, passed) == ("draft", 1, False)
+    assert kernel._blocked is True
+    assert kernel._failure_summary == "[qa_main] review failed after retry exhaustion."
+    assert service.start_stage_run.call_count == 0
 
 
 def test_kernel_parses_completed_phase_rows_and_phase_names():
