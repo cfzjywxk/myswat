@@ -261,6 +261,7 @@ class TestMemoryFallbacks:
         system_context = runner.invoke.call_args.kwargs["system_context"]
         assert "Be helpful." in system_context
         assert "Large Payload Handling" in system_context
+        assert "Context Usage" in system_context
         assert "[session memory] Context build failed" in caplog.text
         assert "search down" in caplog.text
 
@@ -278,6 +279,7 @@ class TestMemoryFallbacks:
         assert "Be helpful." in context
         assert "ctx" in context
         assert "Large Payload Handling" in context
+        assert "Context Usage" in context
         assert "[session memory] Revision tracking failed" in caplog.text
         assert "revision write down" in caplog.text
 

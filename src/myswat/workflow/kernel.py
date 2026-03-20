@@ -977,7 +977,7 @@ class WorkflowKernel:
             focus=requirement + "\n\n" + design[:4000],
             artifact_type="implementation_plan",
             artifact_title="Implementation plan",
-            summary="Break design into phases",
+            summary="Create implementation plan",
         )
         completion = self._wait_for_stage_result(stage_run_id=stage_run_id, stage_name="plan", owner=owner)
         if completion.status != "completed":

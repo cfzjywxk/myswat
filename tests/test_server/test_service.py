@@ -10,6 +10,7 @@ from unittest.mock import Mock
 import pytest
 
 import myswat.server.service as service_module
+from myswat.large_payloads import build_agent_context_usage_prompt
 from myswat.memory.store import MemoryStore
 from myswat.models.workflow_runtime import StageRun
 from myswat.server.contracts import (
@@ -441,6 +442,7 @@ def test_claim_next_assignment_returns_stage_assignment_bundle():
     assert result.stage_run_id == 55
     assert result.prompt == "Write the implementation plan"
     assert result.artifact_type == "implementation_plan"
+    assert build_agent_context_usage_prompt(heading="## Context Handling") in result.system_context
 
 
 def test_claim_next_assignment_preserves_large_context_details_for_worker_externalization():

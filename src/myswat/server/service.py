@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+from myswat.large_payloads import build_agent_context_usage_prompt
 from myswat.memory.store import MemoryStore
 from myswat.server.contracts import (
     ArtifactSubmission,
@@ -346,6 +347,7 @@ class MySwatToolService:
             "You are working through MySwat MCP. "
             "Do not assume hidden chat history. "
             "Rely on the repository state, persisted artifacts, and coordination records returned here.",
+            build_agent_context_usage_prompt(heading="## Context Handling"),
         ]
 
         if bundle.project:
@@ -357,12 +359,29 @@ class MySwatToolService:
             )
 
         if bundle.task_state:
+            next_todos = [str(item) for item in (bundle.task_state.get("next_todos") or [])[:5] if str(item).strip()]
+            open_issues = [str(item) for item in (bundle.task_state.get("open_issues") or [])[:5] if str(item).strip()]
+            work_state_lines = [
+                "## Work Item State",
+                f"- Recorded stage: {bundle.task_state.get('current_stage', '')}",
+                "- Latest summary: "
+                + _clip_context_text(
+                    str(bundle.task_state.get("latest_summary") or ""),
+                    _SYSTEM_CONTEXT_SUMMARY_TEXT_LIMIT,
+                ),
+            ]
+            if next_todos:
+                work_state_lines.append("- Next todos:")
+                work_state_lines.extend(f"  - {item}" for item in next_todos)
+            else:
+                work_state_lines.append("- Next todos: []")
+            if open_issues:
+                work_state_lines.append("- Open issues:")
+                work_state_lines.extend(f"  - {item}" for item in open_issues)
+            else:
+                work_state_lines.append("- Open issues: []")
             parts.append(
-                "## Work Item State\n"
-                f"- Recorded stage: {bundle.task_state.get('current_stage', '')}\n"
-                f"- Latest summary: {_clip_context_text(str(bundle.task_state.get('latest_summary') or ''), _SYSTEM_CONTEXT_SUMMARY_TEXT_LIMIT)}\n"
-                f"- Next todos: {(bundle.task_state.get('next_todos') or [])[:5]}\n"
-                f"- Open issues: {(bundle.task_state.get('open_issues') or [])[:5]}"
+                "\n".join(work_state_lines)
             )
 
         if bundle.artifacts:

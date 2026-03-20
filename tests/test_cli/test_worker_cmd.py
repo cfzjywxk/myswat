@@ -413,7 +413,9 @@ def test_run_worker_externalizes_large_stage_prompt_and_context_to_markdown_file
     assert "Read that markdown file completely" in sent_prompt
     assert "Read it before responding" in (sent_context or "")
     assert "PROMPT-TAIL-MARKER" in read_markdown_file(prompt_path)
-    assert "CONTEXT-TAIL-MARKER" in read_markdown_file(context_path)
+    context_text = read_markdown_file(context_path)
+    assert "CONTEXT-TAIL-MARKER" in context_text
+    assert "Context Usage" in context_text
     Path(prompt_path).unlink(missing_ok=True)
     Path(context_path).unlink(missing_ok=True)
 

@@ -13,6 +13,7 @@ from myswat.agents.base import AgentResponse
 from myswat.config.settings import MySwatSettings
 from myswat.large_payloads import (
     AGENT_FILE_PROMPT,
+    AGENT_CONTEXT_USAGE_PROMPT,
     maybe_externalize_prompt,
     maybe_externalize_response,
     maybe_externalize_system_context,
@@ -186,6 +187,7 @@ class SessionManager:
         """
         parts: list[str] = []
         parts.append(AGENT_FILE_PROMPT)
+        parts.append(AGENT_CONTEXT_USAGE_PROMPT)
         agent_system_prompt = self._agent_row.get("system_prompt")
         if agent_system_prompt:
             parts.append(agent_system_prompt)

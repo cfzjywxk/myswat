@@ -18,6 +18,7 @@ from myswat.config.settings import MySwatSettings
 from myswat.db.connection import TiDBPool
 from myswat.db.schema import ensure_schema
 from myswat.large_payloads import (
+    AGENT_CONTEXT_USAGE_PROMPT,
     AGENT_FILE_PROMPT,
     maybe_externalize_prompt,
     maybe_externalize_system_context,
@@ -98,9 +99,9 @@ def _prepare_runner_payloads(
     system_context = str(assignment.get("system_context") or "")
     stage_name = str(assignment.get("stage_name") or assignment.get("assignment_kind") or "task")
     file_aware_system_context = (
-        "\n\n---\n\n".join([AGENT_FILE_PROMPT, system_context])
+        "\n\n---\n\n".join([AGENT_FILE_PROMPT, AGENT_CONTEXT_USAGE_PROMPT, system_context])
         if system_context
-        else AGENT_FILE_PROMPT
+        else "\n\n---\n\n".join([AGENT_FILE_PROMPT, AGENT_CONTEXT_USAGE_PROMPT])
     )
 
     prompt_to_send, _ = maybe_externalize_prompt(

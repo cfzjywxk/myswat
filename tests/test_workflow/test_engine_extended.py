@@ -978,6 +978,10 @@ class TestRunPlanning:
         engine, dev, _ = _make_engine(dev_responses=["the plan"])
         result = engine._run_planning("design", "requirement")
         assert result == "the plan"
+        prompt = dev.send.call_args.args[0]
+        assert "Default to exactly 1 phase." in prompt
+        assert "Do NOT split work just to add detail" in prompt
+        assert "Add Phase 2+ only if the work genuinely requires additional sequential milestones." in prompt
 
     def test_failure_returns_empty(self):
         engine, dev, _ = _make_engine(dev_responses=[_fail()])
@@ -1134,6 +1138,9 @@ class TestRunGATestPhase:
         result = engine._run_ga_test_phase("req", "design", "plan", "summary")
         assert result.test_plan == ""
         assert not result.passed
+        prompt = qas[0].send.call_args.args[0]
+        assert "Right-size the test plan to the scope:" in prompt
+        assert "Do NOT turn a simple test plan into artificial phases" in prompt
 
     def test_user_rejects_test_plan(self):
         """When user rejects the test plan, aborted should be True."""

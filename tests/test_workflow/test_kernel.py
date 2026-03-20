@@ -349,6 +349,9 @@ def test_design_stage_and_review_prompts_include_requirement_and_design_context(
     assert plan_stage.stage_name == "plan"
     assert "The following design has been approved" in plan_stage.task_prompt
     assert "# Design\nUse iterative fibonacci." in plan_stage.task_prompt
+    assert "Default to exactly 1 phase." in plan_stage.task_prompt
+    assert "Use multiple phases ONLY when the work is genuinely large" in plan_stage.task_prompt
+    assert "Add Phase 2+ only if the work genuinely requires additional sequential milestones." in plan_stage.task_prompt
 
 
 def test_plan_review_feedback_builds_revision_prompt_with_collected_issues():
@@ -1805,9 +1808,10 @@ def test_run_design_plan_phase_and_test_branch_failures():
     assert phase_result.committed is False
     assert phase_result.review_passed is False
 
+    test_service = _service()
     test_kernel = WorkflowKernel(
         store=_store(),
-        service=_service(),
+        service=test_service,
         dev=dev,
         qas=[qa],
         project_id=1,
@@ -1820,6 +1824,10 @@ def test_run_design_plan_phase_and_test_branch_failures():
     assert ga_result.test_plan == ""
     assert ga_result.test_report == ""
     assert ga_result.passed is False
+    test_plan_stage = test_service.start_stage_run.call_args.args[0]
+    assert test_plan_stage.stage_name == "test_plan"
+    assert "Right-size the test plan to the scope:" in test_plan_stage.task_prompt
+    assert "Do NOT turn a simple test plan into artificial phases" in test_plan_stage.task_prompt
 
     review_fail_kernel = WorkflowKernel(
         store=_store(),

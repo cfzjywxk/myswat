@@ -166,6 +166,12 @@ DEV_TECH_DESIGN = """You are a senior developer. Produce a technical design prop
 {requirement}
 
 ## Your Deliverable
+Right-size the design to the task:
+- Prefer the simplest approach that fully solves the requirement.
+- For a small or self-contained coding task, keep the design brief and practical.
+- Do NOT invent extra subsystems, abstraction layers, rollout phases, or operational hardening unless the requirement clearly needs them.
+- If a section is not relevant, say so briefly instead of expanding it artificially.
+
 Produce a complete technical design including:
 1. Architecture overview and approach
 2. Key design decisions and trade-offs
@@ -203,6 +209,12 @@ Only hand design review to the team after you have produced a concrete, reviewab
 {requirement}
 
 ## Your Deliverable
+Right-size the design to the task:
+- Prefer the simplest design that fully solves the requirement.
+- For a small or self-contained coding task, a compact design is correct.
+- Do NOT expand trivial work into pseudo-architecture, artificial subsystems, rollout phases, or production-hardening work unless the requirement actually calls for it.
+- If a section is not relevant, say so briefly instead of inflating the design.
+
 Produce a complete technical design including:
 1. Problem statement and goals
 2. Scope, constraints, and assumptions
@@ -288,7 +300,7 @@ Output ONLY a JSON object:
 # ── Stage 3: Implementation Planning ──
 
 DEV_IMPLEMENTATION_PLAN = """You are a senior developer. The following design has been approved.
-Break it into implementation phases.
+Create the smallest sensible implementation plan.
 
 ## Requirement
 {requirement}
@@ -297,10 +309,18 @@ Break it into implementation phases.
 {design}
 
 ## Your Deliverable
-Break the implementation into sequential phases. Each phase should be:
+Decide first whether phased delivery is actually needed.
+- Default to exactly 1 phase.
+- Use multiple phases ONLY when the work is genuinely large, risky, or naturally splits into independent milestones that should land separately.
+- For small or self-contained tasks, a single phase is preferred.
+- Do NOT split work just to add detail, isolate tests into their own phase, or create artificial checkpoints.
+
+Return the minimum number of sequential phases needed. Each phase should be:
 - Independently implementable and testable
-- Small enough for one focused coding session
+- Large enough to be a meaningful milestone, not a tiny slice
 - Committable on its own (no broken state between phases)
+
+For simple tasks such as a small utility, algorithm, CLI command, or basic service, one phase is usually correct.
 
 For each phase provide:
 1. Phase name (short, descriptive)
@@ -313,10 +333,7 @@ Format as:
 Phase 1: <name>
 <description>
 
-Phase 2: <name>
-<description>
-
-...
+Add Phase 2+ only if the work genuinely requires additional sequential milestones.
 """
 
 DEV_ADDRESS_PLAN_COMMENTS = """Address the following review comments on your implementation plan.
@@ -330,6 +347,8 @@ DEV_ADDRESS_PLAN_COMMENTS = """Address the following review comments on your imp
 ## Instructions
 Address each comment and provide the complete updated plan.
 Keep the same Phase N: <name> format.
+Keep the phase count as low as possible.
+Do NOT add extra phases unless the feedback reveals real implementation complexity that requires them.
 """
 
 QA_PLAN_REVIEW = """You are a QA engineer reviewing an implementation plan.
@@ -342,7 +361,7 @@ QA_PLAN_REVIEW = """You are a QA engineer reviewing an implementation plan.
 ## Review Criteria
 1. **Completeness** — Does the plan cover the full approved design?
 2. **Ordering** — Are phases in a logical sequence?
-3. **Granularity** — Are phases appropriately sized (not too big, not too small)?
+3. **Granularity** — Prefer the minimum number of phases that still yields clear, reviewable milestones. Simple or self-contained tasks should usually stay as a single phase; request changes if the plan is split more finely than the work justifies.
 4. **Testability** — Can each phase be verified independently?
 5. **Risks** — Any missing steps or overlooked dependencies?
 
@@ -470,6 +489,12 @@ completed implementation.
 {dev_summary}
 
 ## Your Deliverable
+Right-size the test plan to the scope:
+- Prefer the simplest plan that still gives good confidence.
+- For a small or self-contained task, keep the plan compact.
+- Do NOT turn a simple test plan into artificial phases, large matrices, or excessive scenario breakdowns unless the implementation complexity really requires that detail.
+- If a category such as integration or performance is not materially relevant, say so briefly instead of expanding it artificially.
+
 Create a comprehensive test plan covering:
 1. **Functional tests** — verify each feature works as specified
 2. **Integration tests** — verify components work together
@@ -497,9 +522,10 @@ DEV_REVIEW_TEST_PLAN = """You are a senior developer reviewing a QA test plan.
 ## Review Criteria
 1. **Coverage** — Does the plan cover all implemented features?
 2. **Correctness** — Are expected results accurate based on the design?
-3. **Feasibility** — Can all tests actually be executed?
-4. **Missing cases** — Any important scenarios not covered?
-5. **Priority** — Are priorities reasonable?
+3. **Right-sizing** — Is the plan proportionate to the work? For simple or self-contained tasks, request changes if the plan is over-broken-down, artificially phased, or padded with low-value cases.
+4. **Feasibility** — Can all tests actually be executed?
+5. **Missing cases** — Any important scenarios not covered?
+6. **Priority** — Are priorities reasonable?
 
 ## Required Output Format
 Output ONLY a JSON object:
@@ -523,9 +549,10 @@ TEST_PLAN_REVIEW = """Review the following test plan.
 ## Review Criteria
 1. **Coverage** — Does the plan cover all relevant features and scenarios?
 2. **Correctness** — Are expected results accurate based on the design?
-3. **Feasibility** — Can all tests actually be executed?
-4. **Missing cases** — Any important scenarios not covered?
-5. **Priority** — Are priorities reasonable?
+3. **Right-sizing** — Is the plan proportionate to the work? For simple or self-contained tasks, request changes if the plan is over-broken-down, artificially phased, or padded with low-value cases.
+4. **Feasibility** — Can all tests actually be executed?
+5. **Missing cases** — Any important scenarios not covered?
+6. **Priority** — Are priorities reasonable?
 
 ## Required Output Format
 Output ONLY a JSON object:
@@ -546,6 +573,12 @@ and test design.
 {requirement}
 
 ## Your Deliverable
+Right-size the test design to the task:
+- Prefer the simplest plan that fully validates the requirement.
+- For a small or self-contained task, a compact plan is correct.
+- Do NOT expand trivial work into artificial test phases, oversized matrices, or exhaustive boilerplate unless the requirement or risk profile truly needs that detail.
+- If a section is not relevant, say so briefly instead of inflating it.
+
 Produce a comprehensive test plan including:
 1. Test scope and objectives
 2. Test strategy
@@ -567,6 +600,8 @@ QA_ADDRESS_TEST_PLAN_COMMENTS = """Address the following review comments on your
 
 ## Instructions
 Address each comment and provide the complete updated test plan.
+Keep the plan as lean as possible.
+Do NOT add extra structure, phases, or low-value cases unless the feedback reveals real test complexity that requires them.
 """
 
 QA_EXECUTE_GA_TEST = """You are a QA engineer. Execute the approved test plan against the current codebase.

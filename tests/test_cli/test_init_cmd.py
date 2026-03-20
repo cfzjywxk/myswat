@@ -374,6 +374,14 @@ class TestTeamWorkflowsKnowledge:
         assert "finalize the cache design with your team" in ARCHITECT_SYSTEM_PROMPT
         assert "we do not have a settled design yet; design and implement the storage layer with your team" in ARCHITECT_SYSTEM_PROMPT
 
+    def test_role_prompts_and_workflow_knowledge_prefer_right_sized_scope(self):
+        assert "Keep the TASK proportional to the request" in ARCHITECT_SYSTEM_PROMPT
+        assert "Default to a single phase for a small or self-contained task" in DEVELOPER_SYSTEM_PROMPT
+        assert "Default to a compact plan for a small or self-contained task" in QA_MAIN_SYSTEM_PROMPT
+        assert "over-scoped or artificially structured plans" in QA_VICE_SYSTEM_PROMPT
+        assert "simple tasks often have a single implementation phase" in TEAM_WORKFLOWS_KNOWLEDGE
+        assert "simple tasks usually need a compact test plan" in TEAM_WORKFLOWS_KNOWLEDGE
+
 
 # ---------------------------------------------------------------------------
 # run_init

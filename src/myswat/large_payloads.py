@@ -15,6 +15,21 @@ AGENT_FILE_PROMPT = """## Large Payload Handling
 - If an output must stay in JSON, keep the same JSON schema and replace oversized string fields with a short `See /tmp/...md` reference.
 """
 
+_AGENT_CONTEXT_USAGE_BULLETS = (
+    "Treat the current task prompt and any explicitly approved artifacts for this stage as the source of truth.",
+    "Use retrieved knowledge, prior artifacts, events, and history as supporting context only.",
+    "If retrieved context conflicts with the current task or the checked repository state, follow the current task and repository state, and call out the conflict explicitly.",
+    "Do NOT copy phase counts, test-plan size, or solution complexity from historical examples unless the current task clearly requires the same structure.",
+)
+
+
+def build_agent_context_usage_prompt(*, heading: str = "## Context Usage") -> str:
+    bullets = "\n".join(f"- {line}" for line in _AGENT_CONTEXT_USAGE_BULLETS)
+    return f"{heading}\n{bullets}"
+
+
+AGENT_CONTEXT_USAGE_PROMPT = build_agent_context_usage_prompt()
+
 
 def _slug(value: str) -> str:
     text = re.sub(r"[^a-z0-9]+", "-", value.strip().lower())

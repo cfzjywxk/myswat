@@ -64,7 +64,7 @@ DELEGATION_MODE_SPECS: dict[str, DelegationModeSpec] = {
         chat_handler="workflow",
         allowed_roles=frozenset({"architect"}),
         banner="Architect delegated implementation workflow",
-        detail="Starting phased development workflow automatically.",
+        detail="Starting implementation workflow automatically.",
         save_session_before_run=True,
         reset_role_session=True,
     ),
