@@ -18,12 +18,22 @@ def _long_text(marker: str, *, repeats: int = 1600) -> str:
     return ("0123456789" * repeats) + marker
 
 
-def _participant(agent_id: int, role: str) -> WorkflowRuntime:
+def _participant(
+    agent_id: int,
+    role: str,
+    *,
+    backend: str | None = None,
+    model_name: str | None = None,
+) -> WorkflowRuntime:
+    resolved_backend = backend or ("claude" if role.startswith("qa") else "codex")
+    resolved_model = model_name or ("claude-opus-4-6" if role.startswith("qa") else "gpt-5.4")
     return WorkflowRuntime(
         agent_row={
             "id": agent_id,
             "role": role,
             "display_name": role,
+            "cli_backend": resolved_backend,
+            "model_name": resolved_model,
         }
     )
 
@@ -1128,6 +1138,7 @@ def test_run_phase_commits_local_changes_after_lgtm(tmp_path):
     mock_commit.assert_called_once_with(
         repo_path.resolve(),
         message="phase 1: Ship it",
+        trailers=["Co-Authored-By: MySwat Dev (GPT-5.4) <noreply@myswat.invalid>"],
     )
 
 
@@ -1245,6 +1256,7 @@ def test_run_test_commits_local_changes_after_pass(tmp_path):
     mock_commit.assert_called_once_with(
         repo_path.resolve(),
         message="test: sync approved test changes",
+        trailers=["Co-Authored-By: MySwat Dev (Opus 4.6) <noreply@myswat.invalid>"],
     )
 
 
@@ -1364,6 +1376,86 @@ def test_develop_mode_pushes_repo_after_successful_workflow(tmp_path):
         message="workflow: finalize develop",
     )
     mock_push.assert_called_once_with(repo_path.resolve())
+
+
+def test_commit_trailers_use_humanized_runtime_model_names():
+    kernel = WorkflowKernel(
+        store=_store(),
+        service=_service(),
+        dev=_participant(10, "developer", model_name="gpt-5.4"),
+        qas=[_participant(20, "qa_main", model_name="claude-opus-4-6")],
+        project_id=1,
+        work_item_id=87,
+        mode=WorkMode.develop,
+        auto_approve=True,
+    )
+
+    assert kernel._commit_trailers_for(kernel._dev) == [
+        "Co-Authored-By: MySwat Dev (GPT-5.4) <noreply@myswat.invalid>",
+    ]
+    assert kernel._commit_trailers_for(kernel._qas[0]) == [
+        "Co-Authored-By: MySwat Dev (Opus 4.6) <noreply@myswat.invalid>",
+    ]
+
+
+def test_commit_trailers_humanize_dated_and_legacy_claude_model_names():
+    kernel = WorkflowKernel(
+        store=_store(),
+        service=_service(),
+        dev=_participant(10, "developer"),
+        qas=[_participant(20, "qa_main")],
+        project_id=1,
+        work_item_id=88,
+        mode=WorkMode.develop,
+        auto_approve=True,
+    )
+
+    dated_claude = _participant(30, "developer", backend="claude", model_name="claude-opus-4-6-20251001")
+    legacy_claude = _participant(31, "developer", backend="claude", model_name="claude-3-5-sonnet-20241022")
+
+    assert kernel._commit_trailers_for(dated_claude) == [
+        "Co-Authored-By: MySwat Dev (Opus 4.6) <noreply@myswat.invalid>",
+    ]
+    assert kernel._commit_trailers_for(legacy_claude) == [
+        "Co-Authored-By: MySwat Dev (Sonnet 3.5) <noreply@myswat.invalid>",
+    ]
+
+
+def test_test_commit_trailer_uses_qa_lead_when_multiple_qas(tmp_path):
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa_lead = _participant(20, "qa_main", model_name="claude-opus-4-6")
+    qa_vice = _participant(21, "qa_vice", backend="kimi", model_name="kimi-code/kimi-for-coding")
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa_lead, qa_vice],
+        project_id=1,
+        work_item_id=89,
+        mode=WorkMode.test,
+        auto_approve=True,
+        repo_path=str(repo_path),
+    )
+    kernel._repo_commit_checked = True
+    kernel._repo_commit_ready = True
+
+    with patch(
+        "myswat.workflow.kernel.commit_repo_changes",
+        return_value=GitCommitResult(True, True, "Committed test changes."),
+    ) as mock_commit:
+        ok = kernel._commit_test_changes()
+
+    assert ok is True
+    mock_commit.assert_called_once_with(
+        repo_path.resolve(),
+        message="test: sync approved test changes",
+        trailers=["Co-Authored-By: MySwat Dev (Opus 4.6) <noreply@myswat.invalid>"],
+    )
 
 
 def test_code_review_feedback_builds_phase_revision_prompt():

@@ -27,12 +27,26 @@ def test_normalize_delegation_mode_and_cli_mode_resolution():
 
 
 def test_workflow_runtime_exposes_agent_fields_and_display_fallback():
-    runtime = WorkflowRuntime(agent_row={"id": "7", "role": "developer"})
+    runtime = WorkflowRuntime(
+        agent_row={
+            "id": "7",
+            "role": "developer",
+            "cli_backend": "codex",
+            "model_name": "gpt-5.4",
+        }
+    )
 
     assert runtime.agent_id == 7
     assert runtime.agent_role == "developer"
     assert runtime.display_name == "developer"
-    assert runtime.agent_row == {"id": "7", "role": "developer"}
+    assert runtime.cli_backend == "codex"
+    assert runtime.model_name == "gpt-5.4"
+    assert runtime.agent_row == {
+        "id": "7",
+        "role": "developer",
+        "cli_backend": "codex",
+        "model_name": "gpt-5.4",
+    }
 
 
 def test_parse_verdict_resolves_externalized_plain_text_lgtm():

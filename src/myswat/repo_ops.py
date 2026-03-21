@@ -196,6 +196,7 @@ def commit_repo_changes(
     *,
     message: str,
     paths: Iterable[str | Path] | None = None,
+    trailers: Iterable[str] | None = None,
 ) -> GitCommitResult:
     status = probe_git_repository(repo_path)
     if not status.available:
@@ -227,7 +228,12 @@ def commit_repo_changes(
     if diff_result.returncode != 1:
         return GitCommitResult(ok=False, committed=False, message=_git_message(diff_result, "Unable to inspect staged changes."))
 
-    commit_result = _run_git(repo, "commit", "-m", message)
+    commit_args = ["commit", "-m", message]
+    trailer_lines = [str(trailer).strip() for trailer in (trailers or []) if str(trailer).strip()]
+    if trailer_lines:
+        commit_args.extend(["-m", "\n".join(trailer_lines)])
+
+    commit_result = _run_git(repo, *commit_args)
     if commit_result is None:
         return GitCommitResult(ok=True, committed=False, message="git CLI is not available.")
     if commit_result.returncode != 0:

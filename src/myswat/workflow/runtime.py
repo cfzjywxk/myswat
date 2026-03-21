@@ -33,5 +33,13 @@ class WorkflowRuntime:
         return str(self._agent_row.get("display_name") or self.agent_role)
 
     @property
+    def cli_backend(self) -> str:
+        return str(self._agent_row.get("cli_backend") or "")
+
+    @property
+    def model_name(self) -> str:
+        return str(self._agent_row.get("model_name") or "")
+
+    @property
     def agent_row(self) -> dict[str, Any]:
         return self._agent_row

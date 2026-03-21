@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -367,6 +368,51 @@ class WorkflowKernel:
         )
         return True
 
+    @staticmethod
+    def _format_commit_model_label(runtime: WorkflowRuntime | None) -> str:
+        if runtime is None:
+            return ""
+
+        model_name = runtime.model_name.strip()
+        if not model_name:
+            return ""
+
+        lowered = model_name.lower()
+        if lowered.startswith("gpt-"):
+            return "GPT-" + model_name[4:]
+
+        claude_tail = lowered.removeprefix("claude-")
+        claude_parts = [part for part in claude_tail.split("-") if part]
+        while claude_parts and (claude_parts[-1] == "latest" or (claude_parts[-1].isdigit() and len(claude_parts[-1]) >= 6)):
+            claude_parts.pop()
+
+        claude_families = ("opus", "sonnet", "haiku")
+        family = next((part for part in claude_parts if part in claude_families), "")
+        if family:
+            family_index = claude_parts.index(family)
+            if family_index == 0:
+                version_tokens = [part for part in claude_parts[1:] if part.isdigit()]
+            else:
+                version_tokens = [part for part in claude_parts[:family_index] if part.isdigit()]
+
+            version = ""
+            if len(version_tokens) >= 2:
+                version = f"{version_tokens[0]}.{version_tokens[1]}"
+            elif version_tokens:
+                version = version_tokens[0]
+
+            return f"{family.capitalize()} {version}".strip()
+
+        model_tail = model_name.split("/")[-1]
+        cleaned = model_tail.replace("_", " ").replace("-", " ").strip()
+        return cleaned.title() if cleaned else model_name
+
+    def _commit_trailers_for(self, runtime: WorkflowRuntime | None) -> list[str]:
+        model_label = self._format_commit_model_label(runtime)
+        if not model_label:
+            return []
+        return [f"Co-Authored-By: MySwat Dev ({model_label}) <noreply@myswat.invalid>"]
+
     def _commit_test_changes(self) -> bool:
         if self._repo_path is None:
             return True
@@ -380,9 +426,13 @@ class WorkflowKernel:
             )
             return True
 
+        # The first QA runtime acts as the GA test lead throughout _run_test,
+        # so use the same runtime for commit attribution.
+        qa_lead = self._qas[0] if self._qas else None
         commit_result = commit_repo_changes(
             self._repo_path,
             message="test: sync approved test changes",
+            trailers=self._commit_trailers_for(qa_lead),
         )
         if not commit_result.ok:
             self._blocked = True
@@ -423,6 +473,7 @@ class WorkflowKernel:
         commit_result = commit_repo_changes(
             self._repo_path,
             message=f"phase {phase_index}: {phase_name}",
+            trailers=self._commit_trailers_for(self._dev),
         )
         if not commit_result.ok:
             self._blocked = True
