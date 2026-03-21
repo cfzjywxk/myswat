@@ -8,7 +8,12 @@ from pathlib import Path
 from typing import Callable
 
 from myswat.large_payloads import resolve_externalized_text, resolve_externalized_value
-from myswat.repo_ops import commit_repo_changes, probe_git_repository, write_design_plan_doc
+from myswat.repo_ops import (
+    commit_repo_changes,
+    probe_git_repository,
+    push_repo_changes,
+    write_design_plan_doc,
+)
 from myswat.server import (
     ReviewCycleCancellationRequest,
     ReviewRequest,
@@ -313,7 +318,7 @@ class WorkflowKernel:
             )
         except Exception as exc:
             self._blocked = True
-            self._failure_summary = f"Failed to export design plan to docs: {exc}"
+            self._failure_summary = f"Failed to export design plan doc: {exc}"
             self._record_repo_event(
                 event_type="repo_export_failed",
                 title="Design plan export failed",
@@ -342,7 +347,7 @@ class WorkflowKernel:
         if not commit_result.ok:
             self._blocked = True
             self._failure_summary = (
-                "Failed to commit exported design plan docs. "
+                "Failed to commit the exported design plan doc. "
                 f"{commit_result.message}".strip()
             )
             self._record_repo_event(
@@ -359,6 +364,46 @@ class WorkflowKernel:
             title="Design plan committed" if commit_result.committed else "Design plan commit skipped",
             summary=commit_result.message or "No design-plan doc changes to commit.",
             stage="plan",
+        )
+        return True
+
+    def _commit_test_changes(self) -> bool:
+        if self._repo_path is None:
+            return True
+        if not self._repo_commit_ready:
+            self._record_repo_event(
+                event_type="repo_commit_skipped",
+                title="Test workflow local commit skipped",
+                summary=self._repo_commit_skip_reason or "Automatic local commits are disabled.",
+                stage="ga_test_commit",
+                warning=True,
+            )
+            return True
+
+        commit_result = commit_repo_changes(
+            self._repo_path,
+            message="test: sync approved test changes",
+        )
+        if not commit_result.ok:
+            self._blocked = True
+            self._failure_summary = (
+                "Failed to commit approved test changes. "
+                f"{commit_result.message}".strip()
+            )
+            self._record_repo_event(
+                event_type="repo_commit_failed",
+                title="Test workflow local commit failed",
+                summary=self._failure_summary,
+                stage="ga_test_commit",
+                warning=True,
+            )
+            return False
+
+        self._record_repo_event(
+            event_type="repo_commit",
+            title="Test workflow local changes committed" if commit_result.committed else "Test workflow local commit skipped",
+            summary=commit_result.message or "No approved test changes to commit.",
+            stage="ga_test_commit",
         )
         return True
 
@@ -399,6 +444,69 @@ class WorkflowKernel:
             title=f"Phase {phase_index} local changes committed" if commit_result.committed else f"Phase {phase_index} local commit skipped",
             summary=commit_result.message or "No phase changes to commit.",
             stage=f"phase_{phase_index}_commit",
+        )
+        return True
+
+    def _finalize_workflow_repo_sync(self) -> bool:
+        if self._repo_path is None:
+            return True
+        if not self._repo_commit_ready:
+            self._record_repo_event(
+                event_type="repo_push_skipped",
+                title="Final workflow push skipped",
+                summary=self._repo_commit_skip_reason or "Automatic repo sync is disabled.",
+                stage="repo",
+                warning=True,
+            )
+            return True
+
+        commit_result = commit_repo_changes(
+            self._repo_path,
+            message=f"workflow: finalize {self._mode.value}",
+        )
+        if not commit_result.ok:
+            self._blocked = True
+            self._failure_summary = (
+                f"Failed to commit final {self._mode.value} workflow changes. "
+                f"{commit_result.message}".strip()
+            )
+            self._record_repo_event(
+                event_type="repo_commit_failed",
+                title="Final workflow commit failed",
+                summary=self._failure_summary,
+                stage="repo",
+                warning=True,
+            )
+            return False
+
+        self._record_repo_event(
+            event_type="repo_commit",
+            title="Final workflow changes committed" if commit_result.committed else "Final workflow commit skipped",
+            summary=commit_result.message or "No final workflow changes to commit.",
+            stage="repo",
+        )
+
+        push_result = push_repo_changes(self._repo_path)
+        if not push_result.ok:
+            self._blocked = True
+            self._failure_summary = (
+                f"Failed to push final {self._mode.value} workflow changes. "
+                f"{push_result.message}".strip()
+            )
+            self._record_repo_event(
+                event_type="repo_push_failed",
+                title="Final workflow push failed",
+                summary=self._failure_summary,
+                stage="repo",
+                warning=True,
+            )
+            return False
+
+        self._record_repo_event(
+            event_type="repo_push",
+            title="Final workflow changes pushed" if push_result.pushed else "Final workflow push skipped",
+            summary=push_result.message or "Pushed final workflow commits.",
+            stage="repo",
         )
         return True
 
@@ -1199,12 +1307,15 @@ class WorkflowKernel:
         if status != "pass":
             self._blocked = True
             self._failure_summary = summary
-        return GATestResult(
+        ga_result = GATestResult(
             test_plan=reviewed_plan,
             test_report=test_completion.artifact_content,
             passed=(status == "pass"),
             bugs_found=int(payload.get("tests_failed") or len(payload.get("bugs") or [])),
         )
+        if ga_result.passed:
+            self._commit_test_changes()
+        return ga_result
 
     def _generate_final_report(self, completed_summaries: list[str]) -> str:
         completed_phase_context = "\n".join(completed_summaries) or "No completed phases."
@@ -1319,6 +1430,12 @@ class WorkflowKernel:
             return result
 
         result.final_report = self._generate_final_report(completed_summaries)
+        if self._mode in {WorkMode.full, WorkMode.develop}:
+            if not self._finalize_workflow_repo_sync():
+                result.blocked = True
+                result.failure_summary = self._failure_summary or "Failed to sync workflow commits."
+                result.final_report = result.failure_summary
+                return result
         result.success = not self._blocked
         result.blocked = self._blocked
         result.failure_summary = self._failure_summary

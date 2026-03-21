@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from myswat.repo_ops import GitCommitResult, GitProbeResult
+from myswat.repo_ops import GitCommitResult, GitProbeResult, GitPushResult
 from myswat.server.contracts import ReviewCycleCancellationRequest, ReviewVerdictEnvelope, StageRunCompletion
 from myswat.workflow.kernel import GATestResult, PhaseResult, WorkflowKernel, _extract_json_block
 from myswat.workflow.modes import WorkMode
@@ -220,7 +220,7 @@ def test_run_exports_design_plan_to_docs_and_commits_when_plan_finalized(tmp_pat
             with patch.object(kernel, "_run_plan", return_value=("approved plan", True)):
                 with patch(
                     "myswat.workflow.kernel.write_design_plan_doc",
-                    return_value=repo_path / "docs" / "myswat-design-plan.md",
+                    return_value=repo_path / "myswat-design-plan.md",
                 ) as mock_write:
                     with patch(
                         "myswat.workflow.kernel.commit_repo_changes",
@@ -238,7 +238,7 @@ def test_run_exports_design_plan_to_docs_and_commits_when_plan_finalized(tmp_pat
     mock_commit.assert_called_once_with(
         repo_path.resolve(),
         message="docs: sync myswat design plan",
-        paths=[repo_path / "docs" / "myswat-design-plan.md"],
+        paths=[repo_path / "myswat-design-plan.md"],
     )
 
 
@@ -1004,6 +1004,185 @@ def test_run_phase_blocks_when_local_commit_fails(tmp_path):
     assert result.committed is False
     assert kernel._blocked is True
     assert "Failed to commit phase 1" in kernel._failure_summary
+
+
+def test_run_test_commits_local_changes_after_pass(tmp_path):
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=84,
+        mode=WorkMode.test,
+        auto_approve=True,
+        repo_path=str(repo_path),
+    )
+    kernel._repo_commit_checked = True
+    kernel._repo_commit_ready = True
+
+    with patch.object(
+        kernel,
+        "_wait_for_stage_result",
+        side_effect=[
+            StageRunCompletion(
+                stage_run_id=100,
+                work_item_id=84,
+                stage_name="test_plan",
+                status="completed",
+                summary="Test plan ready.",
+                artifact_id=1000,
+                artifact_content="Test plan",
+            ),
+            StageRunCompletion(
+                stage_run_id=101,
+                work_item_id=84,
+                stage_name="ga_test",
+                status="completed",
+                summary="All tests passed.",
+                artifact_id=1001,
+                artifact_content='{"status":"pass","summary":"All tests passed.","tests_failed":0}',
+            ),
+        ],
+    ):
+        with patch.object(kernel, "_run_review_loop", return_value=("Test plan", 1, True)):
+            with patch.object(kernel, "_checkpoint", return_value=("Test plan", True)):
+                with patch(
+                    "myswat.workflow.kernel.commit_repo_changes",
+                    return_value=GitCommitResult(True, True, "Committed test changes."),
+                ) as mock_commit:
+                    result = kernel._run_test("ship it", "design", [])
+
+    assert result.passed is True
+    mock_commit.assert_called_once_with(
+        repo_path.resolve(),
+        message="test: sync approved test changes",
+    )
+
+
+def test_run_test_preserves_passed_status_when_post_test_commit_fails(tmp_path):
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=86,
+        mode=WorkMode.test,
+        auto_approve=True,
+        repo_path=str(repo_path),
+    )
+    kernel._repo_commit_checked = True
+    kernel._repo_commit_ready = True
+
+    with patch.object(
+        kernel,
+        "_wait_for_stage_result",
+        side_effect=[
+            StageRunCompletion(
+                stage_run_id=100,
+                work_item_id=86,
+                stage_name="test_plan",
+                status="completed",
+                summary="Test plan ready.",
+                artifact_id=1000,
+                artifact_content="Test plan",
+            ),
+            StageRunCompletion(
+                stage_run_id=101,
+                work_item_id=86,
+                stage_name="ga_test",
+                status="completed",
+                summary="All tests passed.",
+                artifact_id=1001,
+                artifact_content='{"status":"pass","summary":"All tests passed.","tests_failed":0}',
+            ),
+        ],
+    ):
+        with patch.object(kernel, "_run_review_loop", return_value=("Test plan", 1, True)):
+            with patch.object(kernel, "_checkpoint", return_value=("Test plan", True)):
+                with patch(
+                    "myswat.workflow.kernel.commit_repo_changes",
+                    return_value=GitCommitResult(False, False, "git commit failed."),
+                ):
+                    result = kernel._run_test("ship it", "design", [])
+
+    assert result.passed is True
+    assert kernel._blocked is True
+    assert "Failed to commit approved test changes." in kernel._failure_summary
+
+
+def test_develop_mode_pushes_repo_after_successful_workflow(tmp_path):
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=85,
+        mode=WorkMode.develop,
+        auto_approve=True,
+        repo_path=str(repo_path),
+    )
+
+    with patch(
+        "myswat.workflow.kernel.probe_git_repository",
+        return_value=GitProbeResult(True, True, True, ""),
+    ):
+        with patch.object(
+            kernel,
+            "_load_latest_artifact",
+            side_effect=lambda artifact_type: {
+                "design_doc": "Approved design",
+                "implementation_plan": "Phase 1: Ship it",
+            }.get(artifact_type, ""),
+        ):
+            with patch.object(kernel, "_export_design_plan_to_docs", return_value=True):
+                with patch.object(kernel, "_parse_phases", return_value=["Ship it"]):
+                    with patch.object(
+                        kernel,
+                        "_run_phase",
+                        return_value=PhaseResult(name="Ship it", summary="done", committed=True),
+                    ):
+                        with patch.object(kernel, "_generate_final_report", return_value="report"):
+                            with patch(
+                                "myswat.workflow.kernel.commit_repo_changes",
+                                return_value=GitCommitResult(True, True, "Committed final workflow changes."),
+                            ) as mock_commit:
+                                with patch(
+                                    "myswat.workflow.kernel.push_repo_changes",
+                                    return_value=GitPushResult(True, True, "Pushed local workflow commits."),
+                                ) as mock_push:
+                                    result = kernel.run("ship it")
+
+    assert result.success is True
+    assert result.final_report == "report"
+    mock_commit.assert_called_once_with(
+        repo_path.resolve(),
+        message="workflow: finalize develop",
+    )
+    mock_push.assert_called_once_with(repo_path.resolve())
 
 
 def test_code_review_feedback_builds_phase_revision_prompt():

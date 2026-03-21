@@ -24,6 +24,13 @@ class GitCommitResult:
     message: str = ""
 
 
+@dataclass(frozen=True)
+class GitPushResult:
+    ok: bool
+    pushed: bool
+    message: str = ""
+
+
 def _normalize_repo_path(repo_path: str | Path) -> Path:
     return Path(repo_path).expanduser().resolve()
 
@@ -172,9 +179,7 @@ def write_design_plan_doc(
     filename: str = "myswat-design-plan.md",
 ) -> Path:
     repo = _normalize_repo_path(repo_path)
-    docs_dir = repo / "docs"
-    docs_dir.mkdir(parents=True, exist_ok=True)
-    doc_path = docs_dir / filename
+    doc_path = repo / filename
     doc_path.write_text(
         render_design_plan_markdown(
             requirement=requirement,
@@ -231,4 +236,35 @@ def commit_repo_changes(
         ok=True,
         committed=True,
         message=_git_message(commit_result, f"Committed local changes: {message}"),
+    )
+
+
+def push_repo_changes(
+    repo_path: str | Path | None,
+    *,
+    remote: str | None = None,
+    branch: str | None = None,
+) -> GitPushResult:
+    status = probe_git_repository(repo_path)
+    if not status.available:
+        return GitPushResult(ok=True, pushed=False, message=status.message or "git CLI is not available.")
+    if not status.is_git_repo:
+        return GitPushResult(ok=True, pushed=False, message=status.message or "Repository is not under git.")
+
+    repo = _normalize_repo_path(repo_path)
+    push_args = ["push"]
+    if remote:
+        push_args.append(remote)
+    if branch:
+        push_args.append(branch)
+
+    push_result = _run_git(repo, *push_args)
+    if push_result is None:
+        return GitPushResult(ok=True, pushed=False, message="git CLI is not available.")
+    if push_result.returncode != 0:
+        return GitPushResult(ok=False, pushed=False, message=_git_message(push_result, "git push failed."))
+    return GitPushResult(
+        ok=True,
+        pushed=True,
+        message=_git_message(push_result, "Pushed local workflow commits."),
     )
