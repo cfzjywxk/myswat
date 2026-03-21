@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import os
+from datetime import datetime
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
@@ -28,6 +28,13 @@ class GitCommitResult:
 class GitPushResult:
     ok: bool
     pushed: bool
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class GitChangedPathsResult:
+    ok: bool
+    paths: set[str] = field(default_factory=set)
     message: str = ""
 
 
@@ -55,12 +62,48 @@ def _git_message(result: subprocess.CompletedProcess[str] | None, fallback: str)
     return stdout or stderr or fallback
 
 
-def _relative_repo_path(repo_path: Path, file_path: str | Path) -> str:
-    candidate = Path(file_path).expanduser().resolve()
+def _relative_repo_path(repo_path: Path, file_path: str | Path) -> str | None:
+    candidate = Path(file_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = repo_path / candidate
+    candidate = candidate.resolve()
     try:
         return str(candidate.relative_to(repo_path))
     except ValueError:
-        return os.path.relpath(candidate, repo_path)
+        return None
+
+
+def _timestamped_filename(stem: str, *, generated_at: datetime | None = None, suffix: str = ".md") -> str:
+    timestamp = (generated_at or datetime.now().astimezone()).strftime("%Y%m%d-%H%M%S")
+    return f"{stem}-{timestamp}{suffix}"
+
+
+def _parse_porcelain_paths(output: str) -> set[str]:
+    parts = output.split("\0")
+    paths: set[str] = set()
+    index = 0
+    while index < len(parts):
+        entry = parts[index]
+        if not entry:
+            index += 1
+            continue
+        if len(entry) < 4:
+            index += 1
+            continue
+
+        status = entry[:2]
+        primary_path = entry[3:]
+        if primary_path:
+            paths.add(primary_path)
+
+        if "R" in status or "C" in status:
+            if index + 1 < len(parts):
+                secondary_path = parts[index + 1]
+                if secondary_path:
+                    paths.add(secondary_path)
+                index += 1
+        index += 1
+    return paths
 
 
 def probe_git_repository(repo_path: str | Path | None) -> GitProbeResult:
@@ -152,6 +195,24 @@ def ensure_git_repository(repo_path: str | Path | None) -> GitProbeResult:
     return refreshed
 
 
+def list_changed_repo_paths(repo_path: str | Path | None) -> GitChangedPathsResult:
+    status = probe_git_repository(repo_path)
+    if not status.available:
+        return GitChangedPathsResult(ok=False, message=status.message or "git CLI is not available.")
+    if not status.is_git_repo:
+        return GitChangedPathsResult(ok=False, message=status.message or "Repository is not under git.")
+    if not repo_path:
+        return GitChangedPathsResult(ok=False, message="Repository path is not configured.")
+
+    repo = _normalize_repo_path(repo_path)
+    result = _run_git(repo, "status", "--porcelain", "-z")
+    if result is None:
+        return GitChangedPathsResult(ok=False, message="git CLI is not available.")
+    if result.returncode != 0:
+        return GitChangedPathsResult(ok=False, message=_git_message(result, "Unable to inspect git status."))
+    return GitChangedPathsResult(ok=True, paths=_parse_porcelain_paths(result.stdout or ""))
+
+
 def render_design_plan_markdown(
     *,
     requirement: str,
@@ -176,10 +237,11 @@ def write_design_plan_doc(
     requirement: str,
     design: str,
     plan: str,
-    filename: str = "myswat-design-plan.md",
+    filename: str | None = None,
+    generated_at: datetime | None = None,
 ) -> Path:
     repo = _normalize_repo_path(repo_path)
-    doc_path = repo / filename
+    doc_path = repo / (filename or _timestamped_filename("myswat-design-plan", generated_at=generated_at))
     doc_path.write_text(
         render_design_plan_markdown(
             requirement=requirement,
@@ -188,6 +250,24 @@ def write_design_plan_doc(
         ),
         encoding="utf-8",
     )
+    return doc_path
+
+
+def write_workflow_report_doc(
+    repo_path: str | Path,
+    *,
+    report: str,
+    work_mode: str,
+    filename: str | None = None,
+    generated_at: datetime | None = None,
+) -> Path:
+    repo = _normalize_repo_path(repo_path)
+    stem = f"myswat-{(work_mode or 'workflow').strip().lower()}-workflow-report"
+    doc_path = repo / (filename or _timestamped_filename(stem, generated_at=generated_at))
+    content = report.strip()
+    if not content.endswith("\n"):
+        content += "\n"
+    doc_path.write_text(content, encoding="utf-8")
     return doc_path
 
 
@@ -207,10 +287,20 @@ def commit_repo_changes(
         return GitCommitResult(ok=True, committed=False, message="Repository path is not configured.")
 
     repo = _normalize_repo_path(repo_path)
-    path_args = [_relative_repo_path(repo, path) for path in paths or []]
-    if path_args:
-        add_result = _run_git(repo, "add", "--", *path_args)
+    if paths is not None:
+        path_args: list[str] = []
+        seen_paths: set[str] = set()
+        for path in paths:
+            relative = _relative_repo_path(repo, path)
+            if not relative or relative in seen_paths:
+                continue
+            seen_paths.add(relative)
+            path_args.append(relative)
+        if not path_args:
+            return GitCommitResult(ok=True, committed=False, message="No selected paths to commit.")
+        add_result = _run_git(repo, "add", "-A", "--", *path_args)
     else:
+        path_args = []
         add_result = _run_git(repo, "add", "-A")
     if add_result is None:
         return GitCommitResult(ok=True, committed=False, message="git CLI is not available.")

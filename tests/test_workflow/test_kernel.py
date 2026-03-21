@@ -228,15 +228,16 @@ def test_run_exports_design_plan_to_docs_and_commits_when_plan_finalized(tmp_pat
     with patch("myswat.workflow.kernel.probe_git_repository", return_value=GitProbeResult(True, True, True, "")):
         with patch.object(kernel, "_run_design", return_value=("approved design", True)):
             with patch.object(kernel, "_run_plan", return_value=("approved plan", True)):
-                with patch(
-                    "myswat.workflow.kernel.write_design_plan_doc",
-                    return_value=repo_path / "myswat-design-plan.md",
-                ) as mock_write:
+                with patch.object(kernel, "_export_final_report_to_docs", return_value=True):
                     with patch(
-                        "myswat.workflow.kernel.commit_repo_changes",
-                        return_value=GitCommitResult(True, True, "Committed local changes."),
-                    ) as mock_commit:
-                        result = kernel.run("ship it")
+                        "myswat.workflow.kernel.write_design_plan_doc",
+                        return_value=repo_path / "myswat-design-plan.md",
+                    ) as mock_write:
+                        with patch(
+                            "myswat.workflow.kernel.commit_repo_changes",
+                            return_value=GitCommitResult(True, True, "Committed local changes."),
+                        ) as mock_commit:
+                            result = kernel.run("ship it")
 
     assert result.success is True
     mock_write.assert_called_once_with(
@@ -1116,28 +1117,34 @@ def test_run_phase_commits_local_changes_after_lgtm(tmp_path):
                 status="completed",
                 summary="Phase done.",
                 artifact_id=1001,
-                artifact_content="Phase summary",
+                artifact_content="Updated `src/lib.rs:10` and `src/service.rs:20`",
             ),
         ):
             with patch.object(kernel, "_run_review_loop", return_value=("Phase summary", 1, True)):
-                with patch(
-                    "myswat.workflow.kernel.commit_repo_changes",
-                    return_value=GitCommitResult(True, True, "Committed local changes."),
-                ) as mock_commit:
-                    result = kernel._run_phase(
-                        requirement="ship it",
-                        design="design",
-                        plan="Phase 1: ship it",
-                        phase_name="Ship it",
-                        phase_index=1,
-                        total_phases=1,
-                        completed_summaries=[],
-                    )
+                with patch.object(
+                    kernel,
+                    "_current_workflow_repo_paths",
+                    return_value=[repo_path / "src/lib.rs", repo_path / "src/service.rs"],
+                ):
+                    with patch(
+                        "myswat.workflow.kernel.commit_repo_changes",
+                        return_value=GitCommitResult(True, True, "Committed local changes."),
+                    ) as mock_commit:
+                        result = kernel._run_phase(
+                            requirement="ship it",
+                            design="design",
+                            plan="Phase 1: ship it",
+                            phase_name="Ship it",
+                            phase_index=1,
+                            total_phases=1,
+                            completed_summaries=[],
+                        )
 
     assert result.committed is True
     mock_commit.assert_called_once_with(
         repo_path.resolve(),
         message="phase 1: Ship it",
+        paths=[repo_path / "src/lib.rs", repo_path / "src/service.rs"],
         trailers=["Co-Authored-By: MySwat Dev (GPT-5.4) <noreply@myswat.invalid>"],
     )
 
@@ -1179,19 +1186,20 @@ def test_run_phase_blocks_when_local_commit_fails(tmp_path):
             ),
         ):
             with patch.object(kernel, "_run_review_loop", return_value=("Phase summary", 1, True)):
-                with patch(
-                    "myswat.workflow.kernel.commit_repo_changes",
-                    return_value=GitCommitResult(False, False, "git commit failed."),
-                ):
-                    result = kernel._run_phase(
-                        requirement="ship it",
-                        design="design",
-                        plan="Phase 1: ship it",
-                        phase_name="Ship it",
-                        phase_index=1,
-                        total_phases=1,
-                        completed_summaries=[],
-                    )
+                with patch.object(kernel, "_current_workflow_repo_paths", return_value=[repo_path / "src/lib.rs"]):
+                    with patch(
+                        "myswat.workflow.kernel.commit_repo_changes",
+                        return_value=GitCommitResult(False, False, "git commit failed."),
+                    ):
+                        result = kernel._run_phase(
+                            requirement="ship it",
+                            design="design",
+                            plan="Phase 1: ship it",
+                            phase_name="Ship it",
+                            phase_index=1,
+                            total_phases=1,
+                            completed_summaries=[],
+                        )
 
     assert result.committed is False
     assert kernel._blocked is True
@@ -1246,16 +1254,18 @@ def test_run_test_commits_local_changes_after_pass(tmp_path):
     ):
         with patch.object(kernel, "_run_review_loop", return_value=("Test plan", 1, True)):
             with patch.object(kernel, "_checkpoint", return_value=("Test plan", True)):
-                with patch(
-                    "myswat.workflow.kernel.commit_repo_changes",
-                    return_value=GitCommitResult(True, True, "Committed test changes."),
-                ) as mock_commit:
-                    result = kernel._run_test("ship it", "design", [])
+                with patch.object(kernel, "_current_workflow_repo_paths", return_value=[repo_path / "tests/test_api.rs"]):
+                    with patch(
+                        "myswat.workflow.kernel.commit_repo_changes",
+                        return_value=GitCommitResult(True, True, "Committed test changes."),
+                    ) as mock_commit:
+                        result = kernel._run_test("ship it", "design", [])
 
     assert result.passed is True
     mock_commit.assert_called_once_with(
         repo_path.resolve(),
         message="test: sync approved test changes",
+        paths=[repo_path / "tests/test_api.rs"],
         trailers=["Co-Authored-By: MySwat Dev (Opus 4.6) <noreply@myswat.invalid>"],
     )
 
@@ -1308,11 +1318,12 @@ def test_run_test_preserves_passed_status_when_post_test_commit_fails(tmp_path):
     ):
         with patch.object(kernel, "_run_review_loop", return_value=("Test plan", 1, True)):
             with patch.object(kernel, "_checkpoint", return_value=("Test plan", True)):
-                with patch(
-                    "myswat.workflow.kernel.commit_repo_changes",
-                    return_value=GitCommitResult(False, False, "git commit failed."),
-                ):
-                    result = kernel._run_test("ship it", "design", [])
+                with patch.object(kernel, "_current_workflow_repo_paths", return_value=[repo_path / "tests/test_api.rs"]):
+                    with patch(
+                        "myswat.workflow.kernel.commit_repo_changes",
+                        return_value=GitCommitResult(False, False, "git commit failed."),
+                    ):
+                        result = kernel._run_test("ship it", "design", [])
 
     assert result.passed is True
     assert kernel._blocked is True
@@ -1359,23 +1370,155 @@ def test_develop_mode_pushes_repo_after_successful_workflow(tmp_path):
                         return_value=PhaseResult(name="Ship it", summary="done", committed=True),
                     ):
                         with patch.object(kernel, "_generate_final_report", return_value="report"):
-                            with patch(
-                                "myswat.workflow.kernel.commit_repo_changes",
-                                return_value=GitCommitResult(True, True, "Committed final workflow changes."),
-                            ) as mock_commit:
-                                with patch(
-                                    "myswat.workflow.kernel.push_repo_changes",
-                                    return_value=GitPushResult(True, True, "Pushed local workflow commits."),
-                                ) as mock_push:
-                                    result = kernel.run("ship it")
+                            with patch.object(kernel, "_export_final_report_to_docs", return_value=True):
+                                with patch.object(kernel, "_current_workflow_repo_paths", return_value=[repo_path / "myswat-develop-workflow-report.md"]):
+                                    with patch(
+                                        "myswat.workflow.kernel.commit_repo_changes",
+                                        return_value=GitCommitResult(True, True, "Committed final workflow changes."),
+                                    ) as mock_commit:
+                                        with patch(
+                                            "myswat.workflow.kernel.push_repo_changes",
+                                            return_value=GitPushResult(True, True, "Pushed local workflow commits."),
+                                        ) as mock_push:
+                                            result = kernel.run("ship it")
 
     assert result.success is True
     assert result.final_report == "report"
     mock_commit.assert_called_once_with(
         repo_path.resolve(),
         message="workflow: finalize develop",
+        paths=[repo_path / "myswat-develop-workflow-report.md"],
     )
     mock_push.assert_called_once_with(repo_path.resolve())
+
+
+def test_finalize_workflow_repo_sync_skips_push_when_no_workflow_commit_was_created(tmp_path):
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    kernel = WorkflowKernel(
+        store=_store(),
+        service=_service(),
+        dev=_participant(10, "developer"),
+        qas=[_participant(20, "qa_main")],
+        project_id=1,
+        work_item_id=903,
+        mode=WorkMode.develop,
+        auto_approve=True,
+        repo_path=str(repo_path),
+    )
+    kernel._repo_commit_checked = True
+    kernel._repo_commit_ready = True
+
+    with patch.object(kernel, "_current_workflow_repo_paths", return_value=[]):
+        with patch("myswat.workflow.kernel.push_repo_changes") as mock_push:
+            ok = kernel._finalize_workflow_repo_sync()
+
+    assert ok is True
+    mock_push.assert_not_called()
+
+
+def test_dirty_repo_at_start_uses_scoped_commit_strategy(tmp_path):
+    store = _store()
+    kernel = WorkflowKernel(
+        store=store,
+        service=_service(),
+        dev=_participant(10, "developer"),
+        qas=[_participant(20, "qa_main")],
+        project_id=1,
+        work_item_id=90,
+        mode=WorkMode.develop,
+        auto_approve=True,
+        repo_path=str(tmp_path / "repo"),
+    )
+
+    with patch(
+        "myswat.workflow.kernel.probe_git_repository",
+        return_value=GitProbeResult(True, True, False, ""),
+    ):
+        with patch(
+            "myswat.workflow.kernel.list_changed_repo_paths",
+            return_value=SimpleNamespace(ok=True, paths={"notes.txt"}),
+        ):
+            kernel._ensure_repo_commit_ready()
+
+    assert kernel._repo_commit_ready is True
+    assert kernel._repo_initial_dirty_paths == {"notes.txt"}
+    assert any(
+        "workflow-owned paths" in call.kwargs.get("summary", "")
+        for call in store.append_work_item_process_event.call_args_list
+    )
+
+
+def test_current_workflow_repo_paths_excludes_initial_dirty_paths_even_when_preferred(tmp_path):
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    kernel = WorkflowKernel(
+        store=_store(),
+        service=_service(),
+        dev=_participant(10, "developer"),
+        qas=[_participant(20, "qa_main")],
+        project_id=1,
+        work_item_id=901,
+        mode=WorkMode.develop,
+        auto_approve=True,
+        repo_path=str(repo_path),
+    )
+    kernel._repo_initial_dirty_paths = {"notes.txt"}
+    kernel._repo_managed_paths = {"myswat-develop-workflow-report-20260321-214832.md"}
+
+    with patch(
+        "myswat.workflow.kernel.list_changed_repo_paths",
+        return_value=SimpleNamespace(
+            ok=True,
+            paths={
+                "notes.txt",
+                "src/lib.rs",
+                "myswat-develop-workflow-report-20260321-214832.md",
+            },
+        ),
+    ):
+        result = kernel._current_workflow_repo_paths("notes.txt", "src/lib.rs")
+
+    assert result == [
+        repo_path / "myswat-develop-workflow-report-20260321-214832.md",
+        repo_path / "src/lib.rs",
+    ]
+
+
+def test_export_final_report_to_docs_commits_immediately_in_design_mode(tmp_path):
+    store = _store()
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    kernel = WorkflowKernel(
+        store=store,
+        service=_service(),
+        dev=_participant(10, "developer"),
+        qas=[_participant(20, "qa_main")],
+        project_id=1,
+        work_item_id=91,
+        mode=WorkMode.design,
+        auto_approve=True,
+        repo_path=str(repo_path),
+    )
+    kernel._repo_commit_checked = True
+    kernel._repo_commit_ready = True
+
+    with patch(
+        "myswat.workflow.kernel.write_workflow_report_doc",
+        return_value=repo_path / "myswat-design-workflow-report-20260321-214832.md",
+    ):
+        with patch(
+            "myswat.workflow.kernel.commit_repo_changes",
+            return_value=GitCommitResult(True, True, "Committed workflow report."),
+        ) as mock_commit:
+            ok = kernel._export_final_report_to_docs("# Workflow Report")
+
+    assert ok is True
+    mock_commit.assert_called_once_with(
+        repo_path.resolve(),
+        message="docs: add myswat design report",
+        paths=[repo_path / "myswat-design-workflow-report-20260321-214832.md"],
+    )
 
 
 def test_commit_trailers_use_humanized_runtime_model_names():
@@ -1448,14 +1591,48 @@ def test_test_commit_trailer_uses_qa_lead_when_multiple_qas(tmp_path):
         "myswat.workflow.kernel.commit_repo_changes",
         return_value=GitCommitResult(True, True, "Committed test changes."),
     ) as mock_commit:
-        ok = kernel._commit_test_changes()
+        with patch.object(kernel, "_current_workflow_repo_paths", return_value=[repo_path / "tests/test_api.rs"]):
+            ok = kernel._commit_test_changes()
 
     assert ok is True
     mock_commit.assert_called_once_with(
         repo_path.resolve(),
         message="test: sync approved test changes",
+        paths=[repo_path / "tests/test_api.rs"],
         trailers=["Co-Authored-By: MySwat Dev (Opus 4.6) <noreply@myswat.invalid>"],
     )
+
+
+def test_extract_repo_paths_from_text_handles_root_level_and_absolute_repo_paths(tmp_path):
+    repo_path = tmp_path / "repo"
+    (repo_path / "src").mkdir(parents=True)
+    (repo_path / "src/lib.rs").write_text("", encoding="utf-8")
+    (repo_path / "src/service.rs").write_text("", encoding="utf-8")
+    (repo_path / "Cargo.toml").write_text("[package]\nname = 'demo'\n", encoding="utf-8")
+
+    kernel = WorkflowKernel(
+        store=_store(),
+        service=_service(),
+        dev=_participant(10, "developer"),
+        qas=[_participant(20, "qa_main")],
+        project_id=1,
+        work_item_id=902,
+        mode=WorkMode.develop,
+        auto_approve=True,
+        repo_path=str(repo_path),
+    )
+
+    extracted = kernel._extract_repo_paths_from_text(
+        (
+            "Updated `src/lib.rs:10`, "
+            f"`{repo_path / 'src/service.rs'}:20:3`, "
+            "`Cargo.toml`, "
+            "`StatementCtx`, "
+            "`../outside.rs`."
+        )
+    )
+
+    assert extracted == {"Cargo.toml", "src/lib.rs", "src/service.rs"}
 
 
 def test_code_review_feedback_builds_phase_revision_prompt():

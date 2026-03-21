@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import json
 import re
 from dataclasses import dataclass, field
@@ -11,9 +12,11 @@ from typing import Callable
 from myswat.large_payloads import resolve_externalized_text, resolve_externalized_value
 from myswat.repo_ops import (
     commit_repo_changes,
+    list_changed_repo_paths,
     probe_git_repository,
     push_repo_changes,
     write_design_plan_doc,
+    write_workflow_report_doc,
 )
 from myswat.server import (
     ReviewCycleCancellationRequest,
@@ -220,6 +223,9 @@ class WorkflowKernel:
         self._repo_commit_ready = False
         self._repo_commit_checked = False
         self._repo_commit_skip_reason = ""
+        self._repo_initial_dirty_paths: set[str] = set()
+        self._repo_managed_paths: set[str] = set()
+        self._repo_commits_created = False
 
     def _emit(
         self,
@@ -282,13 +288,22 @@ class WorkflowKernel:
             self._repo_commit_skip_reason = status.message or "git CLI is not available; skipping automatic local commits."
         elif not status.is_git_repo:
             self._repo_commit_skip_reason = status.message or "Repository is not under git; skipping automatic local commits."
-        elif not status.clean:
-            self._repo_commit_skip_reason = (
-                "Repository has uncommitted changes at workflow start; "
-                "skipping automatic local commits to avoid capturing unrelated edits."
-            )
         else:
             self._repo_commit_ready = True
+            if not status.clean:
+                dirty = list_changed_repo_paths(self._repo_path)
+                if dirty.ok:
+                    self._repo_initial_dirty_paths = set(dirty.paths)
+                self._record_repo_event(
+                    event_type="repo_commit_scope",
+                    title="Automatic local commits scoped to workflow paths",
+                    summary=(
+                        "Repository has pre-existing uncommitted changes; "
+                        "MySwat will commit only workflow-owned paths."
+                    ),
+                    stage="repo",
+                    warning=True,
+                )
             return
 
         if self._repo_commit_skip_reason:
@@ -299,6 +314,64 @@ class WorkflowKernel:
                 stage="repo",
                 warning=True,
             )
+
+    def _repo_relative_path(self, path: str | Path | None) -> str | None:
+        if self._repo_path is None or path is None:
+            return None
+        candidate = Path(str(path)).expanduser()
+        if candidate.is_absolute():
+            try:
+                return str(candidate.resolve().relative_to(self._repo_path))
+            except ValueError:
+                return None
+        normalized_parts: list[str] = []
+        for part in candidate.parts:
+            if part in {"", "."}:
+                continue
+            if part == "..":
+                return None
+            normalized_parts.append(part)
+        if not normalized_parts:
+            return None
+        return Path(*normalized_parts).as_posix()
+
+    def _register_managed_repo_path(self, path: str | Path | None) -> None:
+        relative = self._repo_relative_path(path)
+        if relative:
+            self._repo_managed_paths.add(relative)
+
+    def _extract_repo_paths_from_text(self, text: str) -> set[str]:
+        if self._repo_path is None or not text:
+            return set()
+
+        results: set[str] = set()
+        for raw in re.findall(r"`([^`\n]+)`", text):
+            candidate = raw.strip()
+            candidate = re.sub(r":\d+(?::\d+)?$", "", candidate)
+            if not candidate:
+                continue
+            if not Path(candidate).is_absolute() and "/" not in candidate and not (self._repo_path / candidate).exists():
+                continue
+            relative = self._repo_relative_path(candidate)
+            if relative:
+                results.add(relative)
+        return results
+
+    def _current_workflow_repo_paths(self, *preferred_paths: str | Path) -> list[Path]:
+        if self._repo_path is None:
+            return []
+
+        changed = list_changed_repo_paths(self._repo_path)
+        if not changed.ok:
+            return []
+
+        selected = {path for path in changed.paths if path not in self._repo_initial_dirty_paths}
+        selected.update(path for path in self._repo_managed_paths if path in changed.paths)
+        for preferred in preferred_paths:
+            relative = self._repo_relative_path(preferred)
+            if relative and relative in changed.paths and relative not in self._repo_initial_dirty_paths:
+                selected.add(relative)
+        return [self._repo_path / path for path in sorted(selected)]
 
     def _export_design_plan_to_docs(
         self,
@@ -329,6 +402,7 @@ class WorkflowKernel:
             )
             return False
 
+        self._register_managed_repo_path(doc_path)
         summary = f"Exported the approved design plan to {doc_path.relative_to(self._repo_path)}."
         self._record_repo_event(
             event_type="repo_exported",
@@ -366,6 +440,71 @@ class WorkflowKernel:
             summary=commit_result.message or "No design-plan doc changes to commit.",
             stage="plan",
         )
+        if commit_result.committed:
+            self._repo_commits_created = True
+        return True
+
+    def _export_final_report_to_docs(self, report: str) -> bool:
+        if self._repo_path is None or not report.strip():
+            return True
+
+        try:
+            doc_path = write_workflow_report_doc(
+                self._repo_path,
+                report=report,
+                work_mode=self._mode.value,
+            )
+        except Exception as exc:
+            self._blocked = True
+            self._failure_summary = f"Failed to export workflow report: {exc}"
+            self._record_repo_event(
+                event_type="repo_export_failed",
+                title="Workflow report export failed",
+                summary=self._failure_summary,
+                stage="report",
+                warning=True,
+            )
+            return False
+
+        self._register_managed_repo_path(doc_path)
+        self._record_repo_event(
+            event_type="repo_exported",
+            title="Workflow report exported",
+            summary=f"Exported the workflow report to {doc_path.relative_to(self._repo_path)}.",
+            stage="report",
+        )
+
+        if not self._repo_commit_ready or self._mode in {WorkMode.full, WorkMode.develop}:
+            return True
+
+        commit_result = commit_repo_changes(
+            self._repo_path,
+            message=f"docs: add myswat {self._mode.value} report",
+            paths=[doc_path],
+        )
+        if not commit_result.ok:
+            self._blocked = True
+            self._failure_summary = (
+                "Failed to commit the exported workflow report. "
+                f"{commit_result.message}".strip()
+            )
+            self._record_repo_event(
+                event_type="repo_commit_failed",
+                title="Workflow report commit failed",
+                summary=self._failure_summary,
+                stage="report",
+                warning=True,
+            )
+            return False
+
+        self._record_repo_event(
+            event_type="repo_commit",
+            title="Workflow report committed" if commit_result.committed else "Workflow report commit skipped",
+            summary=commit_result.message or "No workflow-report changes to commit.",
+            stage="report",
+        )
+        if commit_result.committed:
+            self._repo_commits_created = True
         return True
 
     @staticmethod
@@ -429,9 +568,13 @@ class WorkflowKernel:
         # The first QA runtime acts as the GA test lead throughout _run_test,
         # so use the same runtime for commit attribution.
         qa_lead = self._qas[0] if self._qas else None
+        commit_paths = self._current_workflow_repo_paths()
+        if not commit_paths:
+            return True
         commit_result = commit_repo_changes(
             self._repo_path,
             message="test: sync approved test changes",
+            paths=commit_paths,
             trailers=self._commit_trailers_for(qa_lead),
         )
         if not commit_result.ok:
@@ -455,9 +598,11 @@ class WorkflowKernel:
             summary=commit_result.message or "No approved test changes to commit.",
             stage="ga_test_commit",
         )
+        if commit_result.committed:
+            self._repo_commits_created = True
         return True
 
-    def _commit_phase_changes(self, *, phase_index: int, phase_name: str) -> bool:
+    def _commit_phase_changes(self, *, phase_index: int, phase_name: str, summary: str) -> bool:
         if self._repo_path is None:
             return True
         if not self._repo_commit_ready:
@@ -470,9 +615,14 @@ class WorkflowKernel:
             )
             return True
 
+        preferred_paths = sorted(self._extract_repo_paths_from_text(summary))
+        commit_paths = self._current_workflow_repo_paths(*preferred_paths)
+        if not commit_paths:
+            return True
         commit_result = commit_repo_changes(
             self._repo_path,
             message=f"phase {phase_index}: {phase_name}",
+            paths=commit_paths,
             trailers=self._commit_trailers_for(self._dev),
         )
         if not commit_result.ok:
@@ -496,6 +646,8 @@ class WorkflowKernel:
             summary=commit_result.message or "No phase changes to commit.",
             stage=f"phase_{phase_index}_commit",
         )
+        if commit_result.committed:
+            self._repo_commits_created = True
         return True
 
     def _finalize_workflow_repo_sync(self) -> bool:
@@ -511,31 +663,45 @@ class WorkflowKernel:
             )
             return True
 
-        commit_result = commit_repo_changes(
-            self._repo_path,
-            message=f"workflow: finalize {self._mode.value}",
-        )
-        if not commit_result.ok:
-            self._blocked = True
-            self._failure_summary = (
-                f"Failed to commit final {self._mode.value} workflow changes. "
-                f"{commit_result.message}".strip()
+        commit_paths = self._current_workflow_repo_paths(*sorted(self._repo_managed_paths))
+        if commit_paths:
+            commit_result = commit_repo_changes(
+                self._repo_path,
+                message=f"workflow: finalize {self._mode.value}",
+                paths=commit_paths,
             )
-            self._record_repo_event(
-                event_type="repo_commit_failed",
-                title="Final workflow commit failed",
-                summary=self._failure_summary,
-                stage="repo",
-                warning=True,
-            )
-            return False
+            if not commit_result.ok:
+                self._blocked = True
+                self._failure_summary = (
+                    f"Failed to commit final {self._mode.value} workflow changes. "
+                    f"{commit_result.message}".strip()
+                )
+                self._record_repo_event(
+                    event_type="repo_commit_failed",
+                    title="Final workflow commit failed",
+                    summary=self._failure_summary,
+                    stage="repo",
+                    warning=True,
+                )
+                return False
 
-        self._record_repo_event(
-            event_type="repo_commit",
-            title="Final workflow changes committed" if commit_result.committed else "Final workflow commit skipped",
-            summary=commit_result.message or "No final workflow changes to commit.",
-            stage="repo",
-        )
+            self._record_repo_event(
+                event_type="repo_commit",
+                title="Final workflow changes committed" if commit_result.committed else "Final workflow commit skipped",
+                summary=commit_result.message or "No final workflow changes to commit.",
+                stage="repo",
+            )
+            if commit_result.committed:
+                self._repo_commits_created = True
+
+        if not self._repo_commits_created:
+            self._record_repo_event(
+                event_type="repo_push_skipped",
+                title="Final workflow push skipped",
+                summary="No workflow commits were created during this run; skipping final push.",
+                stage="repo",
+            )
+            return True
 
         push_result = push_repo_changes(self._repo_path)
         if not push_result.ok:
@@ -1320,7 +1486,7 @@ class WorkflowKernel:
                 committed=False,
             )
 
-        if not self._commit_phase_changes(phase_index=phase_index, phase_name=phase_name):
+        if not self._commit_phase_changes(phase_index=phase_index, phase_name=phase_name, summary=reviewed_summary):
             return PhaseResult(
                 name=phase_name,
                 summary=reviewed_summary,
@@ -1541,10 +1707,20 @@ class WorkflowKernel:
                 f"Design:\n{result.design[:4000]}\n\n"
                 f"Plan:\n{result.plan[:4000]}"
             )
+            if not self._export_final_report_to_docs(result.final_report):
+                result.blocked = True
+                result.failure_summary = self._failure_summary or "Failed to export workflow report."
+                result.final_report = result.failure_summary
+                return result
             result.success = True
             return result
 
         result.final_report = self._generate_final_report(completed_summaries)
+        if not self._export_final_report_to_docs(result.final_report):
+            result.blocked = True
+            result.failure_summary = self._failure_summary or "Failed to export workflow report."
+            result.final_report = result.failure_summary
+            return result
         if self._mode in {WorkMode.full, WorkMode.develop}:
             if not self._finalize_workflow_repo_sync():
                 result.blocked = True
