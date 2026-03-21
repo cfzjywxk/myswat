@@ -2619,6 +2619,7 @@ class WorkflowEngine:
         current = artifact
         change_summary: str = ""  # empty on first iteration
         skipped_reviewers: set[int] = set()  # persists across iterations
+        approved_reviewers: set[int] = set()  # reviewers who already LGTM'd this phase
         sp = stage_prefix or artifact_type  # prefix for current_stage values
         review_limit = self._review_limit_for(artifact_type, stage_prefix=stage_prefix)
 
@@ -2656,10 +2657,40 @@ class WorkflowEngine:
             all_issues: list[str] = []
             all_lgtm = True
 
-            # Filter out previously skipped reviewers
-            active_revs = [r for r in revs if r.agent_id not in skipped_reviewers]
+            # Keep prior approvals sticky within the current phase so only
+            # unresolved reviewers see later revisions. This intentionally
+            # favors shorter review loops over re-reviewing every revision
+            # with reviewers who are already satisfied in the current phase.
+            active_revs = [
+                r for r in revs
+                if r.agent_id not in skipped_reviewers and r.agent_id not in approved_reviewers
+            ]
 
             if not active_revs:
+                if approved_reviewers or skipped_reviewers:
+                    completed_iteration = max(iteration - 1, 0)
+                    summary = (
+                        f"No reviewers remain pending for {artifact_type}; "
+                        "advancing with the latest artifact."
+                    )
+                    self._console.print(f"[dim]{summary}[/dim]")
+                    self._append_process_event(
+                        event_type="reaction",
+                        title="MySwat reaction",
+                        summary=summary,
+                        from_role="myswat",
+                        to_role=prop.agent_role,
+                        updated_by_agent_id=prop.agent_id,
+                    )
+                    self._persist_task_state(
+                        current_stage=f"{sp}_approved",
+                        latest_summary=current[:4000],
+                        next_todos=["Proceed to the next workflow stage"],
+                        open_issues=[],
+                        last_artifact_id=artifact_id,
+                        updated_by_agent_id=prop.agent_id,
+                    )
+                    return current, completed_iteration, True
                 self._console.print(f"[dim]No reviewers configured — auto-approving {artifact_type}.[/dim]")
                 self._append_process_event(
                     event_type="reaction",
@@ -2768,13 +2799,16 @@ class WorkflowEngine:
 
                 if verdict.verdict != "lgtm":
                     all_lgtm = False
+                    approved_reviewers.discard(reviewer.agent_id)
                     for issue in verdict.issues:
                         all_issues.append(f"[{reviewer.agent_role}] {issue}")
                         self._console.print(f"    [red]- {issue}[/red]")
                     if verdict.summary and not verdict.issues:
                         all_issues.append(f"[{reviewer.agent_role}] {verdict.summary}")
-                elif verdict.summary:
-                    self._console.print(f"    [dim]{verdict.summary}[/dim]")
+                else:
+                    approved_reviewers.add(reviewer.agent_id)
+                    if verdict.summary:
+                        self._console.print(f"    [dim]{verdict.summary}[/dim]")
 
                 verdict_summary = verdict.summary or ""
                 if verdict.issues:

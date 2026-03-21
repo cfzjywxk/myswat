@@ -802,6 +802,7 @@ class WorkflowKernel:
         artifact = initial_artifact
         artifact_id = initial_artifact_id
         review_limit = self._review_limit_for(review_stage_name)
+        approved_reviewers: set[int] = set()
         for iteration in range(1, review_limit + 1):
             if self._cancelled():
                 self._blocked = True
@@ -816,6 +817,17 @@ class WorkflowKernel:
                 self._failure_summary = f"Missing artifact for {review_stage_name}."
                 return artifact, iteration, False
 
+            # Keep approvals sticky within a phase so only unresolved reviewers
+            # see later revisions. This intentionally favors shorter review
+            # loops over re-reviewing every revision with already-satisfied
+            # reviewers in the same phase.
+            pending_reviewers = [
+                reviewer for reviewer in reviewers if reviewer.agent_id not in approved_reviewers
+            ]
+            if not pending_reviewers:
+                completed_iteration = max(iteration - 1, 0)
+                return artifact, completed_iteration, True
+
             self._emit(
                 "review_start",
                 f"Queued review iteration {iteration}/{review_limit}",
@@ -825,7 +837,8 @@ class WorkflowKernel:
                 max_iterations=review_limit,
             )
             cycle_ids: list[int] = []
-            for reviewer in reviewers:
+            cycle_to_reviewer: dict[int, WorkflowRuntime] = {}
+            for reviewer in pending_reviewers:
                 request = self._coordinator.request_review(
                     ReviewRequest(
                         work_item_id=self._work_item_id,
@@ -846,25 +859,76 @@ class WorkflowKernel:
                     )
                 )
                 cycle_ids.append(request.cycle_id)
+                cycle_to_reviewer[request.cycle_id] = reviewer
 
             verdicts = self._wait_for_review_verdicts(cycle_ids)
             failed_verdicts = [verdict for verdict in verdicts if verdict.verdict == "failed"]
             all_lgtm = True
             collected_feedback: list[str] = []
             for verdict in verdicts:
+                reviewer = cycle_to_reviewer.get(verdict.cycle_id)
+                if reviewer is None:
+                    role_matches = [
+                        candidate for candidate in pending_reviewers
+                        if candidate.agent_role == verdict.reviewer_role
+                    ]
+                    if len(role_matches) == 1:
+                        reviewer = role_matches[0]
+                        self._emit(
+                            "warning",
+                            (
+                                f"Recovered reviewer mapping for cycle {verdict.cycle_id} "
+                                f"via reviewer_role={verdict.reviewer_role}."
+                            ),
+                            stage=review_stage_name,
+                            agent_role=owner.agent_role,
+                            reviewer_role=verdict.reviewer_role,
+                            cycle_id=verdict.cycle_id,
+                        )
+                    elif len(role_matches) > 1:
+                        self._emit(
+                            "warning",
+                            (
+                                f"Review verdict cycle {verdict.cycle_id} matched multiple "
+                                f"pending reviewers for reviewer_role={verdict.reviewer_role!r}; "
+                                "approval tracking skipped and the reviewer will be re-queued."
+                            ),
+                            stage=review_stage_name,
+                            agent_role=owner.agent_role,
+                            reviewer_role=verdict.reviewer_role,
+                            cycle_id=verdict.cycle_id,
+                        )
+                    else:
+                        self._emit(
+                            "warning",
+                            (
+                                f"Could not map review verdict cycle {verdict.cycle_id} "
+                                f"to a pending reviewer; using reviewer_role={verdict.reviewer_role!r}."
+                            ),
+                            stage=review_stage_name,
+                            agent_role=owner.agent_role,
+                            reviewer_role=verdict.reviewer_role,
+                            cycle_id=verdict.cycle_id,
+                        )
+                reviewer_role = reviewer.agent_role if reviewer is not None else verdict.reviewer_role
                 self._emit(
                     "review_verdict",
-                    f"{verdict.reviewer_role}: {verdict.verdict.upper()}",
+                    f"{reviewer_role}: {verdict.verdict.upper()}",
                     stage=review_stage_name,
-                    agent_role=verdict.reviewer_role,
+                    agent_role=reviewer_role,
                     detail=verdict.summary,
                     verdict=verdict.verdict,
                 )
-                if verdict.verdict != "lgtm":
+                if verdict.verdict == "lgtm":
+                    if reviewer is not None:
+                        approved_reviewers.add(reviewer.agent_id)
+                else:
                     all_lgtm = False
+                    if reviewer is not None:
+                        approved_reviewers.discard(reviewer.agent_id)
                     issues = verdict.issues or [verdict.summary]
                     collected_feedback.extend(
-                        [f"[{verdict.reviewer_role}] {issue}" for issue in issues if issue]
+                        [f"[{reviewer_role}] {issue}" for issue in issues if issue]
                     )
 
             if failed_verdicts:

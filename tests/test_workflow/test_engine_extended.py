@@ -1775,6 +1775,28 @@ class TestRunReviewLoopEdgeCases:
         assert "Missing error handling" in second_call_prompt
         assert "Revised: added error handling for edge cases" in second_call_prompt
 
+    def test_lgtm_reviewers_are_not_requeued_after_other_reviewers_request_changes(self):
+        engine, dev, qas = _make_engine(qa_count=2, max_review=3)
+        qas[0].send.side_effect = [_ok(_lgtm_json())]
+        qas[1].send.side_effect = [
+            _ok(_changes_json(["Add edge-case coverage"])),
+            _ok(_lgtm_json()),
+        ]
+        dev.send.return_value = _ok("Revised summary with edge-case coverage.")
+
+        result, iters, passed = engine._run_review_loop(
+            artifact="original summary",
+            artifact_type="code",
+            context="ctx",
+        )
+
+        assert result == "Revised summary with edge-case coverage."
+        assert iters == 2
+        assert passed is True
+        assert qas[0].send.call_count == 1
+        assert qas[1].send.call_count == 2
+        assert dev.send.call_count == 1
+
     def test_reviewer_verdict_with_summary_no_issues(self):
         """Non-lgtm verdict with summary but no issues uses summary as issue."""
         engine, dev, qas = _make_engine(max_review=2)

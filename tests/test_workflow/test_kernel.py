@@ -493,6 +493,187 @@ def test_review_loop_reaching_max_iterations_records_skip_without_blocking():
     )
 
 
+def test_review_loop_only_requeues_reviewers_without_lgtm():
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa_main = _participant(20, "qa_main")
+    security = _participant(21, "security")
+    prompt_calls: list[tuple[int, str, str]] = []
+
+    # _service() allocates review cycle IDs sequentially starting at 2000.
+    # These verdict envelopes intentionally mirror that request order.
+    service.wait_for_review_verdicts.side_effect = [
+        [
+            ReviewVerdictEnvelope(
+                cycle_id=2000,
+                reviewer_role="qa_main",
+                verdict="lgtm",
+                summary="Looks good.",
+            ),
+            ReviewVerdictEnvelope(
+                cycle_id=2001,
+                reviewer_role="security",
+                verdict="changes_requested",
+                summary="Need rollback notes.",
+                issues=["Add rollback notes."],
+            ),
+        ],
+        [
+            ReviewVerdictEnvelope(
+                cycle_id=2002,
+                reviewer_role="security",
+                verdict="lgtm",
+                summary="Rollback notes added.",
+            ),
+        ],
+    ]
+    service.wait_for_stage_run_completion.return_value = StageRunCompletion(
+        stage_run_id=100,
+        work_item_id=10,
+        stage_name="plan",
+        status="completed",
+        summary="Plan revised.",
+        artifact_id=1001,
+        artifact_content="Phase 1: Ship it with rollback notes.",
+    )
+
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa_main, security],
+        project_id=1,
+        work_item_id=10,
+        mode=WorkMode.develop,
+        auto_approve=True,
+    )
+
+    reviewed, iterations, passed = kernel._run_review_loop(
+        owner_stage_name="plan",
+        review_stage_name="plan_review",
+        artifact_type="implementation_plan",
+        artifact_title="Implementation plan",
+        initial_artifact="Phase 1: Ship it",
+        initial_artifact_id=1000,
+        owner=dev,
+        reviewers=[qa_main, security],
+        focus="ctx",
+        review_prompt_builder=lambda artifact, iteration, reviewer_role: (
+            prompt_calls.append((iteration, reviewer_role, artifact)) or artifact
+        ),
+        revision_prompt_builder=lambda artifact, feedback: artifact + "\n" + feedback,
+    )
+
+    assert reviewed == "Phase 1: Ship it with rollback notes."
+    assert iterations == 2
+    assert passed is True
+    assert service.request_review.call_count == 3
+    queued_reviewers = [
+        (request.iteration, request.reviewer_role)
+        for request in (call.args[0] for call in service.request_review.call_args_list)
+    ]
+    assert queued_reviewers == [
+        (1, "qa_main"),
+        (1, "security"),
+        (2, "security"),
+    ]
+    assert prompt_calls == [
+        (1, "qa_main", "Phase 1: Ship it"),
+        (1, "security", "Phase 1: Ship it"),
+        (2, "security", "Phase 1: Ship it with rollback notes."),
+    ]
+
+
+def test_review_loop_recovers_missing_cycle_mapping_via_reviewer_role():
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa_main = _participant(20, "qa_main")
+    security = _participant(21, "security")
+    events = []
+
+    service.wait_for_review_verdicts.side_effect = [
+        [
+            ReviewVerdictEnvelope(
+                cycle_id=9999,
+                reviewer_role="qa_main",
+                verdict="lgtm",
+                summary="Looks good.",
+            ),
+            ReviewVerdictEnvelope(
+                cycle_id=2001,
+                reviewer_role="security",
+                verdict="changes_requested",
+                summary="Need rollback notes.",
+                issues=["Add rollback notes."],
+            ),
+        ],
+        [
+            ReviewVerdictEnvelope(
+                cycle_id=2002,
+                reviewer_role="security",
+                verdict="lgtm",
+                summary="Rollback notes added.",
+            ),
+        ],
+    ]
+    service.wait_for_stage_run_completion.return_value = StageRunCompletion(
+        stage_run_id=100,
+        work_item_id=10,
+        stage_name="plan",
+        status="completed",
+        summary="Plan revised.",
+        artifact_id=1001,
+        artifact_content="Phase 1: Ship it with rollback notes.",
+    )
+
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa_main, security],
+        project_id=1,
+        work_item_id=10,
+        mode=WorkMode.develop,
+        auto_approve=True,
+        on_event=events.append,
+    )
+
+    reviewed, iterations, passed = kernel._run_review_loop(
+        owner_stage_name="plan",
+        review_stage_name="plan_review",
+        artifact_type="implementation_plan",
+        artifact_title="Implementation plan",
+        initial_artifact="Phase 1: Ship it",
+        initial_artifact_id=1000,
+        owner=dev,
+        reviewers=[qa_main, security],
+        focus="ctx",
+        review_prompt_builder=lambda artifact, iteration, reviewer_role: artifact,
+        revision_prompt_builder=lambda artifact, feedback: artifact + "\n" + feedback,
+    )
+
+    assert reviewed == "Phase 1: Ship it with rollback notes."
+    assert iterations == 2
+    assert passed is True
+    queued_reviewers = [
+        (request.iteration, request.reviewer_role)
+        for request in (call.args[0] for call in service.request_review.call_args_list)
+    ]
+    assert queued_reviewers == [
+        (1, "qa_main"),
+        (1, "security"),
+        (2, "security"),
+    ]
+    assert any(
+        event.event_type == "warning"
+        and "Recovered reviewer mapping" in event.message
+        and event.metadata.get("cycle_id") == 9999
+        for event in events
+    )
+
+
 def test_phase_and_code_review_prompts_include_requirement_design_plan_and_summary():
     store = _store()
     store.get_latest_artifact_by_type.side_effect = lambda work_item_id, artifact_type: (
