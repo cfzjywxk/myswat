@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 from myswat.repo_ops import GitCommitResult, GitProbeResult
 from myswat.server.contracts import ReviewCycleCancellationRequest, ReviewVerdictEnvelope, StageRunCompletion
-from myswat.workflow.kernel import PhaseResult, WorkflowKernel, _extract_json_block
+from myswat.workflow.kernel import GATestResult, PhaseResult, WorkflowKernel, _extract_json_block
 from myswat.workflow.modes import WorkMode
 from myswat.workflow.runtime import WorkflowRuntime
 
@@ -813,7 +813,7 @@ def test_test_mode_continues_after_review_limit_and_can_still_finish():
     )
 
 
-def test_full_mode_can_skip_ga_test_by_request():
+def test_full_mode_skips_ga_test_by_default():
     store = _store()
     service = _service()
     dev = _participant(10, "developer")
@@ -829,7 +829,6 @@ def test_full_mode_can_skip_ga_test_by_request():
         project_id=1,
         work_item_id=16,
         mode=WorkMode.full,
-        skip_ga_test=True,
         auto_approve=True,
     )
 
@@ -842,24 +841,55 @@ def test_full_mode_can_skip_ga_test_by_request():
                     return_value=PhaseResult(name="Implementation", summary="done", committed=True),
                 ):
                     with patch.object(kernel, "_run_test") as mock_run_test:
-                        with patch.object(kernel, "_generate_final_report", return_value="report") as mock_report:
+                        with patch.object(kernel, "_generate_final_report", return_value="report"):
                             result = kernel.run("ship it")
 
     mock_run_test.assert_not_called()
-    assert "GA test skipped by request." in mock_report.call_args.args[0]
-    store.update_work_item_state.assert_any_call(
-        16,
-        current_stage="ga_test_skipped",
-        latest_summary="GA test skipped by request.",
-        next_todos=["Generate final report"],
-    )
-    assert any(
-        call.kwargs.get("event_type") == "ga_test_skipped"
-        for call in store.append_work_item_process_event.call_args_list
-    )
     assert result.success is True
     assert result.ga_test is None
     assert result.final_report == "report"
+    assert not any(
+        call.kwargs.get("event_type") == "ga_test_skipped"
+        for call in store.append_work_item_process_event.call_args_list
+    )
+
+
+def test_full_mode_runs_ga_test_when_requested():
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+    arch = _participant(30, "architect")
+
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa],
+        arch=arch,
+        project_id=1,
+        work_item_id=17,
+        mode=WorkMode.full,
+        with_ga_test=True,
+        auto_approve=True,
+    )
+
+    with patch.object(kernel, "_run_design", return_value=("design", True)):
+        with patch.object(kernel, "_run_plan", return_value=("plan", True)):
+            with patch.object(kernel, "_parse_phases", return_value=["Implementation"]):
+                with patch.object(
+                    kernel,
+                    "_run_phase",
+                    return_value=PhaseResult(name="Implementation", summary="done", committed=True),
+                ):
+                    with patch.object(kernel, "_run_test", return_value=GATestResult(passed=True)) as mock_run_test:
+                        with patch.object(kernel, "_generate_final_report", return_value="report"):
+                            result = kernel.run("ship it")
+
+    mock_run_test.assert_called_once()
+    assert result.success is True
+    assert result.ga_test is not None
+    assert result.ga_test.passed is True
 
 
 def test_run_phase_commits_local_changes_after_lgtm(tmp_path):

@@ -194,7 +194,11 @@ def work(
     design_mode: bool = typer.Option(False, "--design", "--plan", help="Run design + planning only."),
     develop_mode: bool = typer.Option(False, "--develop", "--dev", help="Run development only."),
     test_mode: bool = typer.Option(False, "--test", "--ga-test", help="Run GA testing only."),
-    skip_ga_test: bool = typer.Option(False, "--skip-ga-test", help="Skip the GA test stage for the default full workflow."),
+    with_ga_test: bool = typer.Option(
+        False,
+        "--with-ga-test",
+        help="Add the GA test stage to the default full workflow.",
+    ),
     auto_approve: bool = typer.Option(
         True,
         "--auto-approve/--interactive-checkpoints",
@@ -235,8 +239,8 @@ def work(
         raise typer.BadParameter("--resume is not supported through the daemon workflow path yet.")
     if not auto_approve:
         raise typer.BadParameter("--interactive-checkpoints is not supported through the daemon workflow path yet.")
-    if skip_ga_test and mode != WorkMode.full:
-        raise typer.BadParameter("--skip-ga-test can only be used with the default full workflow.")
+    if with_ga_test and mode != WorkMode.full:
+        raise typer.BadParameter("--with-ga-test can only be used with the default full workflow.")
 
     console = Console()
     settings = MySwatSettings()
@@ -247,8 +251,8 @@ def work(
         "workdir": workdir,
         "mode": mode.value,
     }
-    if skip_ga_test:
-        submit_kwargs["skip_ga_test"] = True
+    if with_ga_test:
+        submit_kwargs["with_ga_test"] = True
     try:
         result = client.submit_work(**submit_kwargs)
     except DaemonClientError as exc:
@@ -300,28 +304,6 @@ def work(
         raise typer.Exit(130)
 
 
-@app.command(name="work-background-worker", hidden=True)
-def work_background_worker(
-    requirement: str = typer.Argument(..., help="Requirement description"),
-    project: str = typer.Option(..., "--project", "-p", help="Project slug"),
-    work_item_id: int = typer.Option(..., "--work-item-id", help="Existing work item ID"),
-    workdir: str = typer.Option(None, "--workdir", "-w", help="Working directory override"),
-    mode: str = typer.Option(WorkMode.full.value, "--mode", help="Workflow mode for detached worker."),
-    skip_ga_test: bool = typer.Option(False, "--skip-ga-test", help="Skip GA test during the detached full workflow."),
-):
-    """Internal detached worker entry point for `myswat work --background`."""
-    from myswat.cli.work_cmd import run_background_work_item
-
-    kwargs = {
-        "work_item_id": work_item_id,
-        "workdir": workdir,
-        "mode": WorkMode(mode),
-    }
-    if skip_ga_test:
-        kwargs["skip_ga_test"] = True
-    run_background_work_item(project, requirement, **kwargs)
-
-
 @app.command(name="worker", hidden=True)
 def worker(
     project: str = typer.Option(..., "--project", "-p", help="Project slug"),
@@ -351,16 +333,15 @@ def stop(
     from myswat.config.settings import MySwatSettings
     from myswat.server.control_client import DaemonClient, DaemonClientError
 
-    from myswat.cli.work_cmd import stop_work_item
-
     console = Console()
     settings = MySwatSettings()
     client = DaemonClient(settings)
     try:
         result = client.control_work(project=project, work_item_id=work_item_id, action="cancel")
-    except DaemonClientError:
-        stop_work_item(project, work_item_id)
-        return
+    except DaemonClientError as exc:
+        console.print(f"[red]{exc}[/red]")
+        console.print(f"[dim]Start the daemon first: myswat server[/dim]")
+        raise typer.Exit(1) from exc
 
     console.print(f"[green]Cancellation requested for work item {result.get('work_item_id')}.[/green]")
 

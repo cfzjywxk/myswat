@@ -92,7 +92,7 @@ def test_cleanup_project_uses_extended_timeout(monkeypatch):
     assert observed["timeout"] == 300
 
 
-def test_submit_work_includes_skip_ga_test_when_requested(monkeypatch):
+def test_submit_work_includes_with_ga_test_when_requested(monkeypatch):
     observed: dict[str, object] = {}
 
     class _Response:
@@ -119,8 +119,8 @@ def test_submit_work_includes_skip_ga_test_when_requested(monkeypatch):
         requirement="implement fibonacci",
         workdir=None,
         mode="full",
-        skip_ga_test=True,
+        with_ga_test=True,
     )
 
     assert result == {"ok": True}
-    assert observed["payload"]["skip_ga_test"] is True
+    assert observed["payload"]["with_ga_test"] is True

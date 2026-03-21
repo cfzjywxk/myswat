@@ -69,7 +69,7 @@ def test_handle_work_queues_workers_and_starts_in_process_workflow():
         requirement="implement fibonacci",
         workdir="/tmp/fib-demo",
         mode=WorkMode.full,
-        skip_ga_test=False,
+        with_ga_test=False,
     )
     daemon._start_workflow_thread.assert_called_once_with(
         project_slug="fib-demo",
@@ -77,11 +77,11 @@ def test_handle_work_queues_workers_and_starts_in_process_workflow():
         work_item_id=88,
         workdir="/tmp/fib-demo",
         mode=WorkMode.full,
-        skip_ga_test=False,
+        with_ga_test=False,
     )
 
 
-def test_handle_work_with_skip_ga_test_marks_work_item_and_thread():
+def test_handle_work_with_ga_test_marks_work_item_and_thread():
     daemon = MySwatDaemon.__new__(MySwatDaemon)
     daemon._lock = threading.RLock()
     daemon._find_active_work_item = Mock(return_value=None)
@@ -94,7 +94,7 @@ def test_handle_work_with_skip_ga_test_marks_work_item_and_thread():
         requirement="implement fibonacci",
         workdir="/tmp/fib-demo",
         mode=WorkMode.full.value,
-        skip_ga_test=True,
+        with_ga_test=True,
     )
 
     assert result["work_item_id"] == 88
@@ -103,7 +103,7 @@ def test_handle_work_with_skip_ga_test_marks_work_item_and_thread():
         requirement="implement fibonacci",
         workdir="/tmp/fib-demo",
         mode=WorkMode.full,
-        skip_ga_test=True,
+        with_ga_test=True,
     )
     daemon._start_workflow_thread.assert_called_once_with(
         project_slug="fib-demo",
@@ -111,11 +111,11 @@ def test_handle_work_with_skip_ga_test_marks_work_item_and_thread():
         work_item_id=88,
         workdir="/tmp/fib-demo",
         mode=WorkMode.full,
-        skip_ga_test=True,
+        with_ga_test=True,
     )
 
 
-def test_handle_work_rejects_skip_ga_test_for_non_full_mode():
+def test_handle_work_rejects_with_ga_test_for_non_full_mode():
     daemon = MySwatDaemon.__new__(MySwatDaemon)
     daemon._lock = threading.RLock()
 
@@ -125,12 +125,12 @@ def test_handle_work_rejects_skip_ga_test_for_non_full_mode():
             requirement="implement fibonacci",
             workdir="/tmp/fib-demo",
             mode=WorkMode.test.value,
-            skip_ga_test=True,
+            with_ga_test=True,
         )
     except ValueError as exc:
-        assert "--skip-ga-test" in str(exc)
+        assert "--with-ga-test" in str(exc)
     else:
-        raise AssertionError("Expected skip-ga-test mode validation error")
+        raise AssertionError("Expected with-ga-test mode validation error")
 
 
 def test_handle_work_rejects_when_project_already_has_active_workflow():

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import time
-from unittest.mock import MagicMock
+import threading
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -231,21 +232,27 @@ def test_session_manager_send_auto_opens_session_when_missing():
 
 
 def test_send_with_timer_waits_for_worker_loop():
+    started = threading.Event()
+    release = threading.Event()
+    ticks = iter([10.0, 10.25])
+
     class _SlowManager:
         def send(self, prompt: str, task_description: str | None = None):
-            time.sleep(0.15)
+            started.set()
+            release.wait(timeout=1)
             return MagicMock(content="done", exit_code=0, success=True, cancelled=False)
 
     console = MagicMock()
     status_context = MagicMock()
-    status_context.__enter__.return_value = None
+    status_context.__enter__.side_effect = lambda: release.set() if started.wait(timeout=1) else None
     status_context.__exit__.return_value = False
     console.status.return_value = status_context
 
-    response, elapsed = _send_with_timer(console, _SlowManager(), "hello")
+    with patch("myswat.cli.chat_cmd.time.monotonic", side_effect=lambda: next(ticks)):
+        response, elapsed = _send_with_timer(console, _SlowManager(), "hello")
 
     assert response.content == "done"
-    assert elapsed >= 0.1
+    assert elapsed == 0.25
 
 
 def test_send_with_timer_reraises_worker_errors():
@@ -322,12 +329,10 @@ def test_send_with_timer_keyboard_interrupt_reraises_worker_error():
 
 
 def test_print_daemon_error_prints_help():
+    printed: list[str] = []
     with pytest.MonkeyPatch.context() as mp:
-        printed: list[str] = []
         mp.setattr("myswat.cli.chat_cmd.console.print", lambda message: printed.append(str(message)))
-
         _print_daemon_error(RuntimeError("daemon down"))
-
     assert "daemon down" in printed[0]
     assert "myswat server" in printed[1]
 
@@ -341,13 +346,12 @@ def test_public_chat_work_mode_maps_internal_modes():
 def test_run_remote_workflow_returns_terminal_work_item(monkeypatch):
     client = MagicMock()
     client.submit_work.return_value = {"work_item_id": 41}
+    client.get_work_item.return_value = {"work_item": {"status": "completed"}}
     monkeypatch.setattr("myswat.cli.chat_cmd.DaemonClient", lambda settings: client)
-    store = MagicMock()
-    store.get_work_item.return_value = {"status": "completed"}
     created: list[int] = []
 
     work_item_id = _run_remote_workflow(
-        store=store,
+        store=MagicMock(),
         proj=_project(),
         workdir="/tmp/repo",
         settings=_settings(),
@@ -369,19 +373,18 @@ def test_run_remote_workflow_returns_terminal_work_item(monkeypatch):
 def test_run_remote_workflow_cancels_and_uses_default_poll_interval(monkeypatch):
     client = MagicMock()
     client.submit_work.return_value = {"work_item_id": 52}
+    client.get_work_item.side_effect = [
+        {"work_item": {"status": "in_progress"}},
+        {"work_item": {"status": "cancelled"}},
+    ]
     monkeypatch.setattr("myswat.cli.chat_cmd.DaemonClient", lambda settings: client)
     sleep_calls: list[float] = []
     monkeypatch.setattr("myswat.cli.chat_cmd.time.sleep", lambda seconds: sleep_calls.append(seconds))
-    store = MagicMock()
-    store.get_work_item.side_effect = [
-        {"status": "in_progress"},
-        {"status": "cancelled"},
-    ]
     settings = _settings()
     settings.workflow.assignment_poll_interval_seconds = "bad"
 
     work_item_id = _run_remote_workflow(
-        store=store,
+        store=MagicMock(),
         proj=_project(),
         workdir="/tmp/repo",
         settings=settings,
@@ -421,18 +424,17 @@ def test_workflow_stale_timeout_uses_default_for_bad_config():
 def test_run_remote_workflow_times_out_when_status_stalls(monkeypatch):
     client = MagicMock()
     client.submit_work.return_value = {"work_item_id": 77}
+    client.get_work_item.return_value = {"work_item": {"status": "in_progress"}}
     monkeypatch.setattr("myswat.cli.chat_cmd.DaemonClient", lambda settings: client)
     monkeypatch.setattr("myswat.cli.chat_cmd.time.sleep", lambda seconds: None)
     ticks = iter([0.0, 0.0, 2.0])
     monkeypatch.setattr("myswat.cli.chat_cmd.time.monotonic", lambda: next(ticks))
-    store = MagicMock()
-    store.get_work_item.return_value = {"status": "in_progress"}
     settings = _settings()
     settings.workflow.assignment_timeout_seconds = 1
 
     with pytest.raises(RuntimeError, match="stopped making progress"):
         _run_remote_workflow(
-            store=store,
+            store=MagicMock(),
             proj=_project(),
             workdir="/tmp/repo",
             settings=settings,

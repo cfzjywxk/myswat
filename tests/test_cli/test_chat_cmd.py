@@ -17,6 +17,7 @@ from myswat.server.mcp_http_client import MCPHTTPClientError
 from myswat.workflow.engine import WorkMode
 from myswat.cli.chat_cmd import (
     _show_status,
+    _run_ga_test_interactive,
     _run_inline_review,
     _run_inline_review_interactive,
     _run_design_review,
@@ -146,8 +147,24 @@ class TestRunInlineReviewInteractive:
         )
 
         kwargs = mock_run_workflow_interactive.call_args.kwargs
-        assert kwargs["label"] == "Running dev+QA review loop"
+        assert kwargs["label"] == "Running development workflow"
         assert kwargs["mode"] == WorkMode.develop
+
+
+class TestRunGATestInteractive:
+    @patch("myswat.cli.chat_cmd._run_workflow_interactive")
+    def test_uses_task_monitor(self, mock_run_workflow_interactive):
+        _run_ga_test_interactive(
+            store=MagicMock(),
+            proj=_proj(),
+            workdir="/tmp",
+            settings=MagicMock(),
+            task="test thing",
+        )
+
+        kwargs = mock_run_workflow_interactive.call_args.kwargs
+        assert kwargs["label"] == "Running GA test workflow"
+        assert kwargs["mode"] == WorkMode.test
 
 
 class TestRunDesignReview:
@@ -1677,7 +1694,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    def test_review_command(self, mock_sm_cls,
+    def test_dev_command(self, mock_sm_cls,
                             mock_store_cls, mock_mig, mock_pool_cls,
                             mock_settings_cls, mock_preload,
                             mock_prompt_session_cls, mock_review):
@@ -1698,7 +1715,7 @@ class TestRunChat:
         mock_sm_cls.return_value = sm
 
         prompt_session = MagicMock()
-        prompt_session.prompt.side_effect = ["/review fix bug", "/quit"]
+        prompt_session.prompt.side_effect = ["/dev fix bug", "/quit"]
         mock_prompt_session_cls.return_value = prompt_session
 
         run_chat("proj")
@@ -1711,7 +1728,7 @@ class TestRunChat:
     @patch("myswat.cli.chat_cmd.ensure_schema")
     @patch("myswat.cli.chat_cmd.MemoryStore")
     @patch("myswat.cli.chat_cmd.SessionManager")
-    def test_review_no_arg(self, mock_sm_cls,
+    def test_dev_no_arg(self, mock_sm_cls,
                            mock_store_cls, mock_mig, mock_pool_cls,
                            mock_settings_cls, mock_preload,
                            mock_prompt_session_cls):
@@ -1732,10 +1749,52 @@ class TestRunChat:
         mock_sm_cls.return_value = sm
 
         prompt_session = MagicMock()
-        prompt_session.prompt.side_effect = ["/review", "/quit"]
+        prompt_session.prompt.side_effect = ["/dev", "/quit"]
         mock_prompt_session_cls.return_value = prompt_session
 
         run_chat("proj")
+
+    @patch("myswat.cli.chat_cmd._run_ga_test_interactive")
+    @patch("myswat.cli.chat_cmd.PromptSession")
+    @patch("myswat.cli.chat_cmd.preload_model")
+    @patch("myswat.cli.chat_cmd.MySwatSettings")
+    @patch("myswat.cli.chat_cmd.TiDBPool")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
+    @patch("myswat.cli.chat_cmd.MemoryStore")
+    @patch("myswat.cli.chat_cmd.SessionManager")
+    def test_ga_test_command(
+        self,
+        mock_sm_cls,
+        mock_store_cls,
+        mock_mig,
+        mock_pool_cls,
+        mock_settings_cls,
+        mock_preload,
+        mock_prompt_session_cls,
+        mock_ga_test,
+    ):
+        from myswat.cli.chat_cmd import run_chat
+
+        settings = self._setup_mocks()
+        mock_settings_cls.return_value = settings
+
+        agent_row = _agent_row()
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = _proj()
+        mock_store.get_agent.return_value = agent_row
+        mock_store.list_agents.return_value = [agent_row]
+        mock_store_cls.return_value = mock_store
+
+        sm = MagicMock()
+        sm.session = SimpleNamespace(session_uuid="uuid-1234")
+        mock_sm_cls.return_value = sm
+
+        prompt_session = MagicMock()
+        prompt_session.prompt.side_effect = ["/ga-test verify bugfix", "/quit"]
+        mock_prompt_session_cls.return_value = prompt_session
+
+        run_chat("proj")
+        mock_ga_test.assert_called_once()
 
     @patch("myswat.cli.chat_cmd._run_workflow_interactive")
     @patch("myswat.cli.chat_cmd.PromptSession")

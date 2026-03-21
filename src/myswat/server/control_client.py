@@ -115,7 +115,7 @@ class DaemonClient:
         requirement: str,
         workdir: str | None,
         mode: str,
-        skip_ga_test: bool = False,
+        with_ga_test: bool = False,
     ) -> dict:
         payload = {
             "project": project,
@@ -123,8 +123,8 @@ class DaemonClient:
             "workdir": workdir,
             "mode": mode,
         }
-        if skip_ga_test:
-            payload["skip_ga_test"] = True
+        if with_ga_test:
+            payload["with_ga_test"] = True
         return self._request(
             method="POST",
             path="/api/work",

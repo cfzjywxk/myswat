@@ -118,7 +118,7 @@ class WorkflowKernel:
         project_id: int,
         work_item_id: int,
         mode: WorkMode = WorkMode.full,
-        skip_ga_test: bool = False,
+        with_ga_test: bool = False,
         max_review_iterations: int | None = None,
         design_plan_review_limit: int | None = None,
         dev_plan_review_limit: int | None = None,
@@ -147,7 +147,7 @@ class WorkflowKernel:
         self._project_id = project_id
         self._work_item_id = work_item_id
         self._mode = WorkMode(mode)
-        self._skip_ga_test = skip_ga_test
+        self._with_ga_test = with_ga_test
         default_review_limits = {
             "design": 10,
             "dev_plan": 10,
@@ -1297,7 +1297,7 @@ class WorkflowKernel:
                     result.final_report = result.failure_summary
                     return result
 
-        if self._mode == WorkMode.test or (self._mode == WorkMode.full and not self._skip_ga_test):
+        if self._mode == WorkMode.test or (self._mode == WorkMode.full and self._with_ga_test):
             ga_test = self._run_test(
                 requirement,
                 result.design or requirement,
@@ -1309,24 +1309,6 @@ class WorkflowKernel:
                 result.failure_summary = self._failure_summary or "GA testing failed."
                 result.final_report = result.failure_summary
                 return result
-        elif self._mode == WorkMode.full and self._skip_ga_test:
-            skip_summary = "GA test skipped by request."
-            completed_summaries.append(skip_summary)
-            self._store.update_work_item_state(
-                self._work_item_id,
-                current_stage="ga_test_skipped",
-                latest_summary=skip_summary,
-                next_todos=["Generate final report"],
-            )
-            self._append_process_event(
-                event_type="ga_test_skipped",
-                title="GA test skipped",
-                summary=skip_summary,
-                from_role="user",
-                to_role="myswat",
-            )
-            self._emit("warning", skip_summary, stage="ga_test", review_skipped=True)
-
         if self._mode == WorkMode.design:
             result.final_report = (
                 "Design workflow completed.\n\n"

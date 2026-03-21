@@ -81,7 +81,7 @@ DELEGATION_MODE_SPECS: dict[str, DelegationModeSpec] = {
         chat_handler="full_workflow",
         allowed_roles=frozenset({"architect"}),
         banner="Architect delegated full workflow",
-        detail="Starting architect-led full workflow (design -> plan -> develop -> test -> report).",
+        detail="Starting architect-led full workflow (design -> plan -> develop -> report).",
         reset_role_session=True,
     ),
     QA_DELEGATION_MODES[0]: DelegationModeSpec(

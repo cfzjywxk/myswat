@@ -48,10 +48,11 @@ HELP_TEXT = """
   /status               Show project status
   /task <id>            Show detailed status for one work item
   /history [n]          Show recent turns from the active chat session
-  /work <requirement>   Start full workflow: design -> plan -> develop -> test
+  /work <requirement>   Start full workflow: design -> plan -> develop -> report (no GA test)
+  /dev <task>           Start the development workflow for a task
+  /ga-test <task>       Start the standalone GA test workflow for a task
   /role <role>          Switch agent role (developer, architect, qa_main)
   /reset                Reset AI session (fresh context reload, same TiDB session)
-  /review <task>        Start an implementation workflow for a task
   /agents               List available agents
   /sessions             Show active sessions
   /new                  Start a new session (close current)
@@ -310,7 +311,11 @@ def _run_remote_workflow(
     last_progress_at = time.monotonic()
 
     while True:
-        work_item = store.get_work_item(work_item_id) or {}
+        payload = client.get_work_item(
+            project=str(proj["slug"]),
+            work_item_id=work_item_id,
+        )
+        work_item = payload.get("work_item") or {}
         status = str(work_item.get("status") or "pending")
         progress_marker = (status, work_item.get("updated_at"))
         if progress_marker != last_progress_marker:
@@ -661,12 +666,26 @@ def run_chat(
                 )
                 sm = _switch_agent(current_role, settings)
 
-            elif cmd == "/review":
+            elif cmd == "/dev":
                 if not arg:
-                    console.print("[dim]Usage: /review <task description>[/dim]")
+                    console.print("[dim]Usage: /dev <task description>[/dim]")
                     continue
                 _close_session_best_effort(sm)
                 _run_inline_review_interactive(
+                    store,
+                    proj,
+                    effective_workdir,
+                    settings,
+                    arg,
+                )
+                sm = _switch_agent(current_role, settings)
+
+            elif cmd == "/ga-test":
+                if not arg:
+                    console.print("[dim]Usage: /ga-test <task description>[/dim]")
+                    continue
+                _close_session_best_effort(sm)
+                _run_ga_test_interactive(
                     store,
                     proj,
                     effective_workdir,
@@ -1001,7 +1020,25 @@ def _run_inline_review_interactive(
         settings=settings,
         requirement=task,
         mode=WorkMode.develop,
-        label="Running dev+QA review loop",
+        label="Running development workflow",
+    )
+
+
+def _run_ga_test_interactive(
+    store: MemoryStore,
+    proj: dict,
+    workdir: str | None,
+    settings: MySwatSettings,
+    task: str,
+) -> None:
+    _run_workflow_interactive(
+        store=store,
+        proj=proj,
+        workdir=workdir,
+        settings=settings,
+        requirement=task,
+        mode=WorkMode.test,
+        label="Running GA test workflow",
     )
 
 
