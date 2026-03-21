@@ -964,7 +964,13 @@ def _build_timeline_message(entry: dict):
     return message
 
 
-def _print_message_flow(console, flow_entries: list[dict]) -> None:
+def _print_message_flow(
+    console,
+    flow_entries: list[dict],
+    *,
+    title: str = "Message Flow",
+    limit: int = 30,
+) -> None:
     from rich.panel import Panel
     from rich.table import Table
 
@@ -973,7 +979,7 @@ def _print_message_flow(console, flow_entries: list[dict]) -> None:
         console.print(
             Panel(
                 "[dim]No recorded message flow yet.[/dim]",
-                title="[bold]Message Flow[/bold]",
+                title=f"[bold]{title}[/bold]",
                 border_style="cyan",
             )
         )
@@ -984,7 +990,7 @@ def _print_message_flow(console, flow_entries: list[dict]) -> None:
     grid.add_column(width=22)
     grid.add_column(ratio=1)
 
-    for entry in entries[-30:]:
+    for entry in entries[-limit:]:
         grid.add_row(
             _format_timestamp_short(entry.get("at")),
             _build_timeline_actor(entry),
@@ -994,7 +1000,53 @@ def _print_message_flow(console, flow_entries: list[dict]) -> None:
     console.print(
         Panel(
             grid,
-            title="[bold]Message Flow[/bold]",
+            title=f"[bold]{title}[/bold]",
+            border_style="cyan",
+            padding=(0, 1),
+        )
+    )
+
+
+def _select_current_status_item(items: list[dict]) -> dict | None:
+    for item in reversed(items):
+        if str(item.get("status") or "") in _ACTIVE_RUNTIME_WORK_STATUSES:
+            return item
+    return None
+
+
+def _print_current_work_item(console, item: dict | None, *, has_items: bool) -> None:
+    from rich.markup import escape
+    from rich.panel import Panel
+
+    if not item:
+        console.print(
+            Panel(
+                "[dim]No active work item.[/dim]" if has_items else "[dim]No work items yet.[/dim]",
+                title="[bold]Current Work Item[/bold]",
+                border_style="cyan",
+                padding=(0, 1),
+            )
+        )
+        return
+
+    status = str(item.get("status") or "unknown")
+    task_state = _task_state_dict(item)
+    current_stage = str(task_state.get("current_stage") or "-")
+    latest_summary = str(task_state.get("latest_summary") or "").strip()
+    title = _compact_text(item.get("title") or "", 120)
+
+    body = (
+        f"[bold]#{item.get('id')}[/bold] {escape(title)}\n"
+        f"[bold]Status:[/bold] {_markup_for_item_status(status)}\n"
+        f"[bold]Current phase:[/bold] {escape(current_stage)}"
+    )
+    if latest_summary:
+        body += f"\n[bold]Latest:[/bold] {escape(_compact_text(latest_summary, 240))}"
+
+    console.print(
+        Panel(
+            body,
+            title="[bold]Current Work Item[/bold]",
             border_style="cyan",
             padding=(0, 1),
         )
@@ -1367,6 +1419,17 @@ def status(
         console.print(f"[red]Project '{project}' not found.[/red]")
         raise typer.Exit(1)
 
+    items = _safe_list(store.list_work_items(proj["id"]))
+    current_item = _select_current_status_item(items)
+    runtime_rows = _latest_runtime_rows(store, int(proj["id"]), items) if (details or current_item) else []
+
+    if not details:
+        _print_current_work_item(console, current_item, has_items=bool(items))
+        _print_alerts(console, _collect_project_alerts(items, runtime_rows))
+        flow_entries = _build_teamwork_flow_entries(pool, current_item) if current_item else []
+        _print_message_flow(console, flow_entries, title="Recent Messages", limit=5)
+        return
+
     console.print(f"\n[bold]Project:[/bold] {proj['name']} ({proj['slug']})")
     if proj.get("repo_path"):
         console.print(f"[bold]Repo:[/bold] {proj['repo_path']}")
@@ -1383,11 +1446,8 @@ def status(
         console.print(table)
 
     # Work items — with work mode (solo vs teamwork)
-    items = _safe_list(store.list_work_items(proj["id"]))
-    runtime_rows = _latest_runtime_rows(store, int(proj["id"]), items) if details else []
-    if details:
-        _print_alerts(console, _collect_project_alerts(items, runtime_rows))
-        _print_worker_health(console, runtime_rows)
+    _print_alerts(console, _collect_project_alerts(items, runtime_rows))
+    _print_worker_health(console, runtime_rows)
 
     if items:
         table = Table(title="Work Items")

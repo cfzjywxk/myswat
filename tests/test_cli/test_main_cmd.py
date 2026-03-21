@@ -352,6 +352,161 @@ class TestStatusCommand:
         result = runner.invoke(app, ["status", "--project", "proj"])
         assert result.exit_code == 0
 
+    @patch("myswat.config.settings.MySwatSettings")
+    @patch("myswat.db.connection.TiDBPool")
+    @patch("myswat.memory.store.MemoryStore")
+    def test_default_status_is_compact_and_shows_current_item_alerts_and_recent_messages(
+        self,
+        mock_store_cls,
+        mock_pool_cls,
+        mock_settings_cls,
+    ):
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
+
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = {
+            "id": 1,
+            "slug": "proj",
+            "name": "Proj",
+            "repo_path": "/tmp/repo",
+        }
+        mock_store.list_work_items.return_value = [
+            {
+                "id": 1,
+                "status": "completed",
+                "item_type": "code_change",
+                "title": "Older task",
+                "metadata_json": {
+                    "task_state": {
+                        "current_stage": "report",
+                        "process_log": [],
+                    }
+                },
+            },
+            {
+                "id": 2,
+                "status": "in_progress",
+                "item_type": "code_change",
+                "title": "Current task",
+                "metadata_json": {
+                    "task_state": {
+                        "current_stage": "phase_1",
+                        "latest_summary": "Implementing rollback plumbing",
+                        "process_log": [
+                            {
+                                "at": "2026-03-21T20:50:00",
+                                "type": "status_report",
+                                "title": "oldest_excluded",
+                                "summary": "oldest",
+                                "from_role": "developer",
+                            },
+                            {
+                                "at": "2026-03-21T20:51:00",
+                                "type": "status_report",
+                                "title": "shown_1",
+                                "summary": "second",
+                                "from_role": "developer",
+                            },
+                            {
+                                "at": "2026-03-21T20:52:00",
+                                "type": "status_report",
+                                "title": "shown_2",
+                                "summary": "third",
+                                "from_role": "developer",
+                            },
+                            {
+                                "at": "2026-03-21T20:53:00",
+                                "type": "review_requested",
+                                "title": "shown_3",
+                                "summary": "review requested",
+                                "from_role": "developer",
+                                "to_role": "qa_main",
+                            },
+                            {
+                                "at": "2026-03-21T20:54:00",
+                                "type": "review_verdict",
+                                "title": "shown_4",
+                                "summary": "lgtm",
+                                "from_role": "qa_main",
+                                "to_role": "developer",
+                                "verdict": "lgtm",
+                            },
+                            {
+                                "at": "2026-03-21T20:55:00",
+                                "type": "stage_blocked",
+                                "title": "shown_5",
+                                "summary": "Borrow checker regression",
+                                "from_role": "myswat",
+                                "to_role": "user",
+                            },
+                        ],
+                    }
+                },
+            },
+        ]
+        mock_store.list_runtime_registrations.return_value = []
+        mock_store_cls.return_value = mock_store
+
+        pool = MagicMock()
+        pool.fetch_all.return_value = []
+        mock_pool_cls.return_value = pool
+
+        result = CliRunner().invoke(app, ["status", "--project", "proj"])
+
+        assert result.exit_code == 0
+        assert "Current Work Item" in result.stdout
+        assert "Current phase:" in result.stdout
+        assert "phase_1" in result.stdout
+        assert "Alerts" in result.stdout
+        assert "Borrow checker regression" in result.stdout
+        assert "Recent Messages" in result.stdout
+        assert "oldest_excluded" not in result.stdout
+        assert "shown_1" in result.stdout
+        assert "shown_5" in result.stdout
+        assert "Agents" not in result.stdout
+        assert "Work Items" not in result.stdout
+        assert "Active Sessions" not in result.stdout
+        assert "Worker Health" not in result.stdout
+        assert "Project:" not in result.stdout
+
+    @patch("myswat.config.settings.MySwatSettings")
+    @patch("myswat.db.connection.TiDBPool")
+    @patch("myswat.memory.store.MemoryStore")
+    def test_default_status_skips_runtime_queries_without_active_items(
+        self,
+        mock_store_cls,
+        mock_pool_cls,
+        mock_settings_cls,
+    ):
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
+
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = {
+            "id": 1,
+            "slug": "proj",
+            "name": "Proj",
+        }
+        mock_store.list_work_items.return_value = [
+            {
+                "id": 1,
+                "status": "completed",
+                "item_type": "code_change",
+                "title": "Completed task",
+                "metadata_json": {"task_state": {"current_stage": "report", "process_log": []}},
+            },
+        ]
+        mock_store.list_runtime_registrations.return_value = []
+        mock_store_cls.return_value = mock_store
+        mock_pool_cls.return_value = MagicMock()
+
+        result = CliRunner().invoke(app, ["status", "--project", "proj"])
+
+        assert result.exit_code == 0
+        assert "No active work item." in result.stdout
+        mock_store.list_runtime_registrations.assert_not_called()
+
 
 class TestTaskCommand:
     @patch("myswat.config.settings.MySwatSettings")

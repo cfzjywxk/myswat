@@ -324,7 +324,7 @@ def test_status_renders_session_truncation_short_elapsed_and_invalid_metadata(
     ]
     mock_pool_cls.return_value = pool
 
-    result = CliRunner().invoke(app, ["status", "--project", "proj"])
+    result = CliRunner().invoke(app, ["status", "--project", "proj", "--details"])
 
     assert result.exit_code == 0
     assert "(59s)" in result.stdout
