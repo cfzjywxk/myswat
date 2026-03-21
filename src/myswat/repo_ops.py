@@ -62,6 +62,43 @@ def _git_message(result: subprocess.CompletedProcess[str] | None, fallback: str)
     return stdout or stderr or fallback
 
 
+def _git_path(repo_path: Path, pathspec: str) -> Path | None:
+    result = _run_git(repo_path, "rev-parse", "--git-path", pathspec)
+    if result is None or result.returncode != 0:
+        return None
+
+    raw_path = (result.stdout or "").strip()
+    if not raw_path:
+        return None
+
+    candidate = Path(raw_path)
+    if not candidate.is_absolute():
+        candidate = repo_path / candidate
+    return candidate
+
+
+def _ensure_git_exclude_pattern(repo_path: Path, pattern: str) -> None:
+    exclude_path = _git_path(repo_path, "info/exclude")
+    if exclude_path is None:
+        return
+
+    normalized_pattern = pattern.strip()
+    if not normalized_pattern:
+        return
+
+    try:
+        existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+        if normalized_pattern in {line.strip() for line in existing.splitlines()}:
+            return
+
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
+        if existing and not existing.endswith("\n"):
+            existing += "\n"
+        exclude_path.write_text(f"{existing}{normalized_pattern}\n", encoding="utf-8")
+    except OSError:
+        return
+
+
 def _relative_repo_path(repo_path: Path, file_path: str | Path) -> str | None:
     candidate = Path(file_path).expanduser()
     if not candidate.is_absolute():
@@ -263,7 +300,10 @@ def write_workflow_report_doc(
 ) -> Path:
     repo = _normalize_repo_path(repo_path)
     stem = f"myswat-{(work_mode or 'workflow').strip().lower()}-workflow-report"
-    doc_path = repo / (filename or _timestamped_filename(stem, generated_at=generated_at))
+    report_dir = repo / ".myswat" / "workflow-reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_git_exclude_pattern(repo, ".myswat/")
+    doc_path = report_dir / (filename or _timestamped_filename(stem, generated_at=generated_at))
     content = report.strip()
     if not content.endswith("\n"):
         content += "\n"
@@ -348,6 +388,15 @@ def push_repo_changes(
         return GitPushResult(ok=True, pushed=False, message=status.message or "Repository is not under git.")
 
     repo = _normalize_repo_path(repo_path)
+    if not remote:
+        remote_result = _run_git(repo, "remote")
+        if remote_result is None:
+            return GitPushResult(ok=True, pushed=False, message="git CLI is not available.")
+        if remote_result.returncode != 0:
+            return GitPushResult(ok=False, pushed=False, message=_git_message(remote_result, "Unable to inspect git remotes."))
+        if not any(line.strip() for line in (remote_result.stdout or "").splitlines()):
+            return GitPushResult(ok=True, pushed=False, message="No configured push destination; skipping push.")
+
     push_args = ["push"]
     if remote:
         push_args.append(remote)

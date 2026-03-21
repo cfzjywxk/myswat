@@ -1014,6 +1014,20 @@ def _select_current_status_item(items: list[dict]) -> dict | None:
     return None
 
 
+def _select_status_flow_item(items: list[dict]) -> dict | None:
+    current_item = _select_current_status_item(items)
+    if current_item is not None:
+        return current_item
+
+    for item in reversed(items):
+        if _process_log_entries(item):
+            return item
+        if str(item.get("description") or "").strip():
+            return item
+
+    return items[-1] if items else None
+
+
 def _print_current_work_item(console, item: dict | None, *, has_items: bool) -> None:
     from rich.markup import escape
     from rich.panel import Panel
@@ -1426,7 +1440,8 @@ def status(
     if not details:
         _print_current_work_item(console, current_item, has_items=bool(items))
         _print_alerts(console, _collect_project_alerts(items, runtime_rows))
-        flow_entries = _build_teamwork_flow_entries(pool, current_item) if current_item else []
+        flow_item = _select_status_flow_item(items)
+        flow_entries = _build_teamwork_flow_entries(pool, flow_item) if flow_item else []
         _print_message_flow(console, flow_entries, title="Recent Messages", limit=5)
         return
 

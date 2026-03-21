@@ -10,8 +10,10 @@ from myswat.repo_ops import (
     GitCommitResult,
     GitChangedPathsResult,
     GitProbeResult,
+    GitPushResult,
     commit_repo_changes,
     list_changed_repo_paths,
+    push_repo_changes,
     write_design_plan_doc,
     write_workflow_report_doc,
 )
@@ -155,4 +157,48 @@ def test_repo_outputs_use_timestamped_root_level_filenames(tmp_path):
     )
 
     assert design_path == repo_path / "myswat-design-plan-20260321-214832.md"
-    assert report_path == repo_path / "myswat-develop-workflow-report-20260321-214832.md"
+    assert report_path == repo_path / ".myswat" / "workflow-reports" / "myswat-develop-workflow-report-20260321-214832.md"
+
+
+def test_write_workflow_report_doc_adds_local_git_exclude_pattern(tmp_path):
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    git_dir = repo_path / ".git"
+    git_dir.mkdir()
+
+    with patch(
+        "myswat.repo_ops._run_git",
+        return_value=_completed_process(
+            "git",
+            "rev-parse",
+            returncode=0,
+            stdout=".git/info/exclude\n",
+        ),
+    ):
+        write_workflow_report_doc(
+            repo_path,
+            report="# Workflow Report",
+            work_mode="develop",
+            generated_at=datetime(2026, 3, 21, 21, 48, 32, tzinfo=timezone.utc),
+        )
+
+    exclude_path = git_dir / "info" / "exclude"
+    assert exclude_path.read_text(encoding="utf-8").splitlines()[-1] == ".myswat/"
+
+
+def test_push_repo_changes_skips_when_no_remote_is_configured(tmp_path):
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+
+    with patch(
+        "myswat.repo_ops.probe_git_repository",
+        return_value=GitProbeResult(available=True, is_git_repo=True, clean=False, message=""),
+    ):
+        with patch(
+            "myswat.repo_ops._run_git",
+            return_value=_completed_process("git", "remote", returncode=0, stdout=""),
+        ) as mock_git:
+            result = push_repo_changes(repo_path)
+
+    assert result == GitPushResult(ok=True, pushed=False, message="No configured push destination; skipping push.")
+    mock_git.assert_called_once_with(repo_path.resolve(), "remote")

@@ -418,6 +418,7 @@ class WorkflowKernel:
             self._repo_path,
             message="docs: sync myswat design plan",
             paths=[doc_path],
+            trailers=self._commit_trailers_for(self._dev),
         )
         if not commit_result.ok:
             self._blocked = True
@@ -466,45 +467,13 @@ class WorkflowKernel:
             )
             return False
 
-        self._register_managed_repo_path(doc_path)
         self._record_repo_event(
             event_type="repo_exported",
             title="Workflow report exported",
-            summary=f"Exported the workflow report to {doc_path.relative_to(self._repo_path)}.",
+            summary=f"Exported the workflow report locally to {doc_path.relative_to(self._repo_path)}.",
             stage="report",
         )
 
-        if not self._repo_commit_ready or self._mode in {WorkMode.full, WorkMode.develop}:
-            return True
-
-        commit_result = commit_repo_changes(
-            self._repo_path,
-            message=f"docs: add myswat {self._mode.value} report",
-            paths=[doc_path],
-        )
-        if not commit_result.ok:
-            self._blocked = True
-            self._failure_summary = (
-                "Failed to commit the exported workflow report. "
-                f"{commit_result.message}".strip()
-            )
-            self._record_repo_event(
-                event_type="repo_commit_failed",
-                title="Workflow report commit failed",
-                summary=self._failure_summary,
-                stage="report",
-                warning=True,
-            )
-            return False
-
-        self._record_repo_event(
-            event_type="repo_commit",
-            title="Workflow report committed" if commit_result.committed else "Workflow report commit skipped",
-            summary=commit_result.message or "No workflow-report changes to commit.",
-            stage="report",
-        )
-        if commit_result.committed:
-            self._repo_commits_created = True
         return True
 
     @staticmethod
@@ -669,6 +638,7 @@ class WorkflowKernel:
                 self._repo_path,
                 message=f"workflow: finalize {self._mode.value}",
                 paths=commit_paths,
+                trailers=self._commit_trailers_for(self._dev),
             )
             if not commit_result.ok:
                 self._blocked = True
@@ -705,19 +675,14 @@ class WorkflowKernel:
 
         push_result = push_repo_changes(self._repo_path)
         if not push_result.ok:
-            self._blocked = True
-            self._failure_summary = (
-                f"Failed to push final {self._mode.value} workflow changes. "
-                f"{push_result.message}".strip()
-            )
             self._record_repo_event(
                 event_type="repo_push_failed",
                 title="Final workflow push failed",
-                summary=self._failure_summary,
+                summary=push_result.message or f"Failed to push final {self._mode.value} workflow changes.",
                 stage="repo",
                 warning=True,
             )
-            return False
+            return True
 
         self._record_repo_event(
             event_type="repo_push",

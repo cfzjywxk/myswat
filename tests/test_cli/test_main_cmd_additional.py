@@ -21,6 +21,7 @@ from myswat.cli.main import (
     _print_message_flow,
     _print_task_state,
     _runtime_health,
+    _select_status_flow_item,
     app,
 )
 
@@ -149,6 +150,43 @@ def test_build_teamwork_flow_entries_returns_empty_without_rows():
     pool.fetch_all.return_value = []
 
     assert _build_teamwork_flow_entries(pool, {"id": 7, "description": ""}) == []
+
+
+def test_build_teamwork_flow_entries_uses_description_as_requirement_when_no_process_log():
+    pool = MagicMock()
+    pool.fetch_all.return_value = []
+
+    entries = _build_teamwork_flow_entries(
+        pool,
+        {
+            "id": 7,
+            "created_at": "2026-03-21T22:51:31",
+            "description": "Implement the feature",
+            "metadata_json": {"task_state": {"process_log": []}},
+        },
+    )
+
+    assert entries == [
+        {
+            "at": "2026-03-21T22:51:31",
+            "type": "task_request",
+            "from_role": "user",
+            "to_role": "myswat",
+            "title": "Requirement",
+            "summary": "Implement the feature",
+            "_sequence": -1,
+        },
+    ]
+
+
+def test_select_status_flow_item_falls_back_to_description_before_last_item():
+    items = [
+        {"id": 1, "description": "", "metadata_json": {"task_state": {"process_log": []}}},
+        {"id": 2, "description": "Implement the feature", "metadata_json": {"task_state": {"process_log": []}}},
+        {"id": 3, "description": "", "metadata_json": {"task_state": {"process_log": []}}},
+    ]
+
+    assert _select_status_flow_item(items)["id"] == 2
 
 
 def test_print_message_flow_renders_timeline_panel():
@@ -329,6 +367,43 @@ def test_status_renders_session_truncation_short_elapsed_and_invalid_metadata(
     assert result.exit_code == 0
     assert "(59s)" in result.stdout
     assert "..." in result.stdout
+
+
+@patch("myswat.config.settings.MySwatSettings")
+@patch("myswat.db.connection.TiDBPool")
+@patch("myswat.memory.store.MemoryStore")
+def test_status_overview_handles_terminal_item_without_flow_data(
+    mock_store_cls,
+    mock_pool_cls,
+    mock_settings_cls,
+):
+    settings = MagicMock()
+    settings.embedding.tidb_model = "built-in"
+    mock_settings_cls.return_value = settings
+    store = MagicMock()
+    store.get_project_by_slug.return_value = {"id": 1, "slug": "proj", "name": "Proj"}
+    store.list_work_items.return_value = [
+        {
+            "id": 1,
+            "status": "completed",
+            "item_type": "code_change",
+            "title": "Completed task",
+            "description": "",
+            "metadata_json": {"task_state": {"current_stage": "report", "process_log": []}},
+        },
+    ]
+    store.list_runtime_registrations.return_value = []
+    mock_store_cls.return_value = store
+    pool = MagicMock()
+    pool.fetch_all.return_value = []
+    mock_pool_cls.return_value = pool
+
+    result = CliRunner().invoke(app, ["status", "--project", "proj"])
+
+    assert result.exit_code == 0
+    assert "No active work item." in result.stdout
+    assert "Recent Messages" in result.stdout
+    assert "No recorded message flow yet." in result.stdout
 
 
 @patch("myswat.cli.main._print_teamwork_details")

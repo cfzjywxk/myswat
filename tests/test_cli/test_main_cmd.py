@@ -494,17 +494,35 @@ class TestStatusCommand:
                 "status": "completed",
                 "item_type": "code_change",
                 "title": "Completed task",
-                "metadata_json": {"task_state": {"current_stage": "report", "process_log": []}},
+                "metadata_json": {
+                    "task_state": {
+                        "current_stage": "report",
+                        "process_log": [
+                            {
+                                "at": "2026-03-21T20:55:00",
+                                "type": "status_report",
+                                "title": "Workflow report",
+                                "summary": "Completed task summary",
+                                "from_role": "developer",
+                                "to_role": "user",
+                            },
+                        ],
+                    }
+                },
             },
         ]
         mock_store.list_runtime_registrations.return_value = []
         mock_store_cls.return_value = mock_store
-        mock_pool_cls.return_value = MagicMock()
+        pool = MagicMock()
+        pool.fetch_all.return_value = []
+        mock_pool_cls.return_value = pool
 
         result = CliRunner().invoke(app, ["status", "--project", "proj"])
 
         assert result.exit_code == 0
         assert "No active work item." in result.stdout
+        assert "Recent Messages" in result.stdout
+        assert "Completed task summary" in result.stdout
         mock_store.list_runtime_registrations.assert_not_called()
 
 

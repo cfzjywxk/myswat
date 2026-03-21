@@ -250,6 +250,7 @@ def test_run_exports_design_plan_to_docs_and_commits_when_plan_finalized(tmp_pat
         repo_path.resolve(),
         message="docs: sync myswat design plan",
         paths=[repo_path / "myswat-design-plan.md"],
+        trailers=["Co-Authored-By: MySwat Dev (GPT-5.4) <noreply@myswat.invalid>"],
     )
 
 
@@ -1371,7 +1372,7 @@ def test_develop_mode_pushes_repo_after_successful_workflow(tmp_path):
                     ):
                         with patch.object(kernel, "_generate_final_report", return_value="report"):
                             with patch.object(kernel, "_export_final_report_to_docs", return_value=True):
-                                with patch.object(kernel, "_current_workflow_repo_paths", return_value=[repo_path / "myswat-develop-workflow-report.md"]):
+                                with patch.object(kernel, "_current_workflow_repo_paths", return_value=[repo_path / "src/lib.rs"]):
                                     with patch(
                                         "myswat.workflow.kernel.commit_repo_changes",
                                         return_value=GitCommitResult(True, True, "Committed final workflow changes."),
@@ -1387,7 +1388,8 @@ def test_develop_mode_pushes_repo_after_successful_workflow(tmp_path):
     mock_commit.assert_called_once_with(
         repo_path.resolve(),
         message="workflow: finalize develop",
-        paths=[repo_path / "myswat-develop-workflow-report.md"],
+        paths=[repo_path / "src/lib.rs"],
+        trailers=["Co-Authored-By: MySwat Dev (GPT-5.4) <noreply@myswat.invalid>"],
     )
     mock_push.assert_called_once_with(repo_path.resolve())
 
@@ -1464,7 +1466,7 @@ def test_current_workflow_repo_paths_excludes_initial_dirty_paths_even_when_pref
         repo_path=str(repo_path),
     )
     kernel._repo_initial_dirty_paths = {"notes.txt"}
-    kernel._repo_managed_paths = {"myswat-develop-workflow-report-20260321-214832.md"}
+    kernel._repo_managed_paths = {"docs/implementation-plan.md"}
 
     with patch(
         "myswat.workflow.kernel.list_changed_repo_paths",
@@ -1473,19 +1475,19 @@ def test_current_workflow_repo_paths_excludes_initial_dirty_paths_even_when_pref
             paths={
                 "notes.txt",
                 "src/lib.rs",
-                "myswat-develop-workflow-report-20260321-214832.md",
+                "docs/implementation-plan.md",
             },
         ),
     ):
         result = kernel._current_workflow_repo_paths("notes.txt", "src/lib.rs")
 
     assert result == [
-        repo_path / "myswat-develop-workflow-report-20260321-214832.md",
+        repo_path / "docs/implementation-plan.md",
         repo_path / "src/lib.rs",
     ]
 
 
-def test_export_final_report_to_docs_commits_immediately_in_design_mode(tmp_path):
+def test_export_final_report_to_docs_keeps_workflow_report_local_only(tmp_path):
     store = _store()
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
@@ -1505,19 +1507,17 @@ def test_export_final_report_to_docs_commits_immediately_in_design_mode(tmp_path
 
     with patch(
         "myswat.workflow.kernel.write_workflow_report_doc",
-        return_value=repo_path / "myswat-design-workflow-report-20260321-214832.md",
+        return_value=repo_path / ".myswat" / "workflow-reports" / "myswat-design-workflow-report-20260321-214832.md",
     ):
-        with patch(
-            "myswat.workflow.kernel.commit_repo_changes",
-            return_value=GitCommitResult(True, True, "Committed workflow report."),
-        ) as mock_commit:
+        with patch("myswat.workflow.kernel.commit_repo_changes") as mock_commit:
             ok = kernel._export_final_report_to_docs("# Workflow Report")
 
     assert ok is True
-    mock_commit.assert_called_once_with(
-        repo_path.resolve(),
-        message="docs: add myswat design report",
-        paths=[repo_path / "myswat-design-workflow-report-20260321-214832.md"],
+    assert kernel._repo_managed_paths == set()
+    mock_commit.assert_not_called()
+    assert any(
+        "workflow report locally" in call.kwargs.get("summary", "").lower()
+        for call in store.append_work_item_process_event.call_args_list
     )
 
 
@@ -1562,6 +1562,41 @@ def test_commit_trailers_humanize_dated_and_legacy_claude_model_names():
     assert kernel._commit_trailers_for(legacy_claude) == [
         "Co-Authored-By: MySwat Dev (Sonnet 3.5) <noreply@myswat.invalid>",
     ]
+
+
+def test_finalize_workflow_repo_sync_warns_but_does_not_block_on_push_failure(tmp_path):
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    store = _store()
+    kernel = WorkflowKernel(
+        store=store,
+        service=_service(),
+        dev=_participant(10, "developer"),
+        qas=[_participant(20, "qa_main")],
+        project_id=1,
+        work_item_id=890,
+        mode=WorkMode.develop,
+        auto_approve=True,
+        repo_path=str(repo_path),
+    )
+    kernel._repo_commit_checked = True
+    kernel._repo_commit_ready = True
+    kernel._repo_commits_created = True
+
+    with patch.object(kernel, "_current_workflow_repo_paths", return_value=[]):
+        with patch(
+            "myswat.workflow.kernel.push_repo_changes",
+            return_value=GitPushResult(False, False, "fatal: could not read from remote repository"),
+        ):
+            ok = kernel._finalize_workflow_repo_sync()
+
+    assert ok is True
+    assert kernel._blocked is False
+    assert kernel._failure_summary == ""
+    assert any(
+        call.kwargs.get("event_type") == "repo_push_failed"
+        for call in store.append_work_item_process_event.call_args_list
+    )
 
 
 def test_test_commit_trailer_uses_qa_lead_when_multiple_qas(tmp_path):
