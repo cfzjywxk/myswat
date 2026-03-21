@@ -9,12 +9,22 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+from myswat.agents.factory import make_runner_from_row
+from myswat.agents.session_manager import SessionManager as AgentSessionManager
+from myswat.config.settings import MySwatSettings
 from myswat.large_payloads import build_agent_context_usage_prompt
 from myswat.memory.store import MemoryStore
+from myswat.models.session import Session
 from myswat.server.contracts import (
     ArtifactSubmission,
     ArtifactSubmissionResult,
     AssignmentEnvelope,
+    ChatMessageRequest,
+    ChatMessageResult,
+    ChatSessionMutationRequest,
+    ChatSessionMutationResult,
+    ChatSessionOpenRequest,
+    ChatSessionResult,
     ClaimNextAssignmentRequest,
     CompleteStageTaskRequest,
     CoordinationEventRecord,
@@ -248,6 +258,177 @@ class MySwatToolService:
             project_slug=str(project["slug"]),
             name=str(project["name"]),
             repo_path=project.get("repo_path"),
+        )
+
+    @staticmethod
+    def _string_or_empty(value: object) -> str:
+        return "" if value is None else str(value)
+
+    @staticmethod
+    def _require_positive_id(value: object, *, label: str) -> int:
+        try:
+            resolved = int(value or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{label} is missing a valid id") from exc
+        if resolved <= 0:
+            raise ValueError(f"{label} is missing a valid id")
+        return resolved
+
+    @staticmethod
+    def _require_workdir(workdir: str | None) -> str:
+        resolved = str(workdir or "").strip()
+        if not resolved:
+            raise ValueError("Chat session requires a workdir.")
+        return resolved
+
+    def _chat_session_result(
+        self,
+        *,
+        session_row: dict[str, Any],
+        agent_row: dict[str, Any],
+    ) -> ChatSessionResult:
+        session_id = self._require_positive_id(session_row.get("id"), label="Chat session")
+        agent_id = self._require_positive_id(agent_row.get("id"), label="Chat agent")
+        session_uuid = str(session_row.get("session_uuid") or "").strip()
+        if not session_uuid:
+            raise ValueError(f"Chat session {session_id} is missing a session UUID")
+        return ChatSessionResult(
+            session_id=session_id,
+            session_uuid=session_uuid,
+            agent_id=agent_id,
+            agent_role=str(agent_row.get("role") or ""),
+            display_name=str(agent_row.get("display_name") or ""),
+            cli_backend=str(agent_row.get("cli_backend") or ""),
+            model_name=str(agent_row.get("model_name") or ""),
+        )
+
+    def _build_chat_session_manager(
+        self,
+        *,
+        project_row: dict[str, Any],
+        agent_row: dict[str, Any],
+        workdir: str,
+    ) -> AgentSessionManager:
+        settings = MySwatSettings()
+        runner = make_runner_from_row(agent_row, settings=settings)
+        runner.workdir = workdir
+        return AgentSessionManager(
+            store=self._store,
+            runner=runner,
+            agent_row=agent_row,
+            project_id=int(project_row["id"]),
+            settings=settings,
+        )
+
+    def _load_chat_session_rows(
+        self,
+        session_id: int,
+        *,
+        require_active: bool = True,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        session_row = self._store.get_session(session_id)
+        if not session_row:
+            raise ValueError(f"Chat session not found: {session_id}")
+        if require_active and str(session_row.get("status") or "") != "active":
+            raise ValueError(f"Chat session is not active: {session_id}")
+
+        agent_id = self._require_positive_id(session_row.get("agent_id"), label="Chat session agent")
+        agent_row = self._store.get_agent_by_id(agent_id)
+        if not agent_row:
+            raise ValueError(f"Chat agent not found: {agent_id}")
+
+        project_id = self._require_positive_id(agent_row.get("project_id"), label="Chat project")
+        project_row = self._store.get_project(project_id)
+        if not project_row:
+            raise ValueError(f"Project not found: {project_id}")
+
+        return session_row, agent_row, project_row
+
+    @staticmethod
+    def _prime_chat_session_manager(
+        manager: AgentSessionManager,
+        *,
+        session_row: dict[str, Any],
+    ) -> None:
+        manager._session = Session.model_validate(session_row)
+        manager._memory_revision_warned = False
+        manager._restore_cli_session(int(session_row["id"]))
+
+    def open_chat_session(self, request: ChatSessionOpenRequest) -> ChatSessionResult:
+        project_row = self._store.get_project(request.project_id)
+        if not project_row:
+            raise ValueError(f"Project not found: {request.project_id}")
+        agent_row = self._store.get_agent(request.project_id, request.agent_role)
+        if not agent_row:
+            raise ValueError(
+                f"Agent role '{request.agent_role}' not found for project {request.project_id}"
+            )
+        workdir = self._require_workdir(request.workdir or project_row.get("repo_path"))
+        manager = self._build_chat_session_manager(
+            project_row=project_row,
+            agent_row=agent_row,
+            workdir=workdir,
+        )
+        session = manager.create_or_resume(purpose=request.purpose)
+        return self._chat_session_result(
+            session_row={
+                "id": session.id,
+                "session_uuid": session.session_uuid,
+            },
+            agent_row=agent_row,
+        )
+
+    def send_chat_message(self, request: ChatMessageRequest) -> ChatMessageResult:
+        session_row, agent_row, project_row = self._load_chat_session_rows(request.session_id)
+        workdir = self._require_workdir(request.workdir or project_row.get("repo_path"))
+        manager = self._build_chat_session_manager(
+            project_row=project_row,
+            agent_row=agent_row,
+            workdir=workdir,
+        )
+        self._prime_chat_session_manager(manager, session_row=session_row)
+        response = manager.send(request.prompt, task_description=request.task_description)
+        chat_session = self._chat_session_result(session_row=session_row, agent_row=agent_row)
+        return ChatMessageResult(
+            session_id=chat_session.session_id,
+            session_uuid=chat_session.session_uuid,
+            agent_id=chat_session.agent_id,
+            agent_role=chat_session.agent_role,
+            content=self._string_or_empty(response.content),
+            exit_code=int(response.exit_code or 0),
+            raw_stdout=self._string_or_empty(response.raw_stdout),
+            raw_stderr=self._string_or_empty(response.raw_stderr),
+            token_usage=response.token_usage if isinstance(response.token_usage, dict) else {},
+            cancelled=bool(response.cancelled),
+        )
+
+    def reset_chat_session(
+        self,
+        request: ChatSessionMutationRequest,
+    ) -> ChatSessionMutationResult:
+        session_row, _, _ = self._load_chat_session_rows(request.session_id)
+        self._store.append_turn(
+            session_id=request.session_id,
+            role="system",
+            content="AI session reset.",
+            metadata={"cli_session_reset": True},
+        )
+        return ChatSessionMutationResult(
+            session_id=int(session_row["id"]),
+            session_uuid=str(session_row.get("session_uuid") or ""),
+            ok=True,
+        )
+
+    def close_chat_session(
+        self,
+        request: ChatSessionMutationRequest,
+    ) -> ChatSessionMutationResult:
+        session_row, _, _ = self._load_chat_session_rows(request.session_id, require_active=False)
+        self._store.close_session(request.session_id)
+        return ChatSessionMutationResult(
+            session_id=int(session_row["id"]),
+            session_uuid=str(session_row.get("session_uuid") or ""),
+            ok=True,
         )
 
     def search_knowledge(self, request: KnowledgeSearchRequest) -> list[dict[str, Any]]:

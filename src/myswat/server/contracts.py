@@ -22,6 +22,54 @@ class ProjectLookupResult(BaseModel):
     repo_path: str | None = None
 
 
+class ChatSessionOpenRequest(BaseModel):
+    project_id: int
+    agent_role: str
+    purpose: str | None = None
+    workdir: str | None = None
+
+
+class ChatSessionResult(BaseModel):
+    session_id: int
+    session_uuid: str
+    agent_id: int
+    agent_role: str
+    display_name: str
+    cli_backend: str
+    model_name: str
+
+
+class ChatMessageRequest(BaseModel):
+    session_id: int
+    prompt: str
+    task_description: str | None = None
+    workdir: str | None = None
+
+
+class ChatMessageResult(BaseModel):
+    session_id: int
+    session_uuid: str
+    agent_id: int
+    agent_role: str
+    content: str
+    exit_code: int = 0
+    raw_stdout: str = ""
+    raw_stderr: str = ""
+    token_usage: dict[str, Any] = Field(default_factory=dict)
+    cancelled: bool = False
+
+
+class ChatSessionMutationRequest(BaseModel):
+    session_id: int
+    workdir: str | None = None
+
+
+class ChatSessionMutationResult(BaseModel):
+    session_id: int
+    session_uuid: str
+    ok: bool = True
+
+
 class KnowledgeSearchRequest(BaseModel):
     project_id: int
     query: str

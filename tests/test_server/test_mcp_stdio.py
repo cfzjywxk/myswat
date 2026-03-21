@@ -57,6 +57,10 @@ def test_list_tools_includes_assignment_tools():
     assert "append_coordination_event" in names
     assert "fail_review_cycle" in names
     assert "cancel_review_cycles" in names
+    assert "open_chat_session" in names
+    assert "send_chat_message" in names
+    assert "reset_chat_session" in names
+    assert "close_chat_session" in names
 
 
 def test_call_tool_validates_and_dispatches():

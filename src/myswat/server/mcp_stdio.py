@@ -11,6 +11,9 @@ from pydantic import BaseModel
 
 from myswat.server.contracts import (
     ArtifactSubmission,
+    ChatMessageRequest,
+    ChatSessionMutationRequest,
+    ChatSessionOpenRequest,
     ClaimNextAssignmentRequest,
     CompleteStageTaskRequest,
     CoordinationEventRecord,
@@ -81,6 +84,30 @@ class MySwatMCPDispatcher:
                 description="Resolve a MySwat project slug to project metadata.",
                 schema_model=ProjectLookupRequest,
                 handler=self._service.resolve_project,
+            ),
+            "open_chat_session": MCPTool(
+                name="open_chat_session",
+                description="Create or resume an interactive chat session for one project role.",
+                schema_model=ChatSessionOpenRequest,
+                handler=self._service.open_chat_session,
+            ),
+            "send_chat_message": MCPTool(
+                name="send_chat_message",
+                description="Send one chat message through a persisted server-side agent session.",
+                schema_model=ChatMessageRequest,
+                handler=self._service.send_chat_message,
+            ),
+            "reset_chat_session": MCPTool(
+                name="reset_chat_session",
+                description="Reset the persisted AI chat session while keeping TiDB history.",
+                schema_model=ChatSessionMutationRequest,
+                handler=self._service.reset_chat_session,
+            ),
+            "close_chat_session": MCPTool(
+                name="close_chat_session",
+                description="Close one active interactive chat session.",
+                schema_model=ChatSessionMutationRequest,
+                handler=self._service.close_chat_session,
             ),
             "register_runtime": MCPTool(
                 name="register_runtime",

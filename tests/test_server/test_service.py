@@ -14,6 +14,9 @@ from myswat.large_payloads import build_agent_context_usage_prompt
 from myswat.memory.store import MemoryStore
 from myswat.models.workflow_runtime import StageRun
 from myswat.server.contracts import (
+    ChatMessageRequest,
+    ChatSessionMutationRequest,
+    ChatSessionOpenRequest,
     ClaimNextAssignmentRequest,
     CompleteStageTaskRequest,
     CoordinationEventRecord,
@@ -66,6 +69,182 @@ def test_get_recent_artifacts_delegates_to_store():
 
     assert result == [{"artifact_type": "patch"}]
     store.get_recent_artifacts_for_project.assert_called_once_with(project_id=9, limit=2)
+
+
+def test_open_chat_session_delegates_to_server_side_session_manager(monkeypatch):
+    store = Mock(spec=MemoryStore)
+    store.get_project.return_value = {"id": 9, "repo_path": "/tmp/repo"}
+    store.get_agent.return_value = {
+        "id": 3,
+        "project_id": 9,
+        "role": "architect",
+        "display_name": "Architect",
+        "cli_backend": "codex",
+        "model_name": "gpt-5",
+    }
+    service = MySwatToolService(store)
+    manager = Mock()
+    manager.create_or_resume.return_value = SimpleNamespace(id=41, session_uuid="uuid-41")
+    builder = Mock(return_value=manager)
+    monkeypatch.setattr(service, "_build_chat_session_manager", builder)
+
+    result = service.open_chat_session(
+        ChatSessionOpenRequest(
+            project_id=9,
+            agent_role="architect",
+            purpose="Interactive chat (architect)",
+            workdir="/tmp/repo",
+        )
+    )
+
+    assert result.session_id == 41
+    assert result.session_uuid == "uuid-41"
+    assert result.agent_role == "architect"
+    builder.assert_called_once()
+    manager.create_or_resume.assert_called_once_with(purpose="Interactive chat (architect)")
+
+
+def test_send_chat_message_uses_persisted_session_context(monkeypatch):
+    store = Mock(spec=MemoryStore)
+    store.get_session.return_value = {
+        "id": 41,
+        "agent_id": 3,
+        "session_uuid": "uuid-41",
+        "status": "active",
+    }
+    store.get_agent_by_id.return_value = {
+        "id": 3,
+        "project_id": 9,
+        "role": "architect",
+        "display_name": "Architect",
+        "cli_backend": "codex",
+        "model_name": "gpt-5",
+    }
+    store.get_project.return_value = {"id": 9, "repo_path": "/tmp/repo"}
+    service = MySwatToolService(store)
+    manager = Mock()
+    manager.send.return_value = SimpleNamespace(
+        content="hello back",
+        exit_code=0,
+        raw_stdout="stdout",
+        raw_stderr="",
+        token_usage={"prompt": 12},
+        cancelled=False,
+    )
+    builder = Mock(return_value=manager)
+    monkeypatch.setattr(service, "_build_chat_session_manager", builder)
+
+    result = service.send_chat_message(
+        ChatMessageRequest(
+            session_id=41,
+            prompt="hello",
+            task_description="chat turn",
+            workdir="/tmp/repo",
+        )
+    )
+
+    assert result.session_id == 41
+    assert result.agent_role == "architect"
+    assert result.content == "hello back"
+    builder.assert_called_once()
+    manager.send.assert_called_once_with("hello", task_description="chat turn")
+
+
+def test_send_chat_message_coerces_none_fields_to_empty_strings(monkeypatch):
+    store = Mock(spec=MemoryStore)
+    store.get_session.return_value = {
+        "id": 41,
+        "agent_id": 3,
+        "session_uuid": "uuid-41",
+        "status": "active",
+    }
+    store.get_agent_by_id.return_value = {
+        "id": 3,
+        "project_id": 9,
+        "role": "architect",
+        "display_name": "Architect",
+        "cli_backend": "codex",
+        "model_name": "gpt-5",
+    }
+    store.get_project.return_value = {"id": 9, "repo_path": "/tmp/repo"}
+    service = MySwatToolService(store)
+    manager = Mock()
+    manager.send.return_value = SimpleNamespace(
+        content=None,
+        exit_code=0,
+        raw_stdout=None,
+        raw_stderr=None,
+        token_usage=None,
+        cancelled=False,
+    )
+    monkeypatch.setattr(service, "_build_chat_session_manager", Mock(return_value=manager))
+
+    result = service.send_chat_message(
+        ChatMessageRequest(
+            session_id=41,
+            prompt="hello",
+            task_description="chat turn",
+            workdir="/tmp/repo",
+        )
+    )
+
+    assert result.content == ""
+    assert result.raw_stdout == ""
+    assert result.raw_stderr == ""
+    assert result.token_usage == {}
+
+
+def test_reset_chat_session_appends_reset_marker():
+    store = Mock(spec=MemoryStore)
+    store.get_session.return_value = {
+        "id": 41,
+        "agent_id": 3,
+        "session_uuid": "uuid-41",
+        "status": "active",
+    }
+    store.get_agent_by_id.return_value = {
+        "id": 3,
+        "project_id": 9,
+        "role": "architect",
+        "display_name": "Architect",
+        "cli_backend": "codex",
+        "model_name": "gpt-5",
+    }
+    store.get_project.return_value = {"id": 9, "repo_path": "/tmp/repo"}
+    service = MySwatToolService(store)
+
+    result = service.reset_chat_session(ChatSessionMutationRequest(session_id=41))
+
+    assert result.ok is True
+    store.append_turn.assert_called_once_with(
+        session_id=41,
+        role="system",
+        content="AI session reset.",
+        metadata={"cli_session_reset": True},
+    )
+
+
+def test_open_chat_session_requires_workdir():
+    store = Mock(spec=MemoryStore)
+    store.get_project.return_value = {"id": 9, "repo_path": None}
+    store.get_agent.return_value = {
+        "id": 3,
+        "project_id": 9,
+        "role": "architect",
+        "display_name": "Architect",
+        "cli_backend": "codex",
+        "model_name": "gpt-5",
+    }
+    service = MySwatToolService(store)
+
+    with pytest.raises(ValueError, match="workdir"):
+        service.open_chat_session(
+            ChatSessionOpenRequest(
+                project_id=9,
+                agent_role="architect",
+                purpose="Interactive chat (architect)",
+            )
+        )
 
 
 def test_get_work_item_snapshot_reuses_single_context_bundle_fetch():

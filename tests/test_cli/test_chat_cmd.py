@@ -11,6 +11,9 @@ from prompt_toolkit.enums import EditingMode
 from prompt_toolkit.history import FileHistory
 
 from myswat.agents.base import AgentResponse
+from myswat.cli.progress import _check_esc
+from myswat.server.control_client import DaemonClientError
+from myswat.server.mcp_http_client import MCPHTTPClientError
 from myswat.workflow.engine import WorkMode
 from myswat.cli.chat_cmd import (
     _show_status,
@@ -22,7 +25,6 @@ from myswat.cli.chat_cmd import (
     _run_testplan_review_interactive,
     _run_workflow,
     _run_workflow_interactive,
-    _check_esc,
 )
 
 
@@ -105,83 +107,36 @@ class TestShowStatus:
 
 
 # ---------------------------------------------------------------------------
-# _run_inline_review
+# daemon-backed workflow helpers
 # ---------------------------------------------------------------------------
 class TestRunInlineReview:
-    @patch("myswat.workflow.review_loop.run_review_loop")
-    @patch("myswat.cli.chat_cmd.SessionManager")
-    def test_missing_agents(self, mock_sm_cls, mock_review):
-        store = MagicMock()
-        store.get_agent.return_value = None
-        _run_inline_review(store, _proj(), "/tmp", MagicMock(), "do stuff")
-        mock_review.assert_not_called()
+    @patch("myswat.cli.chat_cmd._run_workflow")
+    def test_delegates_to_develop_workflow(self, mock_run_workflow):
+        created = []
 
-    @patch("myswat.workflow.review_loop.run_review_loop")
-    @patch("myswat.cli.chat_cmd.SessionManager")
-    def test_lgtm_verdict(self, mock_sm_cls, mock_review):
-        from myswat.models.work_item import ReviewVerdict
-
-        store = MagicMock()
-        dev_agent = _agent_row("developer")
-        qa_agent = _agent_row("qa_main", "kimi")
-
-        def get_agent_side(pid, role):
-            if role == "developer":
-                return dev_agent
-            if role == "qa_main":
-                return qa_agent
-            return None
-        store.get_agent.side_effect = get_agent_side
-        store.create_work_item.return_value = 42
-
-        sm = MagicMock()
-        sm.session = SimpleNamespace(session_uuid="uuid")
-        mock_sm_cls.return_value = sm
-
-        settings = MagicMock()
-        settings.workflow.max_review_iterations = 5
-
-        mock_review.return_value = ReviewVerdict(
-            verdict="lgtm", issues=[], summary="ok",
+        _run_inline_review(
+            MagicMock(),
+            _proj(),
+            "/tmp",
+            MagicMock(),
+            "do stuff",
+            should_cancel=lambda: True,
+            on_work_item_created=created.append,
+            register_cancel_target=MagicMock(),
+            initial_process_events=[{"event_type": "ignored"}],
         )
-        _run_inline_review(store, _proj(), "/tmp", settings, "do stuff")
-        store.update_work_item_status.assert_any_call(42, "approved")
 
-    @patch("myswat.workflow.review_loop.run_review_loop")
-    @patch("myswat.cli.chat_cmd.SessionManager")
-    def test_changes_requested(self, mock_sm_cls, mock_review):
-        from myswat.models.work_item import ReviewVerdict
-
-        store = MagicMock()
-        dev_agent = _agent_row("developer")
-        qa_agent = _agent_row("qa_main", "kimi")
-
-        def get_agent_side(pid, role):
-            if role == "developer":
-                return dev_agent
-            if role == "qa_main":
-                return qa_agent
-            return None
-        store.get_agent.side_effect = get_agent_side
-        store.create_work_item.return_value = 42
-
-        sm = MagicMock()
-        sm.session = SimpleNamespace(session_uuid="uuid")
-        mock_sm_cls.return_value = sm
-
-        settings = MagicMock()
-        settings.workflow.max_review_iterations = 5
-
-        mock_review.return_value = ReviewVerdict(
-            verdict="changes_requested", issues=["fix x"], summary="needs work",
-        )
-        _run_inline_review(store, _proj(), "/tmp", settings, "do stuff")
-        store.update_work_item_status.assert_any_call(42, "review")
+        kwargs = mock_run_workflow.call_args.kwargs
+        assert kwargs["requirement"] == "do stuff"
+        assert kwargs["mode"] == WorkMode.develop
+        assert kwargs["should_cancel"]()
+        kwargs["on_work_item_created"](42)
+        assert created == [42]
 
 
 class TestRunInlineReviewInteractive:
-    @patch("myswat.cli.chat_cmd._run_with_task_monitor")
-    def test_uses_task_monitor(self, mock_task_monitor):
+    @patch("myswat.cli.chat_cmd._run_workflow_interactive")
+    def test_uses_task_monitor(self, mock_run_workflow_interactive):
         _run_inline_review_interactive(
             store=MagicMock(),
             proj=_proj(),
@@ -190,382 +145,245 @@ class TestRunInlineReviewInteractive:
             task="do stuff",
         )
 
-        mock_task_monitor.assert_called_once()
-        kwargs = mock_task_monitor.call_args.kwargs
+        kwargs = mock_run_workflow_interactive.call_args.kwargs
         assert kwargs["label"] == "Running dev+QA review loop"
-        assert kwargs["proj"] == _proj()
+        assert kwargs["mode"] == WorkMode.develop
 
 
-# ---------------------------------------------------------------------------
-# _run_design_review / _run_testplan_review
-# ---------------------------------------------------------------------------
 class TestRunDesignReview:
     @patch("myswat.cli.chat_cmd.console.print")
-    @patch("myswat.workflow.engine.WorkflowEngine")
-    @patch("myswat.cli.chat_cmd.SessionManager")
-    def test_missing_architect_session(self, mock_sm_cls, mock_engine_cls, mock_console_print):
+    @patch("myswat.cli.chat_cmd._run_workflow")
+    def test_missing_architect_session(self, mock_run_workflow, mock_console_print):
         _run_design_review(MagicMock(), _proj(), None, "/tmp", MagicMock(), "do stuff")
-        mock_engine_cls.assert_not_called()
-        assert any(
-            "Missing architect session." in str(call)
-            for call in mock_console_print.call_args_list
+        mock_run_workflow.assert_not_called()
+        assert any("Missing architect session." in str(call) for call in mock_console_print.call_args_list)
+
+    @patch("myswat.cli.chat_cmd._run_workflow")
+    def test_delegates_architect_design_mode(self, mock_run_workflow):
+        proposer_sm = MagicMock()
+
+        _run_design_review(
+            MagicMock(),
+            _proj(),
+            proposer_sm,
+            "/tmp",
+            MagicMock(),
+            "do stuff",
+            should_cancel=lambda: False,
         )
 
-    @patch("myswat.workflow.engine.WorkflowEngine")
-    @patch("myswat.cli.chat_cmd.SessionManager")
-    def test_missing_developer_agent(self, mock_sm_cls, mock_engine_cls):
-        store = MagicMock()
-        store.get_agent.return_value = None
-        proposer_sm = MagicMock()
-        proposer_sm.agent_id = 9
-        proposer_sm.agent_role = "architect"
-
-        _run_design_review(store, _proj(), proposer_sm, MagicMock(), "/tmp", MagicMock(), "do stuff")
-        mock_engine_cls.assert_not_called()
-
-    @patch("myswat.workflow.engine.WorkflowEngine")
-    @patch("myswat.cli.chat_cmd.SessionManager")
-    def test_engine_exception_closes_sessions_and_blocks_item(self, mock_sm_cls, mock_engine_cls):
-        store = MagicMock()
-        dev_agent = _agent_row("developer")
-        qa_agent = _agent_row("qa_main", "kimi")
-
-        def get_agent_side(pid, role):
-            if role == "developer":
-                return dev_agent
-            if role == "qa_main":
-                return qa_agent
-            return None
-        store.get_agent.side_effect = get_agent_side
-        store.create_work_item.return_value = 42
-
-        dev_sm = MagicMock()
-        qa_sm = MagicMock()
-        mock_sm_cls.side_effect = [dev_sm, qa_sm]
-
-        arch_workflow_sm = MagicMock()
-        proposer_sm = MagicMock()
-        proposer_sm.agent_id = 9
-        proposer_sm.agent_role = "architect"
-        proposer_sm.fork_for_work_item.return_value = arch_workflow_sm
-        proposer_sm._runner = MagicMock()
-
-        settings = MagicMock()
-        settings.workflow.max_review_iterations = 5
-
-        engine = MagicMock()
-        engine.run.side_effect = RuntimeError("boom")
-        mock_engine_cls.return_value = engine
-
-        with pytest.raises(RuntimeError, match="boom"):
-            _run_design_review(store, _proj(), proposer_sm, "/tmp", settings, "do stuff")
-
-        store.update_work_item_status.assert_any_call(42, "blocked")
-        arch_workflow_sm.close.assert_called_once()
-        dev_sm.close.assert_called_once()
-        qa_sm.close.assert_called_once()
-
-    @patch("myswat.workflow.engine.WorkflowEngine")
-    @patch("myswat.cli.chat_cmd.SessionManager")
-    def test_success_completed_status(self, mock_sm_cls, mock_engine_cls):
-        store = MagicMock()
-        dev_agent = _agent_row("developer")
-        qa_agent = _agent_row("qa_main", "kimi")
-
-        def get_agent_side(pid, role):
-            if role == "developer":
-                return dev_agent
-            if role == "qa_main":
-                return qa_agent
-            return None
-        store.get_agent.side_effect = get_agent_side
-        store.create_work_item.return_value = 42
-
-        dev_sm = MagicMock()
-        qa_sm = MagicMock()
-        mock_sm_cls.side_effect = [dev_sm, qa_sm]
-
-        proposer_sm = MagicMock()
-        proposer_sm.agent_id = 9
-        proposer_sm.agent_role = "architect"
-        proposer_sm.fork_for_work_item.return_value = MagicMock()
-        proposer_sm._runner = MagicMock()
-
-        settings = MagicMock()
-        settings.workflow.max_review_iterations = 5
-
-        engine = MagicMock()
-        engine.run.return_value = SimpleNamespace(success=True, blocked=False)
-        mock_engine_cls.return_value = engine
-
-        _run_design_review(store, _proj(), proposer_sm, "/tmp", settings, "do stuff")
-        assert store.create_work_item.call_args.kwargs["item_type"] == "design"
-        assert store.create_work_item.call_args.kwargs["metadata_json"]["work_mode"] == "architect_design"
-        proposer_sm.fork_for_work_item.assert_called_once_with(42, purpose="Arch design: do stuff")
-        store.update_work_item_status.assert_any_call(42, "completed")
+        kwargs = mock_run_workflow.call_args.kwargs
+        assert kwargs["mode"] == WorkMode.architect_design
+        assert kwargs["proposer_sm"] is proposer_sm
+        assert kwargs["requirement"] == "do stuff"
 
 
 class TestRunTestplanReview:
-    @patch("myswat.workflow.engine.WorkflowEngine")
-    @patch("myswat.cli.chat_cmd.SessionManager")
-    def test_missing_architect_or_developer(self, mock_sm_cls, mock_engine_cls):
-        store = MagicMock()
-        store.get_agent.return_value = None
+    @patch("myswat.cli.chat_cmd.console.print")
+    @patch("myswat.cli.chat_cmd._run_workflow")
+    def test_missing_qa_session(self, mock_run_workflow, mock_console_print):
+        _run_testplan_review(MagicMock(), _proj(), None, "/tmp", MagicMock(), "do stuff")
+        mock_run_workflow.assert_not_called()
+        assert any("Missing QA session." in str(call) for call in mock_console_print.call_args_list)
+
+    @patch("myswat.cli.chat_cmd._run_workflow")
+    def test_delegates_testplan_mode(self, mock_run_workflow):
         proposer_sm = MagicMock()
-        proposer_sm.agent_id = 9
-        proposer_sm.agent_role = "qa_main"
 
-        _run_testplan_review(store, _proj(), proposer_sm, "/tmp", MagicMock(), "do stuff")
-        mock_engine_cls.assert_not_called()
+        _run_testplan_review(
+            MagicMock(),
+            _proj(),
+            proposer_sm,
+            "/tmp",
+            MagicMock(),
+            "plan tests",
+            should_cancel=lambda: True,
+            auto_approve=False,
+        )
 
-    @patch("myswat.workflow.engine.WorkflowEngine")
-    @patch("myswat.cli.chat_cmd.SessionManager")
-    def test_engine_exception_closes_sessions_and_blocks_item(self, mock_sm_cls, mock_engine_cls):
-        store = MagicMock()
-        arch_agent = _agent_row("architect")
-        dev_agent = _agent_row("developer")
-
-        def get_agent_side(pid, role):
-            if role == "architect":
-                return arch_agent
-            if role == "developer":
-                return dev_agent
-            return None
-        store.get_agent.side_effect = get_agent_side
-        store.create_work_item.return_value = 43
-
-        arch_sm = MagicMock()
-        dev_sm = MagicMock()
-        mock_sm_cls.side_effect = [arch_sm, dev_sm]
-
-        qa_workflow_sm = MagicMock()
-        proposer_sm = MagicMock()
-        proposer_sm.agent_id = 10
-        proposer_sm.agent_role = "qa_main"
-        proposer_sm.fork_for_work_item.return_value = qa_workflow_sm
-        proposer_sm._runner = MagicMock()
-
-        settings = MagicMock()
-        settings.workflow.max_review_iterations = 5
-
-        engine = MagicMock()
-        engine.run.side_effect = RuntimeError("boom")
-        mock_engine_cls.return_value = engine
-
-        with pytest.raises(RuntimeError, match="boom"):
-            _run_testplan_review(store, _proj(), proposer_sm, "/tmp", settings, "plan tests")
-
-        store.update_work_item_status.assert_any_call(43, "blocked")
-        qa_workflow_sm.close.assert_called_once()
-        arch_sm.close.assert_called_once()
-        dev_sm.close.assert_called_once()
-
-    @patch("myswat.workflow.engine.WorkflowEngine")
-    @patch("myswat.cli.chat_cmd.SessionManager")
-    def test_blocked_status(self, mock_sm_cls, mock_engine_cls):
-        store = MagicMock()
-        arch_agent = _agent_row("architect")
-        dev_agent = _agent_row("developer")
-
-        def get_agent_side(pid, role):
-            if role == "architect":
-                return arch_agent
-            if role == "developer":
-                return dev_agent
-            return None
-        store.get_agent.side_effect = get_agent_side
-        store.create_work_item.return_value = 43
-
-        arch_sm = MagicMock()
-        dev_sm = MagicMock()
-        mock_sm_cls.side_effect = [arch_sm, dev_sm]
-
-        proposer_sm = MagicMock()
-        proposer_sm.agent_id = 10
-        proposer_sm.agent_role = "qa_main"
-        proposer_sm.fork_for_work_item.return_value = MagicMock()
-        proposer_sm._runner = MagicMock()
-
-        settings = MagicMock()
-        settings.workflow.max_review_iterations = 5
-
-        engine = MagicMock()
-        engine.run.return_value = SimpleNamespace(success=False, blocked=True)
-        mock_engine_cls.return_value = engine
-
-        _run_testplan_review(store, _proj(), proposer_sm, "/tmp", settings, "plan tests")
-        assert store.create_work_item.call_args.kwargs["item_type"] == "review"
-        assert store.create_work_item.call_args.kwargs["metadata_json"]["work_mode"] == "testplan_design"
-        proposer_sm.fork_for_work_item.assert_called_once_with(43, purpose="QA test plan: plan tests")
-        assert mock_engine_cls.call_args.kwargs["auto_approve"] is True
-        store.update_work_item_status.assert_any_call(43, "blocked")
+        kwargs = mock_run_workflow.call_args.kwargs
+        assert kwargs["mode"] == WorkMode.testplan_design
+        assert kwargs["proposer_sm"] is proposer_sm
+        assert kwargs["requirement"] == "plan tests"
+        assert kwargs["should_cancel"]()
 
 
 class TestRunDesignReviewInteractive:
-    @patch("myswat.cli.chat_cmd._run_with_task_monitor")
-    def test_uses_task_monitor(self, mock_task_monitor):
+    @patch("myswat.cli.chat_cmd._run_workflow_interactive")
+    def test_uses_task_monitor(self, mock_run_workflow_interactive):
+        proposer_sm = MagicMock()
+
         _run_design_review_interactive(
             store=MagicMock(),
             proj=_proj(),
-            proposer_sm=MagicMock(),
+            proposer_sm=proposer_sm,
             workdir="/tmp",
             settings=MagicMock(),
             task="design thing",
             prompt_session=MagicMock(),
         )
-        mock_task_monitor.assert_called_once()
-        kwargs = mock_task_monitor.call_args.kwargs
+
+        kwargs = mock_run_workflow_interactive.call_args.kwargs
         assert kwargs["label"] == "Running design workflow"
-        assert kwargs["proj"] == _proj()
+        assert kwargs["mode"] == WorkMode.architect_design
+        assert kwargs["proposer_sm"] is proposer_sm
 
 
 class TestRunTestplanReviewInteractive:
-    @patch("myswat.cli.chat_cmd._run_with_task_monitor")
-    def test_uses_task_monitor(self, mock_task_monitor):
+    @patch("myswat.cli.chat_cmd._run_workflow_interactive")
+    def test_uses_task_monitor(self, mock_run_workflow_interactive):
+        proposer_sm = MagicMock()
+
         _run_testplan_review_interactive(
             store=MagicMock(),
             proj=_proj(),
-            proposer_sm=MagicMock(),
+            proposer_sm=proposer_sm,
             workdir="/tmp",
             settings=MagicMock(),
             task="plan tests",
             prompt_session=MagicMock(),
         )
-        mock_task_monitor.assert_called_once()
-        kwargs = mock_task_monitor.call_args.kwargs
+
+        kwargs = mock_run_workflow_interactive.call_args.kwargs
         assert kwargs["label"] == "Running QA test-plan workflow"
-        assert kwargs["proj"] == _proj()
+        assert kwargs["mode"] == WorkMode.testplan_design
+        assert kwargs["proposer_sm"] is proposer_sm
 
 
-# ---------------------------------------------------------------------------
-# _run_workflow
-# ---------------------------------------------------------------------------
 class TestRunWorkflow:
-    @patch("myswat.workflow.engine.WorkflowEngine")
-    @patch("myswat.cli.chat_cmd.SessionManager")
-    def test_missing_dev_agent(self, mock_sm_cls, mock_engine_cls):
+    @patch("myswat.cli.chat_cmd._run_remote_workflow")
+    def test_missing_dev_agent(self, mock_run_remote):
         store = MagicMock()
         store.get_agent.return_value = None
+
         _run_workflow(store, _proj(), "/tmp", MagicMock(), "do stuff")
-        mock_engine_cls.assert_not_called()
 
-    @patch("myswat.workflow.engine.WorkflowEngine")
-    @patch("myswat.cli.chat_cmd.SessionManager")
-    def test_missing_qa_agents(self, mock_sm_cls, mock_engine_cls):
+        mock_run_remote.assert_not_called()
+
+    @patch("myswat.cli.chat_cmd._run_remote_workflow")
+    def test_missing_qa_agents(self, mock_run_remote):
         store = MagicMock()
         dev_agent = _agent_row("developer")
 
-        def get_agent_side(pid, role):
+        def get_agent_side(_pid, role):
             if role == "developer":
                 return dev_agent
             return None
+
         store.get_agent.side_effect = get_agent_side
+
         _run_workflow(store, _proj(), "/tmp", MagicMock(), "do stuff")
-        mock_engine_cls.assert_not_called()
 
-    @patch("myswat.workflow.engine.WorkflowEngine")
-    @patch("myswat.cli.chat_cmd.SessionManager")
-    def test_success(self, mock_sm_cls, mock_engine_cls):
+        mock_run_remote.assert_not_called()
+
+    @patch("myswat.cli.chat_cmd.console.print")
+    @patch("myswat.cli.chat_cmd._run_remote_workflow")
+    def test_missing_architect_for_architect_design_mode(self, mock_run_remote, mock_print):
         store = MagicMock()
         dev_agent = _agent_row("developer")
         qa_agent = _agent_row("qa_main", "kimi")
 
-        def get_agent_side(pid, role):
-            if role == "developer":
-                return dev_agent
-            if role == "qa_main":
-                return qa_agent
-            return None
+        def get_agent_side(_pid, role):
+            return {
+                "developer": dev_agent,
+                "qa_main": qa_agent,
+                "architect": None,
+            }.get(role)
+
         store.get_agent.side_effect = get_agent_side
-        store.create_work_item.return_value = 42
 
-        sm = MagicMock()
-        sm.session = SimpleNamespace(session_uuid="uuid")
-        sm._agent_row = qa_agent
-        mock_sm_cls.return_value = sm
+        _run_workflow(store, _proj(), "/tmp", MagicMock(), "design auth", mode=WorkMode.architect_design)
 
-        settings = MagicMock()
-        settings.workflow.max_review_iterations = 5
+        mock_run_remote.assert_not_called()
+        assert any("Missing architect agent." in str(call) for call in mock_print.call_args_list)
 
-        engine = MagicMock()
-        engine.run.return_value = SimpleNamespace(success=True)
-        mock_engine_cls.return_value = engine
-
-        _run_workflow(store, _proj(), "/tmp", settings, "do stuff")
-        assert mock_engine_cls.call_args.kwargs["auto_approve"] is True
-        store.update_work_item_status.assert_any_call(42, "completed")
-
-    @patch("myswat.workflow.engine.WorkflowEngine")
-    @patch("myswat.cli.chat_cmd.SessionManager")
-    def test_failure(self, mock_sm_cls, mock_engine_cls):
+    @patch("myswat.cli.chat_cmd.console.print")
+    @patch("myswat.cli.chat_cmd._run_remote_workflow")
+    def test_missing_architect_or_developer_for_testplan_mode(self, mock_run_remote, mock_print):
         store = MagicMock()
         dev_agent = _agent_row("developer")
-        qa_agent = _agent_row("qa_main", "kimi")
 
-        def get_agent_side(pid, role):
-            if role == "developer":
-                return dev_agent
-            if role == "qa_main":
-                return qa_agent
-            return None
+        def get_agent_side(_pid, role):
+            return {"developer": dev_agent, "architect": None}.get(role)
+
         store.get_agent.side_effect = get_agent_side
-        store.create_work_item.return_value = 42
-
-        sm = MagicMock()
-        sm.session = SimpleNamespace(session_uuid="uuid")
-        sm._agent_row = qa_agent
-        mock_sm_cls.return_value = sm
-
-        settings = MagicMock()
-        settings.workflow.max_review_iterations = 5
-
-        engine = MagicMock()
-        engine.run.return_value = SimpleNamespace(success=False)
-        mock_engine_cls.return_value = engine
-
-        _run_workflow(store, _proj(), "/tmp", settings, "do stuff")
-        store.update_work_item_status.assert_any_call(42, "review")
-
-    @patch("myswat.workflow.engine.WorkflowEngine")
-    @patch("myswat.cli.chat_cmd.SessionManager")
-    def test_with_ask_user_callback(self, mock_sm_cls, mock_engine_cls):
-        store = MagicMock()
-        dev_agent = _agent_row("developer")
-        qa_agent = _agent_row("qa_main", "kimi")
-
-        def get_agent_side(pid, role):
-            if role == "developer":
-                return dev_agent
-            if role == "qa_main":
-                return qa_agent
-            return None
-        store.get_agent.side_effect = get_agent_side
-        store.create_work_item.return_value = 42
-
-        sm = MagicMock()
-        sm.session = SimpleNamespace(session_uuid="uuid")
-        sm._agent_row = qa_agent
-        mock_sm_cls.return_value = sm
-
-        settings = MagicMock()
-        settings.workflow.max_review_iterations = 5
-
-        engine = MagicMock()
-        engine.run.return_value = SimpleNamespace(success=True)
-        mock_engine_cls.return_value = engine
-
-        prompt_session = MagicMock()
 
         _run_workflow(
-            store, _proj(), "/tmp", settings, "do stuff",
-            prompt_session=prompt_session,
+            store,
+            _proj(),
+            "/tmp",
+            MagicMock(),
+            "plan tests",
+            mode=WorkMode.testplan_design,
+            proposer_sm=MagicMock(),
         )
+
+        mock_run_remote.assert_not_called()
+        assert any("Missing architect or developer agent." in str(call) for call in mock_print.call_args_list)
+
+    @patch("myswat.cli.chat_cmd._run_remote_workflow")
+    def test_delegates_to_remote_workflow(self, mock_run_remote):
+        store = MagicMock()
+        dev_agent = _agent_row("developer")
+        qa_agent = _agent_row("qa_main", "kimi")
+
+        def get_agent_side(_pid, role):
+            return {"developer": dev_agent, "qa_main": qa_agent}.get(role)
+
+        store.get_agent.side_effect = get_agent_side
+        created = []
+
+        _run_workflow(
+            store,
+            _proj(),
+            "/tmp",
+            MagicMock(),
+            "do stuff",
+            should_cancel=lambda: False,
+            on_work_item_created=created.append,
+        )
+
+        kwargs = mock_run_remote.call_args.kwargs
+        assert kwargs["mode"] == WorkMode.full
+        assert kwargs["requirement"] == "do stuff"
+        assert kwargs["should_cancel"]() is False
+        kwargs["on_work_item_created"](42)
+        assert created == [42]
+
+    @patch("myswat.cli.chat_cmd._print_daemon_error")
+    @patch("myswat.cli.chat_cmd._run_remote_workflow", side_effect=DaemonClientError("boom"))
+    def test_reports_daemon_errors(self, mock_run_remote, mock_print_daemon_error):
+        store = MagicMock()
+        dev_agent = _agent_row("developer")
+        qa_agent = _agent_row("qa_main", "kimi")
+
+        def get_agent_side(_pid, role):
+            return {"developer": dev_agent, "qa_main": qa_agent}.get(role)
+
+        store.get_agent.side_effect = get_agent_side
+
+        _run_workflow(store, _proj(), "/tmp", MagicMock(), "do stuff")
+
+        mock_run_remote.assert_called_once()
+        mock_print_daemon_error.assert_called_once()
 
 
 class TestRunWorkflowInteractive:
     @patch("myswat.cli.chat_cmd._run_with_task_monitor")
-    def test_uses_task_monitor(self, mock_task_monitor):
-        prompt_session = MagicMock()
+    @patch("myswat.cli.chat_cmd._run_workflow")
+    def test_uses_task_monitor(self, mock_run_workflow, mock_task_monitor):
+        def _run_monitor(**kwargs):
+            kwargs["worker_fn"]()
+            assert kwargs["work_item_ref"]["id"] == 66
+            assert kwargs["cancel_targets"] == []
+
+        def _run_workflow_side_effect(**kwargs):
+            kwargs["on_work_item_created"](66)
+            assert kwargs["mode"] == WorkMode.full
+            assert kwargs["should_cancel"]() is False
+
+        mock_task_monitor.side_effect = _run_monitor
+        mock_run_workflow.side_effect = _run_workflow_side_effect
 
         _run_workflow_interactive(
             store=MagicMock(),
@@ -573,10 +391,9 @@ class TestRunWorkflowInteractive:
             workdir="/tmp",
             settings=MagicMock(),
             requirement="ship feature",
-            prompt_session=prompt_session,
+            prompt_session=MagicMock(),
         )
 
-        mock_task_monitor.assert_called_once()
         kwargs = mock_task_monitor.call_args.kwargs
         assert kwargs["label"] == "Running full teamwork workflow"
         assert kwargs["proj"] == _proj()
@@ -652,6 +469,47 @@ class TestRunChat:
         with pytest.raises(ClickExit):
             from myswat.cli.chat_cmd import run_chat
             run_chat("missing")
+
+    @patch("myswat.cli.chat_cmd._print_daemon_error")
+    @patch("myswat.cli.chat_cmd.PromptSession")
+    @patch("myswat.cli.chat_cmd.preload_model")
+    @patch("myswat.cli.chat_cmd.MySwatSettings")
+    @patch("myswat.cli.chat_cmd.TiDBPool")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
+    @patch("myswat.cli.chat_cmd.MemoryStore")
+    @patch("myswat.cli.chat_cmd.SessionManager")
+    def test_initial_daemon_session_open_failure_exits(
+        self,
+        mock_sm_cls,
+        mock_store_cls,
+        mock_mig,
+        mock_pool_cls,
+        mock_settings_cls,
+        mock_preload,
+        mock_prompt_session_cls,
+        mock_print_daemon_error,
+    ):
+        from myswat.cli.chat_cmd import run_chat
+
+        settings = self._setup_mocks()
+        mock_settings_cls.return_value = settings
+
+        agent_row = _agent_row()
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = _proj()
+        mock_store.get_agent.return_value = agent_row
+        mock_store.list_agents.return_value = [agent_row]
+        mock_store_cls.return_value = mock_store
+
+        sm = MagicMock()
+        sm.create_or_resume.side_effect = MCPHTTPClientError("daemon unavailable")
+        mock_sm_cls.return_value = sm
+        mock_prompt_session_cls.return_value = MagicMock()
+
+        with pytest.raises(ClickExit):
+            run_chat("proj")
+
+        mock_print_daemon_error.assert_called_once()
 
     @patch("myswat.cli.chat_cmd.PromptSession")
     @patch("myswat.cli.chat_cmd.preload_model")
@@ -974,6 +832,50 @@ class TestRunChat:
         run_chat("proj")
         sm.reset_ai_session.assert_called_once()
 
+    @patch("myswat.cli.chat_cmd._print_daemon_error")
+    @patch("myswat.cli.chat_cmd.PromptSession")
+    @patch("myswat.cli.chat_cmd.preload_model")
+    @patch("myswat.cli.chat_cmd.MySwatSettings")
+    @patch("myswat.cli.chat_cmd.TiDBPool")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
+    @patch("myswat.cli.chat_cmd.MemoryStore")
+    @patch("myswat.cli.chat_cmd.SessionManager")
+    def test_reset_command_reports_daemon_error(
+        self,
+        mock_sm_cls,
+        mock_store_cls,
+        mock_mig,
+        mock_pool_cls,
+        mock_settings_cls,
+        mock_preload,
+        mock_prompt_session_cls,
+        mock_print_daemon_error,
+    ):
+        from myswat.cli.chat_cmd import run_chat
+
+        settings = self._setup_mocks()
+        mock_settings_cls.return_value = settings
+
+        agent_row = _agent_row()
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = _proj()
+        mock_store.get_agent.return_value = agent_row
+        mock_store.list_agents.return_value = [agent_row]
+        mock_store_cls.return_value = mock_store
+
+        sm = MagicMock()
+        sm.session = SimpleNamespace(session_uuid="uuid-1234")
+        sm.reset_ai_session.side_effect = MCPHTTPClientError("reset failed")
+        mock_sm_cls.return_value = sm
+
+        prompt_session = MagicMock()
+        prompt_session.prompt.side_effect = ["/reset", "/quit"]
+        mock_prompt_session_cls.return_value = prompt_session
+
+        run_chat("proj")
+
+        mock_print_daemon_error.assert_called_once()
+
     @patch("myswat.cli.chat_cmd.PromptSession")
     @patch("myswat.cli.chat_cmd.preload_model")
     @patch("myswat.cli.chat_cmd.MySwatSettings")
@@ -1006,6 +908,50 @@ class TestRunChat:
         mock_prompt_session_cls.return_value = prompt_session
 
         run_chat("proj")
+
+    @patch("myswat.cli.chat_cmd._print_daemon_error")
+    @patch("myswat.cli.chat_cmd.PromptSession")
+    @patch("myswat.cli.chat_cmd.preload_model")
+    @patch("myswat.cli.chat_cmd.MySwatSettings")
+    @patch("myswat.cli.chat_cmd.TiDBPool")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
+    @patch("myswat.cli.chat_cmd.MemoryStore")
+    @patch("myswat.cli.chat_cmd.SessionManager")
+    def test_cleanup_close_error_is_best_effort(
+        self,
+        mock_sm_cls,
+        mock_store_cls,
+        mock_mig,
+        mock_pool_cls,
+        mock_settings_cls,
+        mock_preload,
+        mock_prompt_session_cls,
+        mock_print_daemon_error,
+    ):
+        from myswat.cli.chat_cmd import run_chat
+
+        settings = self._setup_mocks()
+        mock_settings_cls.return_value = settings
+
+        agent_row = _agent_row()
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = _proj()
+        mock_store.get_agent.return_value = agent_row
+        mock_store.list_agents.return_value = [agent_row]
+        mock_store_cls.return_value = mock_store
+
+        sm = MagicMock()
+        sm.session = SimpleNamespace(session_uuid="uuid-1234")
+        sm.close.side_effect = MCPHTTPClientError("close failed")
+        mock_sm_cls.return_value = sm
+
+        prompt_session = MagicMock()
+        prompt_session.prompt.return_value = "/quit"
+        mock_prompt_session_cls.return_value = prompt_session
+
+        run_chat("proj")
+
+        mock_print_daemon_error.assert_called_once()
 
     @patch("myswat.cli.chat_cmd.PromptSession")
     @patch("myswat.cli.chat_cmd.preload_model")
@@ -1181,6 +1127,53 @@ class TestRunChat:
         run_chat("proj")
         mock_send_timer.assert_called_once()
         mock_submit_learn.assert_called_once()
+
+    @patch("myswat.cli.chat_cmd._print_daemon_error")
+    @patch("myswat.cli.chat_cmd._send_with_timer")
+    @patch("myswat.cli.chat_cmd.PromptSession")
+    @patch("myswat.cli.chat_cmd.preload_model")
+    @patch("myswat.cli.chat_cmd.MySwatSettings")
+    @patch("myswat.cli.chat_cmd.TiDBPool")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
+    @patch("myswat.cli.chat_cmd.MemoryStore")
+    @patch("myswat.cli.chat_cmd.SessionManager")
+    def test_regular_message_daemon_error_continues(
+        self,
+        mock_sm_cls,
+        mock_store_cls,
+        mock_mig,
+        mock_pool_cls,
+        mock_settings_cls,
+        mock_preload,
+        mock_prompt_session_cls,
+        mock_send_timer,
+        mock_print_daemon_error,
+    ):
+        from myswat.cli.chat_cmd import run_chat
+
+        settings = self._setup_mocks()
+        mock_settings_cls.return_value = settings
+
+        agent_row = _agent_row()
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = _proj()
+        mock_store.get_agent.return_value = agent_row
+        mock_store.list_agents.return_value = [agent_row]
+        mock_store_cls.return_value = mock_store
+
+        sm = MagicMock()
+        sm.session = SimpleNamespace(session_uuid="uuid-1234")
+        mock_sm_cls.return_value = sm
+
+        mock_send_timer.side_effect = MCPHTTPClientError("send failed")
+
+        prompt_session = MagicMock()
+        prompt_session.prompt.side_effect = ["hello", "/quit"]
+        mock_prompt_session_cls.return_value = prompt_session
+
+        run_chat("proj")
+
+        mock_print_daemon_error.assert_called_once()
 
     @patch("myswat.cli.chat_cmd._run_workflow_interactive")
     @patch("myswat.cli.chat_cmd._send_with_timer")

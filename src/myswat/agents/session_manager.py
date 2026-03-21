@@ -135,9 +135,11 @@ class SessionManager:
             return
 
         for turn in reversed(turns):
+            metadata = turn.metadata_json
+            if isinstance(metadata, dict) and metadata.get("cli_session_reset"):
+                return
             if turn.role != "assistant":
                 continue
-            metadata = turn.metadata_json
             if not isinstance(metadata, dict):
                 continue
             cli_session_id = metadata.get("cli_session_id")
