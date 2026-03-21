@@ -12,6 +12,7 @@ from myswat.models.work_item import ReviewVerdict
 from myswat.workflow.review_parsing import (
     parse_plain_text_lgtm_verdict,
     parse_structured_review_verdict,
+    parse_unstructured_changes_requested_verdict,
 )
 from myswat.workflow.prompts import DEVELOPER_INITIAL, DEVELOPER_REVISION, REVIEWER
 
@@ -38,6 +39,10 @@ def _parse_verdict(raw: str) -> ReviewVerdict:
         return parsed
 
     parsed = parse_plain_text_lgtm_verdict(text)
+    if parsed is not None:
+        return parsed
+
+    parsed = parse_unstructured_changes_requested_verdict(text)
     if parsed is not None:
         return parsed
 

@@ -29,8 +29,12 @@ from myswat.memory.store import MemoryStore
 from myswat.models.work_item import ReviewVerdict
 from myswat.server.mcp_http_client import MCPHTTPClient
 from myswat.workflow.review_parsing import (
+    UNSTRUCTURED_REVIEW_ISSUE_LIMIT,
+    UNSTRUCTURED_REVIEW_SUMMARY_LIMIT,
+    looks_like_structured_review_payload,
     parse_plain_text_lgtm_verdict,
     parse_structured_review_verdict,
+    parse_unstructured_changes_requested_verdict,
 )
 
 _RUNTIME_LEASE_SECONDS = 300
@@ -39,6 +43,13 @@ _KEEPALIVE_INTERVAL_SECONDS = 60.0
 _REVIEW_MAX_ATTEMPTS = 2
 _REVIEW_DIAGNOSTIC_TEXT_LIMIT = 2_000
 _REVIEW_EXCEPTION_TEXT_LIMIT = 1_000
+
+_REVIEW_OUTPUT_CONTRACT_PROMPT = """## Review Output Contract
+- Your final answer MUST be exactly one JSON object matching the requested review schema.
+- Never return a top-level markdown review body.
+- Never return only a `/tmp/*.md` path or a sentence pointing to a markdown file as the entire answer.
+- If review details are long, keep the JSON object and replace only oversized `summary` or `issues` entries with `See /tmp/...md`.
+"""
 
 LOGGER = logging.getLogger(__name__)
 
@@ -98,11 +109,12 @@ def _prepare_runner_payloads(
     prompt = str(assignment.get("prompt") or "")
     system_context = str(assignment.get("system_context") or "")
     stage_name = str(assignment.get("stage_name") or assignment.get("assignment_kind") or "task")
-    file_aware_system_context = (
-        "\n\n---\n\n".join([AGENT_FILE_PROMPT, AGENT_CONTEXT_USAGE_PROMPT, system_context])
-        if system_context
-        else "\n\n---\n\n".join([AGENT_FILE_PROMPT, AGENT_CONTEXT_USAGE_PROMPT])
-    )
+    system_sections = [AGENT_FILE_PROMPT, AGENT_CONTEXT_USAGE_PROMPT]
+    if str(assignment.get("assignment_kind") or "") == "review":
+        system_sections.append(_REVIEW_OUTPUT_CONTRACT_PROMPT)
+    if system_context:
+        system_sections.append(system_context)
+    file_aware_system_context = "\n\n---\n\n".join(system_sections)
 
     prompt_to_send, _ = maybe_externalize_prompt(
         prompt,
@@ -211,12 +223,26 @@ def _classify_review_attempt(
             diagnostics=diagnostics,
         )
 
+    diagnostics["verdict_source"] = ""
     verdict = parse_structured_review_verdict(resolved_content)
+    if verdict is not None:
+        diagnostics["verdict_source"] = "structured_json"
     if verdict is None:
         verdict = parse_plain_text_lgtm_verdict(
             resolved_content,
             summary_limit=_REVIEW_DIAGNOSTIC_TEXT_LIMIT,
         )
+        if verdict is not None:
+            diagnostics["verdict_source"] = "plain_text_lgtm"
+    if verdict is None and bool(getattr(response, "success", False)) and str(resolved_content).strip():
+        if not looks_like_structured_review_payload(resolved_content):
+            verdict = parse_unstructured_changes_requested_verdict(
+                resolved_content,
+                summary_limit=UNSTRUCTURED_REVIEW_SUMMARY_LIMIT,
+                issue_limit=UNSTRUCTURED_REVIEW_ISSUE_LIMIT,
+            )
+            if verdict is not None:
+                diagnostics["verdict_source"] = "unstructured_changes_requested"
     if bool(getattr(response, "success", False)) and verdict is not None:
         return ReviewAttemptResult(
             outcome=ReviewAttemptOutcome.VALID_VERDICT,

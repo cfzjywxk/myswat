@@ -57,3 +57,19 @@ def test_parse_verdict_resolves_externalized_json_payload():
         assert verdict.summary == "Structured from file."
     finally:
         Path(path).unlink(missing_ok=True)
+
+
+def test_parse_verdict_recovers_externalized_markdown_review_as_changes_requested():
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".md") as handle:
+        handle.write(
+            "# QA Review\n\n## Issue Detail\n\n### Missing explicit rollback trigger\n\n"
+            "The design does not explain where the executor invokes statement rollback.\n"
+        )
+        path = handle.name
+    try:
+        verdict = _parse_verdict(f"The detailed response is in `{path}`.")
+        assert verdict.verdict == "changes_requested"
+        assert verdict.summary == "Missing explicit rollback trigger"
+        assert verdict.issues[0] == "Missing explicit rollback trigger"
+    finally:
+        Path(path).unlink(missing_ok=True)

@@ -648,7 +648,71 @@ def test_run_worker_resolves_externalized_review_verdict_fields():
     Path(issue_path).unlink(missing_ok=True)
 
 
-def test_run_worker_retries_malformed_review_output_once_then_publishes_verdict():
+def test_run_worker_recovers_externalized_markdown_review_without_retry():
+    service = Mock()
+    service.register_runtime.return_value = SimpleNamespace(
+        model_dump=lambda: {"runtime_registration_id": 10}
+    )
+    service.claim_next_assignment.side_effect = _assignment_stream(
+        AssignmentEnvelope(
+            assignment_kind="review",
+            runtime_registration_id=10,
+            project_id=1,
+            work_item_id=13,
+            review_cycle_id=34,
+            stage_name="design_review",
+            agent_id=4,
+            agent_role="qa_main",
+            iteration=2,
+            prompt="Review the design",
+            system_context="kind=review;stage=design_review",
+        )
+    )
+    service.publish_review_verdict.return_value = {"ok": True}
+    service.heartbeat_runtime.return_value = None
+    service.update_runtime_status.return_value = {"runtime_registration_id": 10, "status": "offline"}
+
+    review_body = """# QA Design Review
+
+## Issue Detail
+
+### Undo-capture timing causes full transaction rollback on partial failure
+
+The design records undo before mutation success, so a normal lock-wait failure can still trigger full transaction rollback instead of statement rollback.
+"""
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".md") as handle:
+        handle.write(review_body)
+        path = handle.name
+    try:
+        runner = _FakeRunner([(True, f"The detailed response is in `{path}`.")])
+        result = run_worker(
+            project_slug="fib-demo",
+            role="qa_main",
+            server_url="http://unused",
+            project_row={"id": 1, "slug": "fib-demo", "repo_path": "/tmp/fib-demo"},
+            agent_row=_agent_row("qa_main"),
+            runner=runner,
+            mcp_client=_DirectMCPClient(service),
+            idle_exit_seconds=0.05,
+        )
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+    assert result == {"stage_assignments": 0, "review_assignments": 1}
+    request = service.publish_review_verdict.call_args.args[0]
+    assert request.verdict == "changes_requested"
+    assert request.summary == "Undo-capture timing causes full transaction rollback on partial failure"
+    assert request.issues[0] == "Undo-capture timing causes full transaction rollback on partial failure"
+    assert "normal lock-wait failure" in request.issues[1]
+    assert runner.reset_calls == 1
+    service.append_coordination_event.assert_not_called()
+    service.fail_review_cycle.assert_not_called()
+    system_context_ref = runner.invocations[0][1] or ""
+    resolved_system_context = read_markdown_file(extract_markdown_path(system_context_ref))
+    assert "Review Output Contract" in resolved_system_context
+
+
+def test_run_worker_retries_truncated_json_review_output_once_then_publishes_verdict():
     service = Mock()
     service.register_runtime.return_value = SimpleNamespace(
         model_dump=lambda: {"runtime_registration_id": 10}
@@ -675,7 +739,7 @@ def test_run_worker_retries_malformed_review_output_once_then_publishes_verdict(
 
     runner = _FakeRunner(
         [
-            (True, "Needs better error handling around overflow."),
+            (True, '{"verdict":"changes_requested","issues":["Handle overflow."]'),
             (True, '{"verdict":"changes_requested","issues":["Handle overflow."],"summary":"Need overflow guard."}'),
         ]
     )
@@ -700,7 +764,7 @@ def test_run_worker_retries_malformed_review_output_once_then_publishes_verdict(
     service.fail_review_cycle.assert_not_called()
 
 
-def test_run_worker_marks_review_failed_after_repeated_malformed_output():
+def test_run_worker_marks_review_failed_after_repeated_truncated_json_output():
     service = Mock()
     service.register_runtime.return_value = SimpleNamespace(
         model_dump=lambda: {"runtime_registration_id": 10}
@@ -727,8 +791,8 @@ def test_run_worker_marks_review_failed_after_repeated_malformed_output():
 
     runner = _FakeRunner(
         [
-            (True, "Needs better error handling around overflow."),
-            (True, "Still not returning JSON."),
+            (True, '{"verdict":"changes_requested","issues":["Handle overflow."]'),
+            (True, '{"verdict":"changes_requested","issues":["Still truncated."]'),
         ]
     )
     result = run_worker(
