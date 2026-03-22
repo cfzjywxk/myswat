@@ -14,6 +14,9 @@ REQUIREMENTS_SKILL_NAMES: tuple[str, ...] = (
     "tdd",
     "prd-to-plan",
     "prd-to-issues",
+    "grill-me",
+    "ubiquitous-language",
+    "design-an-interface",
 )
 
 
@@ -46,6 +49,22 @@ def _normalize_block(text: str) -> str:
     return textwrap.dedent(text).strip()
 
 
+# Canonical PRD section order matching the interactive PRD prompt.
+# Used by design_guidance() for the PRD Snapshot section regardless of what
+# the external skill template lists.
+_PRD_SNAPSHOT_SECTIONS: tuple[str, ...] = (
+    "Problem Statement",
+    "Solution",
+    "User Stories",
+    "Ubiquitous Language",
+    "Module Sketch",
+    "Implementation Decisions",
+    "Testing Decisions",
+    "Out of Scope",
+    "Open Questions",
+)
+
+
 @dataclass(frozen=True)
 class RequirementsSkillPack:
     """Resolved requirement-oriented workflow guidance derived from skill files."""
@@ -58,13 +77,33 @@ class RequirementsSkillPack:
     def enabled(self) -> bool:
         return self.root is not None and bool(self.available_skills)
 
+    def prd_guidance(self) -> str:
+        if not self.enabled:
+            return ""
+        return _normalize_block(
+            f"""
+            ## Integrated Requirement Skills
+            This PRD workflow is backed by the requirement skill pack
+            ({", ".join(sorted(self.available_skills))}).
+
+            Additional guidance beyond the base instructions above:
+            - Group ubiquitous-language glossary terms by subdomain or lifecycle stage.
+              Show relationships between terms with cardinality where useful.
+            - When interviewing, if a question can be answered by exploring the codebase,
+              explore instead of asking. Provide your recommended answer alongside every question.
+            - When sketching modules, explicitly identify dependency categories: in-process,
+              local-substitutable, remote-owned, or true-external.
+            - For modules that need tests, prefer boundary tests through public interfaces
+              over mocking internals.
+            """
+        )
+
     def design_guidance(self) -> str:
         if not self.enabled:
             return ""
-        prd_sections = ", ".join(self.prd_sections) if self.prd_sections else (
-            "Problem Statement, Solution, User Stories, Implementation Decisions, "
-            "Testing Decisions, Out of Scope, Further Notes"
-        )
+        # Always use the canonical PRD section order defined by the interactive
+        # PRD prompt, regardless of what the external skill template lists.
+        prd_sections = ", ".join(_PRD_SNAPSHOT_SECTIONS)
         return _normalize_block(
             f"""
             ## Integrated Requirement Skills
@@ -74,13 +113,28 @@ class RequirementsSkillPack:
             Before the core design sections, include a compact `## PRD Snapshot` using this order:
             {prd_sections}.
 
-            Inside the design, explicitly cover:
-            - Module partitioning with one clear responsibility per module or bounded context.
-            - Why the boundaries improve cohesion and reduce coupling, including dependency direction.
-            - One to three deep modules or interfaces that hide most internal complexity behind a small public surface.
-            - Boundary invariants, public inputs/outputs, and which behaviors tests should validate through those interfaces.
-            - A TDD-ready validation strategy: identify the first tracer-bullet behavior and how red-green-refactor would proceed.
-            - A final `## Issue-Ready Delivery Slices` section with thin vertical slices, dependencies, and what can run in parallel.
+            ### Module and Interface Design
+            - Partition into modules with one clear responsibility each.
+            - Favor deep modules: a small public interface hiding significant internal complexity.
+              Avoid shallow modules where the interface is nearly as complex as the implementation.
+            - For each new module or changed boundary, consider at least two radically different
+              interface shapes (e.g. minimize method count vs. maximize flexibility vs. optimize
+              for the common case). Record the chosen interface AND the alternatives considered
+              with a brief rationale for the choice.
+            - State dependency direction between modules. Prefer dependencies that point inward
+              (callers depend on stable interfaces, not the reverse).
+            - For each module, specify: public surface, what complexity it hides, boundary invariants.
+
+            ### Testing Strategy
+            - Identify which behaviors tests should validate through public interfaces.
+            - Identify the first tracer-bullet behavior: the thinnest end-to-end path that proves
+              the architecture works. Describe how red-green-refactor would proceed for that path.
+            - Tests should verify observable behavior, not implementation details.
+
+            ### Delivery Slices
+            - Include a final `## Issue-Ready Delivery Slices` section.
+            - Each slice cuts vertically through interface, implementation, and tests together.
+            - Note dependencies between slices and which can run in parallel.
             """
         )
 
@@ -92,10 +146,18 @@ class RequirementsSkillPack:
             ## Integrated Requirement Skills
             Also verify that:
             - The PRD snapshot is complete, scoped, and consistent with the design.
-            - Module boundaries maximize cohesion and minimize unnecessary cross-module coupling.
-            - Deep-module interfaces and boundary invariants are explicit.
+            - Modules are deep, not shallow: the public interface should be significantly simpler
+              than the implementation it hides. Flag any module whose interface is nearly as complex
+              as its internals.
+            - At least two interface alternatives were considered for new modules or changed
+              boundaries. The design records why the chosen shape wins on simplicity, depth,
+              or ease of correct use.
+            - Dependencies point inward toward stable interfaces, not outward toward callers.
+            - Boundary invariants and public inputs/outputs are explicit for each module.
             - The testing strategy exercises public interfaces and supports tracer-bullet TDD.
-            - Delivery slices are vertical, issue-ready, and parallel-friendly rather than horizontal layer splits.
+              Tests should target observable behavior, not implementation details.
+            - Delivery slices are vertical (interface + implementation + tests together),
+              issue-ready, and parallel-friendly — not horizontal layer splits.
             """
         )
 
@@ -142,14 +204,30 @@ class RequirementsSkillPack:
         return _normalize_block(
             """
             ## Integrated Requirement Skills
-            Execute this phase in TDD mode whenever the repo allows it:
-            1. Pick the next user-visible behavior from the current slice.
-            2. Write or extend one failing boundary test through a public interface.
-            3. Implement only enough code to pass.
-            4. Refactor behind the same interface.
+            Execute this phase using vertical-slice TDD:
 
-            Avoid tests that lock onto private helpers or internal call sequences. Do not defer tests into
-            future work inside this phase.
+            ### Tracer Bullet First
+            Start with ONE test for the thinnest end-to-end behavior in this slice.
+            RED: write the test (it fails). GREEN: implement minimal code to pass.
+            This proves the path works before adding detail.
+
+            ### Incremental Loop
+            For each remaining behavior in this slice:
+            1. RED — write one failing test through a public interface.
+            2. GREEN — implement only enough code to make it pass. Do not anticipate future tests.
+            3. Move to the next behavior.
+
+            ### Refactor After Green
+            After tests pass, refactor: extract duplication, deepen modules, apply SOLID where natural.
+            Never refactor while RED — get GREEN first. Run tests after each refactor step.
+
+            ### What to Avoid
+            - Never write all tests first then all implementation (horizontal slicing).
+            - Avoid tests that mock internal collaborators or assert on call counts/order.
+            - Avoid tests that lock onto private helpers or internal call sequences.
+            - Do not defer tests into future work inside this phase.
+            - Each test should describe WHAT (behavior), not HOW (implementation).
+            - Each test should survive an internal refactor without breaking.
             """
         )
 
@@ -161,8 +239,14 @@ class RequirementsSkillPack:
             ## Integrated Requirement Skills
             Also inspect whether:
             - The changed code preserves the planned module boundaries.
-            - Tests validate public behavior instead of implementation details.
-            - The phase actually completes a vertical slice rather than a partial horizontal layer.
+            - Modules remain deep: public interfaces are simpler than the implementation they hide.
+              Flag any new module whose interface is nearly as complex as its internals.
+            - Tests validate observable behavior through public interfaces, not implementation details.
+              Red flags: mocking internal collaborators, testing private methods, asserting on call
+              counts or ordering, tests that break on refactor without behavior change.
+            - The phase completes a vertical slice (interface + implementation + tests together),
+              not a partial horizontal layer (e.g. schema-only, API-only, or tests-deferred).
+            - Tests were written alongside code (TDD discipline), not bolted on after the fact.
             """
         )
 

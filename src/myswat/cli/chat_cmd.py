@@ -40,6 +40,7 @@ from myswat.workflow.modes import (
     normalize_delegation_mode,
 )
 from myswat.workflow.prompts import ARCHITECT_PRD_WORKFLOW
+from myswat.workflow.requirements_skills import append_skill_guidance, load_requirements_skill_pack
 
 console = Console()
 
@@ -1152,7 +1153,13 @@ def _run_prd_workflow_interactive(
         requirement=task,
         workdir=workdir,
     )
-    current_prompt = ARCHITECT_PRD_WORKFLOW.format(requirement=task)
+    skill_pack = load_requirements_skill_pack(
+        getattr(settings.workflow, "requirements_skills_root", ""),
+    )
+    current_prompt = append_skill_guidance(
+        ARCHITECT_PRD_WORKFLOW.format(requirement=task),
+        skill_pack.prd_guidance(),
+    )
 
     for _turn in range(max_prd_turns):
         try:

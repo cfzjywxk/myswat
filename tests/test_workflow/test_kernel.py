@@ -2660,7 +2660,7 @@ def test_design_prompt_includes_requirement_skill_pack_guidance(tmp_path):
     assert "## Integrated Requirement Skills" in design_stage.task_prompt
     assert "## PRD Snapshot" in design_stage.task_prompt
     assert "Issue-Ready Delivery Slices" in design_stage.task_prompt
-    assert "reduce coupling" in design_stage.task_prompt
+    assert "deep module" in design_stage.task_prompt.lower()
 
 
 def test_plan_phase_and_test_prompts_include_skill_pack_guidance(tmp_path):
@@ -2722,8 +2722,8 @@ def test_plan_phase_and_test_prompts_include_skill_pack_guidance(tmp_path):
             completed_summaries=[],
         )
     phase_stage = phase_service.start_stage_run.call_args.args[0]
-    assert "Execute this phase in TDD mode" in phase_stage.task_prompt
-    assert "failing boundary test" in phase_stage.task_prompt
+    assert "vertical-slice TDD" in phase_stage.task_prompt
+    assert "Tracer Bullet" in phase_stage.task_prompt
 
     test_service = _service()
     test_kernel = WorkflowKernel(

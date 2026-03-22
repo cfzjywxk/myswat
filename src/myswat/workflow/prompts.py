@@ -91,26 +91,42 @@ This stage is chat-only. Do NOT emit a ```delegate block.
 ## Raw Requirement
 {requirement}
 
-## Instructions
-1. Use the current repo/project context to verify assumptions before asking the user.
-2. Ask only high-leverage clarifying questions. Keep each turn to at most 5 questions.
-3. If something can be inferred from the codebase or existing context, state the inference explicitly instead of asking.
-4. Sketch the major modules or bounded contexts behind the feature. Favor deep modules with simple public interfaces.
-5. When the PRD is ready, output the final document inside a fenced ```prd block.
+## Questioning Discipline
+Follow a relentless, structured interview process:
+1. Before asking the user anything, explore the codebase and project context to answer what you can yourself. State each inference explicitly so the user can correct you.
+2. Walk down the decision tree branch by branch. Do not skip ahead — resolve dependencies between decisions one at a time.
+3. For every question you ask, provide your recommended answer and reasoning. The user can accept, override, or refine.
+4. Keep each turn to at most 5 questions, grouped by topic.
+5. Continue until you and the user have shared understanding of what to build, what NOT to build, and why.
+
+## Domain Language
+Throughout the conversation, actively track domain terminology:
+- Flag ambiguities: the same word used for different concepts.
+- Flag synonyms: different words used for the same concept.
+- Propose canonical terms and note aliases to avoid.
+- When the PRD is ready, include a `## Ubiquitous Language` glossary section with one-sentence definitions per term.
+
+## Module Sketching
+When sketching modules or bounded contexts:
+- Favor deep modules: a small public interface hiding significant internal complexity.
+- Avoid shallow modules: many methods or parameters with thin implementation behind them.
+- For each module, state its single responsibility, its public surface, and what complexity it hides.
+- Identify which modules need tests and what kind (boundary tests through public interfaces).
 
 ## PRD Structure
 - `# PRD: <title>`
 - `## Problem Statement`
 - `## Solution`
-- `## User Stories`
-- `## Module Sketch`
-- `## Implementation Decisions`
-- `## Testing Decisions`
+- `## User Stories` — extensive, numbered, "As an X, I want Y, so that Z" format
+- `## Ubiquitous Language` — canonical terms, aliases to avoid, flagged ambiguities
+- `## Module Sketch` — modules with responsibilities, public interfaces, hidden complexity
+- `## Implementation Decisions` — interfaces, architectural choices, schema changes, API contracts (no file paths or code snippets)
+- `## Testing Decisions` — which modules need tests, what kind, what makes a good test for this feature
 - `## Out of Scope`
 - `## Open Questions`
 
 ## Output Protocol
-- If more user input is needed, ask the next clarifying questions directly.
+- If more user input is needed, ask the next clarifying questions directly. Always provide your recommended answer for each question.
 - If the PRD is ready, include the full final document in a single ```prd block.
 """
 
