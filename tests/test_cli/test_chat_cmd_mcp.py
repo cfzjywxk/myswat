@@ -9,7 +9,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from myswat.cli.chat_cmd import (
-    RemoteWorkflowTimeoutError,
     SessionManager,
     _RemoteRunnerStub,
     _print_daemon_error,
@@ -17,7 +16,6 @@ from myswat.cli.chat_cmd import (
     _run_remote_workflow,
     _run_workflow,
     _send_with_timer,
-    _workflow_stale_timeout_seconds,
 )
 from myswat.workflow.modes import WorkMode
 
@@ -442,58 +440,25 @@ def test_run_remote_workflow_rejects_missing_work_item_id(monkeypatch):
         )
 
 
-def test_workflow_stale_timeout_uses_default_for_bad_config():
-    settings = _settings()
-    settings.workflow.assignment_timeout_seconds = "bad"
-
-    assert _workflow_stale_timeout_seconds(settings) == 300.0
-
-
-def test_run_remote_workflow_times_out_when_status_stalls(monkeypatch):
+def test_run_remote_workflow_waits_for_terminal_status_without_stale_timeout(monkeypatch):
     client = MagicMock()
     client.submit_work.return_value = {"work_item_id": 77}
-    client.get_work_item.return_value = {"work_item": {"status": "in_progress"}}
+    client.get_work_item.side_effect = [
+        {"work_item": {"status": "in_progress"}},
+        {"work_item": {"status": "in_progress"}},
+        {"work_item": {"status": "completed"}},
+    ]
     monkeypatch.setattr("myswat.cli.chat_cmd.DaemonClient", lambda settings: client)
-    monkeypatch.setattr("myswat.cli.chat_cmd.time.sleep", lambda seconds: None)
-    ticks = iter([0.0, 0.0, 2.0])
-    monkeypatch.setattr("myswat.cli.chat_cmd.time.monotonic", lambda: next(ticks))
     settings = _settings()
-    settings.workflow.assignment_timeout_seconds = 1
 
-    with pytest.raises(RuntimeError, match="stopped making progress"):
-        _run_remote_workflow(
-            store=MagicMock(),
-            proj=_project(),
-            workdir="/tmp/repo",
-            settings=settings,
-            requirement="ship auth",
-            mode=WorkMode.full,
-        )
+    work_item_id = _run_remote_workflow(
+        store=MagicMock(),
+        proj=_project(),
+        workdir="/tmp/repo",
+        settings=settings,
+        requirement="ship auth",
+        mode=WorkMode.full,
+    )
 
-
-def test_run_workflow_reports_stalled_remote_workflow():
-    store = MagicMock()
-    store.get_agent.side_effect = lambda _pid, role: {
-        "developer": _agent_row("developer"),
-        "qa_main": _agent_row("qa_main"),
-        "qa_vice": None,
-    }.get(role)
-
-    with pytest.MonkeyPatch.context() as mp:
-        printed: list[str] = []
-        mp.setattr(
-            "myswat.cli.chat_cmd._run_remote_workflow",
-            MagicMock(side_effect=RemoteWorkflowTimeoutError("stalled")),
-        )
-        mp.setattr("myswat.cli.chat_cmd.console.print", lambda message: printed.append(str(message)))
-
-        _run_workflow(
-            store=store,
-            proj=_project(),
-            workdir="/tmp/repo",
-            settings=_settings(),
-            requirement="ship auth",
-        )
-
-    assert "stalled" in printed[0]
-    assert "myswat status -p proj --details" in printed[1]
+    assert work_item_id == 77
+    assert client.get_work_item.call_count == 3

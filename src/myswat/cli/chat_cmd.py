@@ -60,13 +60,8 @@ HELP_TEXT = """
 """
 
 _REMOTE_WORKFLOW_ACTIVE_STATUSES = frozenset({"pending", "in_progress", "review"})
-_REMOTE_WORKFLOW_STALE_TIMEOUT_SECONDS = 300.0
 _SEND_POLL_INTERVAL_SECONDS = 0.05
 _SEND_HEALTHCHECK_INTERVAL_SECONDS = 5.0
-
-
-class RemoteWorkflowTimeoutError(RuntimeError):
-    """Raised when a daemon-backed workflow stops making visible progress."""
 
 
 class _RemoteRunnerStub:
@@ -280,15 +275,6 @@ def _workflow_poll_interval_seconds(settings: MySwatSettings) -> float:
     return value if value > 0 else 1.0
 
 
-def _workflow_stale_timeout_seconds(settings: MySwatSettings) -> float:
-    raw_value = getattr(settings.workflow, "assignment_timeout_seconds", 0)
-    try:
-        value = float(raw_value)
-    except (TypeError, ValueError):
-        value = 0.0
-    return value if value > 0 else _REMOTE_WORKFLOW_STALE_TIMEOUT_SECONDS
-
-
 def _run_remote_workflow(
     *,
     store: MemoryStore,
@@ -314,10 +300,7 @@ def _run_remote_workflow(
         on_work_item_created(work_item_id)
 
     poll_interval = _workflow_poll_interval_seconds(settings)
-    stale_timeout = _workflow_stale_timeout_seconds(settings)
     cancel_requested = False
-    last_progress_marker: tuple[str, object] | None = None
-    last_progress_at = time.monotonic()
 
     while True:
         payload = client.get_work_item(
@@ -326,10 +309,6 @@ def _run_remote_workflow(
         )
         work_item = payload.get("work_item") or {}
         status = str(work_item.get("status") or "pending")
-        progress_marker = (status, work_item.get("updated_at"))
-        if progress_marker != last_progress_marker:
-            last_progress_marker = progress_marker
-            last_progress_at = time.monotonic()
 
         if status not in _REMOTE_WORKFLOW_ACTIVE_STATUSES:
             return work_item_id
@@ -341,12 +320,6 @@ def _run_remote_workflow(
                 action="cancel",
             )
             cancel_requested = True
-
-        if stale_timeout > 0 and time.monotonic() - last_progress_at >= stale_timeout:
-            raise RemoteWorkflowTimeoutError(
-                f"Workflow work item {work_item_id} stopped making progress "
-                f"for {int(stale_timeout)}s while status remained '{status}'."
-            )
 
         time.sleep(poll_interval)
 
@@ -1021,11 +994,6 @@ def _run_workflow(
         )
     except (DaemonClientError, MCPHTTPClientError) as exc:
         _print_daemon_error(exc)
-    except RemoteWorkflowTimeoutError as exc:
-        console.print(f"[red]{exc}[/red]")
-        console.print(
-            f"[dim]Check progress with: myswat status -p {proj['slug']} --details[/dim]"
-        )
 
 
 def _run_inline_review_interactive(
