@@ -68,8 +68,13 @@ myswat search "bloom filter" -p my-project
 - [TiDB Cloud](https://tidbcloud.com) account (free tier works)
 - At least one AI CLI: [Codex](https://github.com/openai/codex), [Claude Code](https://claude.com/claude-code), or [Kimi](https://www.kimi.com/code)
 
+## Getting Started
+
+New to MySwat? Follow the **[Installation Guide](docs/installation.md)** for step-by-step setup: cloning, TiDB Cloud configuration, agent CLI installation, and running your first workflow.
+
 ## Documentation
 
+- [Installation Guide](docs/installation.md) — full setup walkthrough for new users
 - [CLI Reference](docs/cli-reference.md) — all commands, work modes, chat commands
 - [Configuration](docs/configuration.md) — config file, environment variables, per-backend setup
 - [Architecture](docs/architecture.md) — components, memory tiers, knowledge pipeline, TiDB schema
