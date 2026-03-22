@@ -66,6 +66,28 @@ def test_call_tool_returns_structured_content_and_posts_json(monkeypatch):
     assert captured["body"]["params"]["arguments"] == {"project_id": 1}
 
 
+def test_call_tool_allows_timeoutless_requests(monkeypatch):
+    captured = {}
+
+    def _fake_urlopen(request, timeout):
+        captured["timeout"] = timeout
+        return _FakeResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"structuredContent": {"ok": True}},
+            }
+        )
+
+    monkeypatch.setattr("myswat.server.mcp_http_client.urlopen", _fake_urlopen)
+    client = MCPHTTPClient("http://127.0.0.1:8765", timeout_seconds=None)
+
+    result = client.call_tool("send_chat_message", {})
+
+    assert result == {"ok": True}
+    assert captured["timeout"] is None
+
+
 def test_call_tool_normalizes_missing_structured_content(monkeypatch):
     monkeypatch.setattr(
         "myswat.server.mcp_http_client.urlopen",
@@ -181,3 +203,29 @@ def test_call_tool_raises_for_non_mapping_structured_content(monkeypatch):
 
     with pytest.raises(MCPHTTPClientError, match="Missing structuredContent"):
         client.call_tool("claim_next_assignment", {})
+
+
+def test_healthcheck_returns_true_for_ok_payload(monkeypatch):
+    observed = {}
+
+    def _fake_urlopen(request, timeout):
+        observed["url"] = request.full_url
+        observed["timeout"] = timeout
+        return _FakeResponse({"ok": True})
+
+    monkeypatch.setattr("myswat.server.mcp_http_client.urlopen", _fake_urlopen)
+    client = MCPHTTPClient("http://127.0.0.1:8765", timeout_seconds=None)
+
+    assert client.healthcheck() is True
+    assert observed["url"] == "http://127.0.0.1:8765/api/health"
+    assert observed["timeout"] == 5
+
+
+def test_healthcheck_returns_false_for_transport_errors(monkeypatch):
+    monkeypatch.setattr(
+        "myswat.server.mcp_http_client.urlopen",
+        lambda request, timeout: (_ for _ in ()).throw(URLError("connection refused")),
+    )
+    client = MCPHTTPClient("http://127.0.0.1:8765")
+
+    assert client.healthcheck() is False

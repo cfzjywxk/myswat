@@ -1067,3 +1067,41 @@ def test_run_worker_propagates_registration_failure_without_offline_update():
         )
 
     service.update_runtime_status.assert_not_called()
+
+
+def test_run_worker_builds_timeoutless_mcp_client():
+    settings = SimpleNamespace(
+        server=SimpleNamespace(request_timeout_seconds=5),
+    )
+    client = Mock()
+
+    def _call_tool(name: str, arguments: dict) -> dict:
+        if name == "register_runtime":
+            return {"runtime_registration_id": 31}
+        if name == "heartbeat_runtime":
+            return {}
+        if name == "claim_next_assignment":
+            return {"assignment_kind": "none"}
+        if name == "update_runtime_status":
+            return {"runtime_registration_id": 31, "status": "offline"}
+        raise AssertionError(f"Unexpected tool call: {name}")
+
+    client.call_tool.side_effect = _call_tool
+
+    with patch("myswat.cli.worker_cmd.MCPHTTPClient", return_value=client) as mock_client_cls:
+        result = run_worker(
+            project_slug="fib-demo",
+            role="developer",
+            server_url="http://unused",
+            settings=settings,
+            project_row={"id": 1, "slug": "fib-demo", "repo_path": "/tmp/fib-demo"},
+            agent_row=_agent_row("developer"),
+            runner=_FakeRunner([]),
+            idle_exit_seconds=0.05,
+        )
+
+    assert result == {"stage_assignments": 0, "review_assignments": 0}
+    mock_client_cls.assert_called_once_with(
+        "http://unused",
+        timeout_seconds=None,
+    )

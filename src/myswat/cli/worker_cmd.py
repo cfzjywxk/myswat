@@ -689,7 +689,7 @@ def run_worker(
     )
     mcp = mcp_client or MCPHTTPClient(
         server_url,
-        timeout_seconds=settings.server.request_timeout_seconds,
+        timeout_seconds=None,
     )
     runtime_registration_id: int | None = None
     runtime = mcp.call_tool(

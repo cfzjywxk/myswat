@@ -62,6 +62,7 @@ HELP_TEXT = """
 _REMOTE_WORKFLOW_ACTIVE_STATUSES = frozenset({"pending", "in_progress", "review"})
 _REMOTE_WORKFLOW_STALE_TIMEOUT_SECONDS = 300.0
 _SEND_POLL_INTERVAL_SECONDS = 0.05
+_SEND_HEALTHCHECK_INTERVAL_SECONDS = 5.0
 
 
 class RemoteWorkflowTimeoutError(RuntimeError):
@@ -103,7 +104,7 @@ class SessionManager:
         self._session: Session | None = None
         self._mcp = mcp or MCPHTTPClient(
             f"http://{self._settings.server.host}:{self._settings.server.port}",
-            timeout_seconds=self._settings.server.request_timeout_seconds,
+            timeout_seconds=None,
         )
 
     @property
@@ -250,8 +251,16 @@ def _strip_wrapping_quotes(text: str) -> str:
 
 
 def _print_daemon_error(exc: Exception) -> None:
-    console.print(f"[red]{exc}[/red]")
-    console.print("[dim]Start the daemon first: myswat server[/dim]")
+    message = str(exc)
+    console.print(f"[red]{message}[/red]")
+    lowered = message.lower()
+    if "unavailable at" in lowered or "connection refused" in lowered:
+        console.print("[dim]Start the daemon first: myswat server[/dim]")
+        return
+    if "timed out" in lowered:
+        console.print(
+            "[dim]The daemon is running, but the request is still in progress or blocked.[/dim]"
+        )
 
 
 def _public_chat_work_mode(mode: WorkMode) -> WorkMode:
@@ -352,6 +361,7 @@ def _send_with_timer(
     result: list[AgentResponse | None] = [None]
     error: list[BaseException | None] = [None]
     start = time.monotonic()
+    last_healthcheck_at = start
 
     def _run() -> None:
         try:
@@ -366,6 +376,19 @@ def _send_with_timer(
         with console.status("[dim]Waiting for agent response...[/dim]", spinner="dots"):
             while worker.is_alive():
                 worker.join(timeout=_SEND_POLL_INTERVAL_SECONDS)
+                now = time.monotonic()
+                if (
+                    worker.is_alive()
+                    and now - last_healthcheck_at >= _SEND_HEALTHCHECK_INTERVAL_SECONDS
+                ):
+                    last_healthcheck_at = now
+                    mcp = getattr(sm, "_mcp", None)
+                    healthcheck = getattr(mcp, "healthcheck", None)
+                    if callable(healthcheck):
+                        try:
+                            healthcheck()
+                        except Exception:
+                            pass
     except KeyboardInterrupt:
         runner = getattr(sm, "_runner", None)
         if runner is not None:

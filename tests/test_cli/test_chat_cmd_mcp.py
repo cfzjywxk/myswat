@@ -125,6 +125,24 @@ def test_remote_session_manager_reuses_open_session():
     mcp.call_tool.assert_called_once()
 
 
+def test_session_manager_builds_timeoutless_mcp_client():
+    settings = _settings()
+    with patch("myswat.cli.chat_cmd.MCPHTTPClient") as mock_client_cls:
+        manager = SessionManager(
+            store=MagicMock(),
+            project_row=_project(),
+            agent_row=_agent_row(),
+            settings=settings,
+            workdir="/tmp/repo",
+        )
+
+    mock_client_cls.assert_called_once_with(
+        "http://127.0.0.1:8080",
+        timeout_seconds=None,
+    )
+    assert manager._mcp is mock_client_cls.return_value
+
+
 def test_send_with_timer_uses_status_spinner_for_remote_sessions():
     mcp = MagicMock()
     mcp.call_tool.side_effect = [
@@ -234,7 +252,7 @@ def test_session_manager_send_auto_opens_session_when_missing():
 def test_send_with_timer_waits_for_worker_loop():
     started = threading.Event()
     release = threading.Event()
-    ticks = iter([10.0, 10.25])
+    ticks = iter([10.0, 10.1, 10.25])
 
     class _SlowManager:
         def send(self, prompt: str, task_description: str | None = None):
@@ -332,9 +350,19 @@ def test_print_daemon_error_prints_help():
     printed: list[str] = []
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("myswat.cli.chat_cmd.console.print", lambda message: printed.append(str(message)))
-        _print_daemon_error(RuntimeError("daemon down"))
-    assert "daemon down" in printed[0]
+        _print_daemon_error(RuntimeError("MCP endpoint is unavailable at http://127.0.0.1:8765/mcp"))
+    assert "unavailable" in printed[0]
     assert "myswat server" in printed[1]
+
+
+def test_print_daemon_error_clarifies_timeout_without_start_hint():
+    printed: list[str] = []
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("myswat.cli.chat_cmd.console.print", lambda message: printed.append(str(message)))
+        _print_daemon_error(RuntimeError("MCP request timed out after 30s: send_chat_message"))
+    assert "timed out" in printed[0]
+    assert "still in progress or blocked" in printed[1]
+    assert all("myswat server" not in line for line in printed[1:])
 
 
 def test_public_chat_work_mode_maps_internal_modes():

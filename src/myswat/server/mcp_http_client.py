@@ -13,9 +13,14 @@ class MCPHTTPClientError(RuntimeError):
 
 
 class MCPHTTPClient:
-    def __init__(self, server_url: str, timeout_seconds: int = 30) -> None:
-        self._endpoint = server_url.rstrip("/") + "/mcp"
-        self._timeout = max(1, int(timeout_seconds))
+    def __init__(self, server_url: str, timeout_seconds: int | None = 30) -> None:
+        self._base_url = server_url.rstrip("/")
+        self._endpoint = self._base_url + "/mcp"
+        self._timeout = (
+            None
+            if timeout_seconds is None
+            else max(1, int(timeout_seconds))
+        )
         self._request_id = 0
 
     def call_tool(self, name: str, arguments: dict) -> dict:
@@ -44,6 +49,8 @@ class MCPHTTPClient:
                 f"MCP endpoint returned HTTP {exc.code} for {name}: {body[:200] or exc.reason}"
             ) from exc
         except (TimeoutError, socket.timeout) as exc:
+            if self._timeout is None:
+                raise MCPHTTPClientError(f"MCP request timed out: {name}") from exc
             raise MCPHTTPClientError(
                 f"MCP request timed out after {self._timeout}s: {name}"
             ) from exc
@@ -70,3 +77,20 @@ class MCPHTTPClient:
                 f"Missing structuredContent in MCP response: {result!r}"
             )
         return structured
+
+    def healthcheck(self, timeout_seconds: int | None = 5) -> bool:
+        request = Request(
+            url=self._base_url + "/api/health",
+            method="GET",
+        )
+        timeout = None if timeout_seconds is None else max(1, int(timeout_seconds))
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                body = response.read().decode("utf-8")
+        except (HTTPError, URLError, TimeoutError, socket.timeout):
+            return False
+        try:
+            parsed = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            return False
+        return bool(isinstance(parsed, dict) and parsed.get("ok"))
