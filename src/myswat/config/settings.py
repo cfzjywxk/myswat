@@ -87,6 +87,7 @@ class WorkflowSettings(BaseSettings):
     ga_test_review_limit: int = WORKFLOW_REVIEW_LIMIT_DEFAULTS["ga_test_review_limit"]
     assignment_poll_interval_seconds: float = 1.0
     assignment_timeout_seconds: int = 0
+    requirements_skills_root: str = ""
 
     model_config = {"env_prefix": "MYSWAT_WORKFLOW_"}
 

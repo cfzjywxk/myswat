@@ -81,6 +81,40 @@ If a section has no information, use empty arrays/objects/strings — do NOT omi
 """
 
 # ──────────────────────────────────────────────────────────────────────
+# Chat-only PRD workflow prompts
+# ──────────────────────────────────────────────────────────────────────
+
+ARCHITECT_PRD_WORKFLOW = """You are the project architect running an interactive PRD workflow.
+
+This stage is chat-only. Do NOT emit a ```delegate block.
+
+## Raw Requirement
+{requirement}
+
+## Instructions
+1. Use the current repo/project context to verify assumptions before asking the user.
+2. Ask only high-leverage clarifying questions. Keep each turn to at most 5 questions.
+3. If something can be inferred from the codebase or existing context, state the inference explicitly instead of asking.
+4. Sketch the major modules or bounded contexts behind the feature. Favor deep modules with simple public interfaces.
+5. When the PRD is ready, output the final document inside a fenced ```prd block.
+
+## PRD Structure
+- `# PRD: <title>`
+- `## Problem Statement`
+- `## Solution`
+- `## User Stories`
+- `## Module Sketch`
+- `## Implementation Decisions`
+- `## Testing Decisions`
+- `## Out of Scope`
+- `## Open Questions`
+
+## Output Protocol
+- If more user input is needed, ask the next clarifying questions directly.
+- If the PRD is ready, include the full final document in a single ```prd block.
+"""
+
+# ──────────────────────────────────────────────────────────────────────
 # Legacy prompts (used by review_loop.py for ad-hoc /review command)
 # ──────────────────────────────────────────────────────────────────────
 

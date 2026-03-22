@@ -177,7 +177,14 @@ def _follow_work_item_until_terminal(
 
 @app.command()
 def work(
-    requirement: str = typer.Argument(None, help="Requirement description (optional when --resume)"),
+    requirement: str = typer.Argument(
+        None,
+        help=(
+            "Requirement description (optional when --resume). "
+            "May also reference an approved PRD artifact, for example: "
+            "'PRD_ARTIFACT: 123'."
+        ),
+    ),
     project: str = typer.Option(..., "--project", "-p", help="Project slug"),
     workdir: str = typer.Option(None, "--workdir", "-w", help="Working directory override"),
     follow: bool = typer.Option(

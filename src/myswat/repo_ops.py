@@ -258,7 +258,8 @@ def render_design_plan_markdown(
 ) -> str:
     return (
         "# MySwat Design Plan\n\n"
-        "This file is maintained by MySwat and tracks the latest approved design and implementation plan.\n\n"
+        "This file is maintained by MySwat and tracks the latest approved requirement framing, "
+        "technical design, and implementation plan.\n\n"
         "## Requirement\n\n"
         f"{requirement.strip()}\n\n"
         "## Technical Design\n\n"

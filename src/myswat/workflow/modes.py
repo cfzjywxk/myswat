@@ -10,7 +10,7 @@ class WorkMode(StrEnum):
     """Workflow engine modes.
 
     `full`, `design`, `develop`, and `test` are public entry points.
-    `architect_design` and `testplan_design` are internal engine-only modes
+    `prd`, `architect_design`, and `testplan_design` are internal engine-only modes
     used by chat-led delegation flows.
     """
 
@@ -18,6 +18,7 @@ class WorkMode(StrEnum):
     design = "design"
     develop = "develop"
     test = "test"
+    prd = "prd"
     architect_design = "architect_design"
     testplan_design = "testplan_design"
 
@@ -30,6 +31,7 @@ PUBLIC_WORK_MODES: tuple[WorkMode, ...] = (
 )
 
 INTERNAL_WORK_MODES: tuple[WorkMode, ...] = (
+    WorkMode.prd,
     WorkMode.architect_design,
     WorkMode.testplan_design,
 )
@@ -37,6 +39,7 @@ INTERNAL_WORK_MODES: tuple[WorkMode, ...] = (
 DEFAULT_DELEGATION_MODE = "develop"
 
 ARCHITECT_DELEGATION_MODES: tuple[str, ...] = (
+    WorkMode.prd.value,
     WorkMode.full.value,
     WorkMode.design.value,
     DEFAULT_DELEGATION_MODE,
@@ -68,6 +71,14 @@ DELEGATION_MODE_SPECS: dict[str, DelegationModeSpec] = {
         save_session_before_run=True,
         reset_role_session=True,
     ),
+    WorkMode.prd.value: DelegationModeSpec(
+        delegation_mode=WorkMode.prd.value,
+        engine_mode=WorkMode.prd,
+        chat_handler="prd_workflow",
+        allowed_roles=frozenset({"architect"}),
+        banner="Architect started a PRD workflow",
+        detail="Starting interactive PRD drafting in chat.",
+    ),
     WorkMode.design.value: DelegationModeSpec(
         delegation_mode=WorkMode.design.value,
         engine_mode=WorkMode.architect_design,
@@ -96,6 +107,7 @@ DELEGATION_MODE_SPECS: dict[str, DelegationModeSpec] = {
 _DELEGATION_MODE_ALIASES: dict[str, str] = {
     "": DEFAULT_DELEGATION_MODE,
     DEFAULT_DELEGATION_MODE: DEFAULT_DELEGATION_MODE,
+    WorkMode.prd.value: WorkMode.prd.value,
     WorkMode.design.value: WorkMode.design.value,
     WorkMode.full.value: WorkMode.full.value,
     QA_DELEGATION_MODES[0]: QA_DELEGATION_MODES[0],

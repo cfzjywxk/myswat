@@ -2607,3 +2607,131 @@ def test_run_design_plan_phase_and_test_branch_failures():
     assert ga_result.passed is False
     assert payload_fail_kernel._blocked is True
     assert payload_fail_kernel._failure_summary == "ga failed"
+
+
+def test_design_prompt_includes_requirement_skill_pack_guidance(tmp_path):
+    service = _service()
+    skills_root = tmp_path / "skills"
+    for skill_name in (
+        "improve-codebase-architecture",
+        "write-a-prd",
+        "tdd",
+        "prd-to-plan",
+        "prd-to-issues",
+    ):
+        skill_dir = skills_root / skill_name
+        skill_dir.mkdir(parents=True)
+        content = "---\nname: test\n---\n"
+        if skill_name == "write-a-prd":
+            content += (
+                "<prd-template>\n"
+                "## Problem Statement\n"
+                "## Solution\n"
+                "## User Stories\n"
+                "## Testing Decisions\n"
+                "</prd-template>\n"
+            )
+        (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+
+    kernel = WorkflowKernel(
+        store=_store(),
+        service=service,
+        dev=_participant(10, "developer"),
+        qas=[_participant(20, "qa_main")],
+        arch=_participant(30, "architect"),
+        project_id=1,
+        work_item_id=17,
+        mode=WorkMode.design,
+        auto_approve=True,
+        requirements_skills_root=str(skills_root),
+    )
+
+    with patch.object(kernel, "_wait_for_stage_result", return_value=SimpleNamespace(status="failed")):
+        kernel._run_design("shape a better workflow")
+
+    design_stage = service.start_stage_run.call_args.args[0]
+    assert "## Integrated Requirement Skills" in design_stage.task_prompt
+    assert "## PRD Snapshot" in design_stage.task_prompt
+    assert "Issue-Ready Delivery Slices" in design_stage.task_prompt
+    assert "reduce coupling" in design_stage.task_prompt
+
+
+def test_plan_phase_and_test_prompts_include_skill_pack_guidance(tmp_path):
+    skills_root = tmp_path / "skills"
+    for skill_name in (
+        "write-a-prd",
+        "tdd",
+        "prd-to-plan",
+        "prd-to-issues",
+    ):
+        skill_dir = skills_root / skill_name
+        skill_dir.mkdir(parents=True)
+        content = "---\nname: test\n---\n"
+        if skill_name == "write-a-prd":
+            content += "<prd-template>\n## Problem Statement\n## Solution\n</prd-template>\n"
+        (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+
+    plan_service = _service()
+    plan_kernel = WorkflowKernel(
+        store=_store(),
+        service=plan_service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=18,
+        mode=WorkMode.develop,
+        auto_approve=True,
+        requirements_skills_root=str(skills_root),
+    )
+    with patch.object(plan_kernel, "_wait_for_stage_result", return_value=SimpleNamespace(status="failed")):
+        plan_kernel._run_plan("req", "design")
+    plan_stage = plan_service.start_stage_run.call_args.args[0]
+    assert "## Delivery Slices" in plan_stage.task_prompt
+    assert "Do NOT create horizontal slices" in plan_stage.task_prompt
+
+    phase_service = _service()
+    phase_kernel = WorkflowKernel(
+        store=_store(),
+        service=phase_service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=19,
+        mode=WorkMode.develop,
+        auto_approve=True,
+        requirements_skills_root=str(skills_root),
+    )
+    with patch.object(phase_kernel, "_wait_for_stage_result", return_value=SimpleNamespace(status="failed")):
+        phase_kernel._run_phase(
+            requirement="req",
+            design="design",
+            plan="Phase 1: Ship it",
+            phase_name="Ship it",
+            phase_index=1,
+            total_phases=1,
+            completed_summaries=[],
+        )
+    phase_stage = phase_service.start_stage_run.call_args.args[0]
+    assert "Execute this phase in TDD mode" in phase_stage.task_prompt
+    assert "failing boundary test" in phase_stage.task_prompt
+
+    test_service = _service()
+    test_kernel = WorkflowKernel(
+        store=_store(),
+        service=test_service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=20,
+        mode=WorkMode.test,
+        auto_approve=True,
+        requirements_skills_root=str(skills_root),
+    )
+    with patch.object(test_kernel, "_wait_for_stage_result", return_value=SimpleNamespace(status="failed")):
+        test_kernel._run_test("req", "design", [])
+    test_stage = test_service.start_stage_run.call_args.args[0]
+    assert "acceptance-criteria coverage map" in test_stage.task_prompt
+    assert "merge gate" in test_stage.task_prompt

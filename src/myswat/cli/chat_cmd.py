@@ -39,6 +39,7 @@ from myswat.workflow.modes import (
     WorkMode,
     normalize_delegation_mode,
 )
+from myswat.workflow.prompts import ARCHITECT_PRD_WORKFLOW
 
 console = Console()
 
@@ -48,6 +49,7 @@ HELP_TEXT = """
   /status               Show project status
   /task <id>            Show detailed status for one work item
   /history [n]          Show recent turns from the active chat session
+  /prd <requirement>    Start an interactive PRD workflow in chat
   /work <requirement>   Start full workflow: design -> plan -> develop -> report (no GA test)
   /dev <task>           Start the development workflow for a task
   /ga-test <task>       Start the standalone GA test workflow for a task
@@ -236,6 +238,133 @@ def _extract_delegation(text: str) -> tuple[str, str] | None:
         task = "\n".join(fallback_lines) or None
 
     return (task, mode) if task else None
+
+
+def _extract_prd_block(text: str) -> str | None:
+    import re
+
+    match = re.search(r"```prd\s*\n(.*?)```", text, re.DOTALL | re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
+def _cancel_prd_work_item(store: MemoryStore, work_item_id: int, summary: str) -> None:
+    store.update_work_item_status(work_item_id, "cancelled")
+    store.update_work_item_state(
+        work_item_id,
+        current_stage="prd_cancelled",
+        latest_summary=summary,
+        next_todos=[],
+        open_issues=[],
+    )
+    store.append_work_item_process_event(
+        work_item_id,
+        event_type="prd_cancelled",
+        title="PRD workflow cancelled",
+        summary=summary,
+        from_role="user",
+        to_role="architect",
+    )
+
+
+def _create_prd_work_item(
+    *,
+    store: MemoryStore,
+    proj: dict,
+    proposer_sm: SessionManager,
+    requirement: str,
+    workdir: str | None,
+) -> int:
+    metadata_json = {
+        "work_mode": WorkMode.prd.value,
+        "execution_mode": "chat",
+        "submitted_via": "chat_prd",
+        "requested_workdir": workdir,
+    }
+    work_item_id = store.create_work_item(
+        project_id=int(proj["id"]),
+        title=requirement[:200],
+        description=requirement,
+        item_type="design",
+        assigned_agent_id=proposer_sm.agent_id,
+        metadata_json=metadata_json,
+    )
+    store.update_work_item_status(work_item_id, "in_progress")
+    store.update_work_item_state(
+        work_item_id,
+        current_stage="prd",
+        latest_summary="Interactive PRD workflow started in chat.",
+        next_todos=["Answer architect clarifying questions until the PRD is approved."],
+        open_issues=[],
+        updated_by_agent_id=proposer_sm.agent_id,
+    )
+    store.append_work_item_process_event(
+        work_item_id,
+        event_type="prd_started",
+        title="PRD workflow started",
+        summary="Interactive PRD drafting started in chat.",
+        from_role="user",
+        to_role="architect",
+        updated_by_agent_id=proposer_sm.agent_id,
+    )
+    return work_item_id
+
+
+def _persist_approved_prd(
+    *,
+    store: MemoryStore,
+    proj: dict,
+    proposer_sm: SessionManager,
+    work_item_id: int,
+    requirement: str,
+    prd_markdown: str,
+) -> int:
+    title = requirement[:200]
+    heading_lines = [line[2:].strip() for line in prd_markdown.splitlines() if line.startswith("# ")]
+    if heading_lines:
+        title = heading_lines[0][:200]
+
+    artifact_id = store.create_artifact(
+        work_item_id=work_item_id,
+        agent_id=proposer_sm.agent_id,
+        iteration=1,
+        artifact_type="prd_doc",
+        title=title,
+        content=prd_markdown,
+        metadata_json={
+            "approved": True,
+            "source": "chat_prd",
+            "work_mode": WorkMode.prd.value,
+        },
+    )
+    latest_summary = f"Approved PRD stored as artifact #{artifact_id}."
+    store.update_work_item_status(work_item_id, "approved")
+    store.update_work_item_state(
+        work_item_id,
+        current_stage="prd_approved",
+        latest_summary=latest_summary,
+        next_todos=[
+            f"Use `/work PRD_ARTIFACT: {artifact_id}` in chat to start delivery from this PRD.",
+            (
+                f"Use `myswat work -p {proj['slug']} \"PRD_ARTIFACT: {artifact_id}\"` "
+                "from the CLI to run the daemon workflow from this PRD."
+            ),
+        ],
+        open_issues=[],
+        last_artifact_id=artifact_id,
+        updated_by_agent_id=proposer_sm.agent_id,
+    )
+    store.append_work_item_process_event(
+        work_item_id,
+        event_type="prd_approved",
+        title="PRD approved",
+        summary=latest_summary,
+        from_role="architect",
+        to_role="user",
+        updated_by_agent_id=proposer_sm.agent_id,
+    )
+    return artifact_id
 
 
 def _strip_wrapping_quotes(text: str) -> str:
@@ -481,6 +610,15 @@ def run_chat(
             return
 
         delegation_handlers = {
+            "prd_workflow": lambda: _run_prd_workflow_interactive(
+                store,
+                proj,
+                sm,
+                effective_workdir,
+                settings,
+                delegation_task,
+                prompt_session=prompt_session,
+            ),
             "workflow": lambda: _run_workflow_interactive(
                 store,
                 proj,
@@ -661,6 +799,33 @@ def run_chat(
                     arg,
                 )
                 sm = _switch_agent(current_role, settings)
+
+            elif cmd == "/prd":
+                if not arg:
+                    console.print("[dim]Usage: /prd <requirement description>[/dim]")
+                    continue
+                original_role = current_role
+                using_temp_architect = current_role != "architect"
+                if using_temp_architect:
+                    _close_session_best_effort(sm)
+                    sm = _switch_agent("architect", settings)
+                    if sm is None:
+                        current_role = original_role
+                        continue
+                    current_role = "architect"
+                _run_prd_workflow_interactive(
+                    store,
+                    proj,
+                    sm,
+                    effective_workdir,
+                    settings,
+                    arg,
+                    prompt_session=prompt_session,
+                )
+                if using_temp_architect:
+                    _close_session_best_effort(sm)
+                    sm = _switch_agent(original_role, settings)
+                    current_role = original_role
 
             elif cmd == "/dev":
                 if not arg:
@@ -935,6 +1100,150 @@ def _run_testplan_review(
         mode=WorkMode.testplan_design,
         proposer_sm=proposer_sm,
     )
+
+
+def _run_prd_workflow_interactive(
+    store: MemoryStore,
+    proj: dict,
+    proposer_sm: SessionManager | None,
+    workdir: str | None,
+    settings: MySwatSettings,
+    task: str,
+    prompt_session: PromptSession | None = None,
+) -> None:
+    if proposer_sm is None:
+        console.print("[red]Missing architect session.[/red]")
+        return
+
+    max_prd_turns = 30
+    active_prompt_session = prompt_session or _build_prompt_session(settings, f"prd-{proj['slug']}")
+    work_item_id = _create_prd_work_item(
+        store=store,
+        proj=proj,
+        proposer_sm=proposer_sm,
+        requirement=task,
+        workdir=workdir,
+    )
+    current_prompt = ARCHITECT_PRD_WORKFLOW.format(requirement=task)
+
+    for _turn in range(max_prd_turns):
+        try:
+            response, elapsed = _send_with_timer(
+                console,
+                proposer_sm,
+                current_prompt,
+                task_description=f"PRD: {task[:120]}",
+            )
+        except (DaemonClientError, MCPHTTPClientError) as exc:
+            store.update_work_item_status(work_item_id, "blocked")
+            store.update_work_item_state(
+                work_item_id,
+                current_stage="prd_blocked",
+                latest_summary=str(exc),
+                next_todos=["Resume PRD drafting in chat after the architect session is available again."],
+                updated_by_agent_id=proposer_sm.agent_id,
+            )
+            _print_daemon_error(exc)
+            return
+
+        if response.cancelled:
+            _cancel_prd_work_item(store, work_item_id, "PRD workflow cancelled.")
+            console.print(f"\n[yellow]PRD workflow cancelled.[/yellow] [dim]({_fmt_duration(elapsed)})[/dim]")
+            return
+
+        console.print()
+        rendered, _ = maybe_externalize_response(
+            response.content,
+            label="prd-workflow-response",
+        )
+        console.print(Markdown(rendered))
+        console.print(f"\n[dim]({_fmt_duration(elapsed)})[/dim]")
+
+        prd_markdown = _extract_prd_block(response.content)
+        if prd_markdown:
+            store.update_work_item_state(
+                work_item_id,
+                current_stage="prd_review",
+                latest_summary="Architect proposed a PRD draft for approval.",
+                next_todos=["Approve the PRD, reject it, or provide revision feedback."],
+                updated_by_agent_id=proposer_sm.agent_id,
+            )
+            approval = active_prompt_session.prompt("approve prd [Y/n/feedback]> ", multiline=False).strip()
+            normalized = approval.lower()
+            if normalized in {"", "y", "yes"}:
+                artifact_id = _persist_approved_prd(
+                    store=store,
+                    proj=proj,
+                    proposer_sm=proposer_sm,
+                    work_item_id=work_item_id,
+                    requirement=task,
+                    prd_markdown=prd_markdown,
+                )
+                console.print(
+                    f"[green]PRD approved.[/green] "
+                    f"[dim]Artifact #{artifact_id} on work item {work_item_id}.[/dim]"
+                )
+                console.print(
+                    f"[dim]Start delivery with `/work PRD_ARTIFACT: {artifact_id}` or "
+                    f"`myswat work -p {proj['slug']} \"PRD_ARTIFACT: {artifact_id}\"`.[/dim]"
+                )
+                return
+            if normalized in {"n", "no", "cancel", "/cancel", "quit", "/quit"}:
+                _cancel_prd_work_item(store, work_item_id, "User declined the PRD draft.")
+                console.print("[yellow]PRD workflow cancelled.[/yellow]")
+                return
+            store.update_work_item_state(
+                work_item_id,
+                current_stage="prd_revision",
+                latest_summary="User requested PRD revisions.",
+                next_todos=["Revise the PRD draft and return an updated `prd` block."],
+                open_issues=[approval],
+                updated_by_agent_id=proposer_sm.agent_id,
+            )
+            store.append_work_item_process_event(
+                work_item_id,
+                event_type="prd_feedback",
+                title="PRD feedback requested",
+                summary=approval,
+                from_role="user",
+                to_role="architect",
+                updated_by_agent_id=proposer_sm.agent_id,
+            )
+            current_prompt = approval
+            continue
+
+        store.update_work_item_state(
+            work_item_id,
+            current_stage="prd_clarification",
+            latest_summary="Architect requested clarification before finalizing the PRD.",
+            next_todos=["Answer the architect's questions in chat."],
+            updated_by_agent_id=proposer_sm.agent_id,
+        )
+        user_reply = active_prompt_session.prompt("prd> ", multiline=False).strip()
+        if user_reply.lower() in {"cancel", "/cancel", "quit", "/quit"}:
+            _cancel_prd_work_item(store, work_item_id, "User cancelled the PRD workflow.")
+            console.print("[yellow]PRD workflow cancelled.[/yellow]")
+            return
+        if not user_reply:
+            console.print("[dim]Reply required or type /cancel to stop the PRD workflow.[/dim]")
+            continue
+        store.append_work_item_process_event(
+            work_item_id,
+            event_type="prd_user_reply",
+            title="PRD clarification received",
+            summary=user_reply,
+            from_role="user",
+            to_role="architect",
+            updated_by_agent_id=proposer_sm.agent_id,
+        )
+        current_prompt = user_reply
+    else:
+        _cancel_prd_work_item(
+            store, work_item_id, f"PRD workflow stopped after {max_prd_turns} turns without approval."
+        )
+        console.print(
+            f"[yellow]PRD workflow stopped after {max_prd_turns} turns without reaching approval.[/yellow]"
+        )
 
 
 def _run_workflow(

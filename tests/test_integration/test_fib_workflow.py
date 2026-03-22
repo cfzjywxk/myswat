@@ -10,6 +10,7 @@ from itertools import count
 from types import SimpleNamespace
 
 from myswat.cli.worker_cmd import run_worker
+from myswat.large_payloads import resolve_externalized_text
 from myswat.server.contracts import AssignmentEnvelope, ReviewVerdictEnvelope, StageRunCompletion
 from myswat.server.mcp_stdio import MySwatMCPDispatcher
 from myswat.workflow.kernel import WorkflowKernel
@@ -116,6 +117,29 @@ class _WorkflowCoordinationService:
                 "repo_path": self.store.project["repo_path"],
             }
         )
+
+    def open_chat_session(self, request):
+        return {
+            "session_id": 1,
+            "agent_id": 0,
+            "session_uuid": "fib-chat-session",
+        }
+
+    def send_chat_message(self, request):
+        return {
+            "content": "",
+            "exit_code": 0,
+            "raw_stdout": "",
+            "raw_stderr": "",
+            "token_usage": {},
+            "cancelled": False,
+        }
+
+    def reset_chat_session(self, request):
+        return {"ok": True}
+
+    def close_chat_session(self, request):
+        return {"ok": True}
 
     def register_runtime(self, request):
         runtime_id = next(self._runtime_ids)
@@ -426,7 +450,7 @@ class _WorkflowRunner:
         return
 
     def invoke(self, prompt: str, system_context: str | None = None):
-        text = system_context or ""
+        text = resolve_externalized_text(system_context or "")
         kind_match = re.search(r"\bkind=([a-z_]+)", text)
         stage_match = re.search(r"\bstage=([a-z0-9_]+)", text)
         kind = kind_match.group(1) if kind_match else None
@@ -540,6 +564,7 @@ def test_full_fib_workflow_completes_via_mcp_workers():
         project_id=1,
         work_item_id=1,
         mode=WorkMode.full,
+        with_ga_test=True,
         auto_approve=True,
     )
 

@@ -20,6 +20,7 @@ from myswat.cli.chat_cmd import (
     _run_ga_test_interactive,
     _run_inline_review,
     _run_inline_review_interactive,
+    _run_prd_workflow_interactive,
     _run_design_review,
     _run_design_review_interactive,
     _run_testplan_review,
@@ -265,6 +266,56 @@ class TestRunTestplanReviewInteractive:
         assert kwargs["label"] == "Running QA test-plan workflow"
         assert kwargs["mode"] == WorkMode.testplan_design
         assert kwargs["proposer_sm"] is proposer_sm
+
+
+class TestRunPRDWorkflowInteractive:
+    @patch("myswat.cli.chat_cmd._send_with_timer")
+    def test_persists_approved_prd_artifact(self, mock_send_with_timer):
+        store = MagicMock()
+        store.create_work_item.return_value = 41
+        store.create_artifact.return_value = 99
+        proposer_sm = MagicMock()
+        proposer_sm.agent_id = 7
+        prompt_session = MagicMock()
+        prompt_session.prompt.return_value = ""
+        mock_send_with_timer.return_value = (
+            AgentResponse(
+                content=(
+                    "Here is the draft.\n"
+                    "```prd\n"
+                    "# PRD: Billing Revamp\n\n"
+                    "## Problem Statement\n\n"
+                    "Legacy billing is brittle.\n"
+                    "```"
+                ),
+                exit_code=0,
+            ),
+            1.5,
+        )
+
+        _run_prd_workflow_interactive(
+            store=store,
+            proj=_proj(),
+            proposer_sm=proposer_sm,
+            workdir="/tmp",
+            settings=MagicMock(),
+            task="Write a PRD for billing",
+            prompt_session=prompt_session,
+        )
+
+        first_prompt = mock_send_with_timer.call_args.args[2]
+        assert "interactive PRD workflow" in first_prompt
+        store.create_work_item.assert_called_once()
+        store.create_artifact.assert_called_once_with(
+            work_item_id=41,
+            agent_id=7,
+            iteration=1,
+            artifact_type="prd_doc",
+            title="PRD: Billing Revamp",
+            content="# PRD: Billing Revamp\n\n## Problem Statement\n\nLegacy billing is brittle.",
+            metadata_json={"approved": True, "source": "chat_prd", "work_mode": WorkMode.prd.value},
+        )
+        store.update_work_item_status.assert_any_call(41, "approved")
 
 
 class TestRunWorkflow:
@@ -1367,6 +1418,7 @@ class TestRunChat:
         mock_testplan_review.assert_called_once()
         assert mock_testplan_review.call_args.args[2] is sm
 
+    @patch("myswat.cli.chat_cmd._run_prd_workflow_interactive")
     @patch("myswat.cli.chat_cmd._run_full_workflow_interactive")
     @patch("myswat.cli.chat_cmd._run_workflow_interactive")
     @patch("myswat.cli.chat_cmd._send_with_timer")
@@ -1389,6 +1441,7 @@ class TestRunChat:
         mock_send_timer,
         mock_review,
         mock_full_workflow,
+        mock_prd_workflow,
     ):
         from myswat.cli.chat_cmd import run_chat
 
@@ -1423,10 +1476,73 @@ class TestRunChat:
 
         mock_review.assert_not_called()
         mock_full_workflow.assert_called_once()
+        mock_prd_workflow.assert_not_called()
         # The proposer_sm (3rd positional arg) should be the architect session
         assert mock_full_workflow.call_args.args[2] is sm
         # The requirement (7th positional arg) should be the task
         assert mock_full_workflow.call_args.args[5] == "design and implement the auth module"
+
+    @patch("myswat.cli.chat_cmd._run_prd_workflow_interactive")
+    @patch("myswat.cli.chat_cmd._run_full_workflow_interactive")
+    @patch("myswat.cli.chat_cmd._run_workflow_interactive")
+    @patch("myswat.cli.chat_cmd._send_with_timer")
+    @patch("myswat.cli.chat_cmd.PromptSession")
+    @patch("myswat.cli.chat_cmd.preload_model")
+    @patch("myswat.cli.chat_cmd.MySwatSettings")
+    @patch("myswat.cli.chat_cmd.TiDBPool")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
+    @patch("myswat.cli.chat_cmd.MemoryStore")
+    @patch("myswat.cli.chat_cmd.SessionManager")
+    def test_architect_prd_delegation_starts_prd_workflow(
+        self,
+        mock_sm_cls,
+        mock_store_cls,
+        mock_mig,
+        mock_pool_cls,
+        mock_settings_cls,
+        mock_preload,
+        mock_prompt_session_cls,
+        mock_send_timer,
+        mock_review,
+        mock_full_workflow,
+        mock_prd_workflow,
+    ):
+        from myswat.cli.chat_cmd import run_chat
+
+        settings = self._setup_mocks()
+        mock_settings_cls.return_value = settings
+
+        architect_row = _agent_row("architect")
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = _proj()
+        mock_store.get_agent.return_value = architect_row
+        mock_store.list_agents.return_value = [architect_row]
+        mock_store_cls.return_value = mock_store
+
+        sm = MagicMock()
+        sm.session = SimpleNamespace(session_uuid="uuid-1234")
+        sm.agent_id = 9
+        mock_sm_cls.return_value = sm
+
+        mock_send_timer.return_value = (
+            AgentResponse(
+                content="Sure\n```delegate\nMODE: prd\nTASK: write a PRD for billing revamp\n```",
+                exit_code=0,
+            ),
+            2.0,
+        )
+
+        prompt_session = MagicMock()
+        prompt_session.prompt.side_effect = ["write a proper PRD", "/quit"]
+        mock_prompt_session_cls.return_value = prompt_session
+
+        run_chat("proj", role="architect")
+
+        mock_review.assert_not_called()
+        mock_full_workflow.assert_not_called()
+        mock_prd_workflow.assert_called_once()
+        assert mock_prd_workflow.call_args.args[2] is sm
+        assert mock_prd_workflow.call_args.args[5] == "write a PRD for billing revamp"
 
     @patch("myswat.cli.chat_cmd._run_full_workflow_interactive")
     @patch("myswat.cli.chat_cmd._send_with_timer")
@@ -2042,3 +2158,109 @@ class TestRunChat:
         mock_prompt_session_cls.return_value = prompt_session
 
         run_chat("proj")
+
+    @patch("myswat.cli.chat_cmd._run_prd_workflow_interactive")
+    @patch("myswat.cli.chat_cmd.PromptSession")
+    @patch("myswat.cli.chat_cmd.preload_model")
+    @patch("myswat.cli.chat_cmd.MySwatSettings")
+    @patch("myswat.cli.chat_cmd.TiDBPool")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
+    @patch("myswat.cli.chat_cmd.MemoryStore")
+    @patch("myswat.cli.chat_cmd.SessionManager")
+    def test_prd_command_switches_to_architect_and_restores(
+        self,
+        mock_sm_cls,
+        mock_store_cls,
+        mock_mig,
+        mock_pool_cls,
+        mock_settings_cls,
+        mock_preload,
+        mock_prompt_session_cls,
+        mock_prd_workflow,
+    ):
+        """``/prd`` from a non-architect role temporarily switches to architect,
+        runs the PRD workflow, then restores the original role."""
+        from myswat.cli.chat_cmd import run_chat
+
+        settings = self._setup_mocks()
+        mock_settings_cls.return_value = settings
+
+        dev_row = _agent_row("developer")
+        arch_row = _agent_row("architect")
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = _proj()
+        mock_store.get_agent.side_effect = lambda _pid, role: {
+            "developer": dev_row,
+            "architect": arch_row,
+        }.get(role, dev_row)
+        mock_store.list_agents.return_value = [dev_row, arch_row]
+        mock_store_cls.return_value = mock_store
+
+        sm_instances = []
+
+        def _make_sm(*args, **kwargs):
+            sm = MagicMock()
+            sm.session = SimpleNamespace(session_uuid=f"uuid-{len(sm_instances)}")
+            sm.agent_id = len(sm_instances) + 1
+            sm_instances.append(sm)
+            return sm
+
+        mock_sm_cls.side_effect = _make_sm
+
+        prompt_session = MagicMock()
+        prompt_session.prompt.side_effect = ["/prd billing revamp", "/quit"]
+        mock_prompt_session_cls.return_value = prompt_session
+
+        run_chat("proj")
+
+        mock_prd_workflow.assert_called_once()
+        prd_task_arg = mock_prd_workflow.call_args.args[5]
+        assert prd_task_arg == "billing revamp"
+        # The initial developer SM is closed before switching to architect.
+        sm_instances[0].close.assert_called()
+
+    @patch("myswat.cli.chat_cmd.PromptSession")
+    @patch("myswat.cli.chat_cmd.preload_model")
+    @patch("myswat.cli.chat_cmd.MySwatSettings")
+    @patch("myswat.cli.chat_cmd.TiDBPool")
+    @patch("myswat.cli.chat_cmd.ensure_schema")
+    @patch("myswat.cli.chat_cmd.MemoryStore")
+    @patch("myswat.cli.chat_cmd.SessionManager")
+    @patch("myswat.cli.chat_cmd.console.print")
+    def test_prd_no_arg(
+        self,
+        mock_console_print,
+        mock_sm_cls,
+        mock_store_cls,
+        mock_mig,
+        mock_pool_cls,
+        mock_settings_cls,
+        mock_preload,
+        mock_prompt_session_cls,
+    ):
+        from myswat.cli.chat_cmd import run_chat
+
+        settings = self._setup_mocks()
+        mock_settings_cls.return_value = settings
+
+        agent_row = _agent_row()
+        mock_store = MagicMock()
+        mock_store.get_project_by_slug.return_value = _proj()
+        mock_store.get_agent.return_value = agent_row
+        mock_store.list_agents.return_value = [agent_row]
+        mock_store_cls.return_value = mock_store
+
+        sm = MagicMock()
+        sm.session = SimpleNamespace(session_uuid="uuid-1234")
+        mock_sm_cls.return_value = sm
+
+        prompt_session = MagicMock()
+        prompt_session.prompt.side_effect = ["/prd", "/quit"]
+        mock_prompt_session_cls.return_value = prompt_session
+
+        run_chat("proj")
+
+        printed = "\n".join(
+            str(call.args[0]) for call in mock_console_print.call_args_list if call.args
+        )
+        assert "Usage: /prd" in printed

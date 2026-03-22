@@ -212,6 +212,61 @@ def test_run_workflow_creates_item_and_wires_kernel(
 
 @patch("myswat.server.workflow_runner.submit_workflow_summary_learn_request")
 @patch("myswat.server.workflow_runner.WorkflowKernel")
+def test_run_workflow_resolves_prd_artifact_reference_before_kernel_run(
+    mock_kernel_cls,
+    mock_submit_learn,
+    tmp_path,
+):
+    store = Mock()
+    project = _project(str(tmp_path))
+    store.create_work_item.return_value = 43
+    store.get_artifact.return_value = {
+        "id": 12,
+        "work_item_id": 7,
+        "artifact_type": "prd_doc",
+        "title": "PRD: Billing Revamp",
+        "content": "# PRD: Billing Revamp\n\n## Problem Statement\n\nLegacy billing is brittle.",
+    }
+    store.get_work_item.side_effect = lambda item_id: (
+        {"id": 7, "project_id": 1} if item_id == 7 else None
+    )
+    store.get_agent.side_effect = lambda _project_id, role: {
+        "architect": _agent_row("architect", agent_id=30),
+        "developer": _agent_row("developer", agent_id=10),
+        "qa_main": _agent_row("qa_main", agent_id=20),
+        "qa_vice": None,
+    }.get(role)
+    kernel = Mock()
+    kernel.run.return_value = SimpleNamespace(success=True)
+    mock_kernel_cls.return_value = kernel
+
+    work_item_id = run_workflow(
+        "proj",
+        "PRD_ARTIFACT: 12\nImplement the first billing slice.",
+        workdir=None,
+        work_item_id=None,
+        mode=WorkMode.full,
+        auto_approve=True,
+        emit_console_output=False,
+        settings=_settings(),
+        store=store,
+        project_row=project,
+        service=MagicMock(),
+    )
+
+    assert work_item_id == 43
+    assert store.create_work_item.call_args.kwargs["title"] == "Implement the first billing slice."
+    assert store.create_work_item.call_args.kwargs["metadata_json"]["source_prd_artifact_id"] == 12
+    kernel.run.assert_called_once()
+    effective_requirement = kernel.run.call_args.args[0]
+    assert "# PRD: Billing Revamp" in effective_requirement
+    assert "## Additional Run Instructions" in effective_requirement
+    assert "Implement the first billing slice." in effective_requirement
+    mock_submit_learn.assert_called_once()
+
+
+@patch("myswat.server.workflow_runner.submit_workflow_summary_learn_request")
+@patch("myswat.server.workflow_runner.WorkflowKernel")
 def test_run_workflow_uses_requested_pause_status_when_cancelled(
     mock_kernel_cls,
     mock_submit_learn,
@@ -304,6 +359,47 @@ def test_run_workflow_handles_engine_failure_and_status_update_error(
         requirement="broken",
         final_status="blocked",
         final_summary="Workflow crashed: RuntimeError",
+        mode="develop",
+        workdir=str(tmp_path.resolve()),
+    )
+
+
+@patch("myswat.server.workflow_runner.submit_workflow_summary_learn_request")
+@patch("myswat.workflow.error_handler.handle_workflow_error")
+def test_run_workflow_blocks_existing_item_when_prd_resolution_fails(
+    mock_handle_error,
+    mock_submit_learn,
+    tmp_path,
+):
+    store = Mock()
+    project = _project(str(tmp_path))
+    store.get_artifact.return_value = None
+
+    work_item_id = run_workflow(
+        "proj",
+        "PRD_ARTIFACT: 999",
+        work_item_id=67,
+        mode=WorkMode.develop,
+        auto_approve=True,
+        emit_console_output=False,
+        settings=_settings(),
+        store=store,
+        project_row=project,
+        service=MagicMock(),
+    )
+
+    assert work_item_id == 67
+    mock_handle_error.assert_called_once()
+    store.update_work_item_status.assert_called_once_with(67, "blocked")
+    mock_submit_learn.assert_called_once_with(
+        store=store,
+        settings=ANY,
+        project_id=1,
+        source_work_item_id=67,
+        source_session_id=None,
+        requirement="PRD_ARTIFACT: 999",
+        final_status="blocked",
+        final_summary="Workflow crashed: ValueError",
         mode="develop",
         workdir=str(tmp_path.resolve()),
     )

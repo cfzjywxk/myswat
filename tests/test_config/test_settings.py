@@ -205,6 +205,7 @@ class TestWorkflowSettings:
         assert settings.dev_code_review_limit == 10
         assert settings.ga_plan_review_limit == 2
         assert settings.ga_test_review_limit == 2
+        assert settings.requirements_skills_root == ""
 
     def test_env_override_split_review_limit(self, monkeypatch):
         monkeypatch.setenv("MYSWAT_WORKFLOW_DEV_CODE_REVIEW_LIMIT", "4")
@@ -227,6 +228,11 @@ class TestWorkflowSettings:
         assert get_workflow_review_limit(legacy, "dev_code_review_limit") == 4
         assert get_workflow_review_limit(object(), "ga_plan_review_limit") == 2
         assert get_workflow_review_limit(object(), "dev_plan_review_limit", default=9) == 9
+
+    def test_env_override_requirements_skills_root(self, monkeypatch):
+        monkeypatch.setenv("MYSWAT_WORKFLOW_REQUIREMENTS_SKILLS_ROOT", "/tmp/skills")
+        settings = WorkflowSettings()
+        assert settings.requirements_skills_root == "/tmp/skills"
 
 
 # ---------------------------------------------------------------------------

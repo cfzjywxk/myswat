@@ -47,6 +47,10 @@ from myswat.workflow.prompts import (
     QA_GA_TEST_PLAN,
     QA_PLAN_REVIEW,
 )
+from myswat.workflow.requirements_skills import (
+    append_skill_guidance,
+    load_requirements_skill_pack,
+)
 from myswat.workflow.runtime import WorkflowRuntime
 
 
@@ -145,6 +149,7 @@ class WorkflowKernel:
         coordinator: WorkflowCoordinator | None = None,
         service: WorkflowCoordinator | None = None,
         repo_path: str | None = None,
+        requirements_skills_root: str | None = None,
     ) -> None:
         self._store = store
         self._coordinator = coordinator or service
@@ -226,6 +231,7 @@ class WorkflowKernel:
         self._repo_initial_dirty_paths: set[str] = set()
         self._repo_managed_paths: set[str] = set()
         self._repo_commits_created = False
+        self._requirements_skill_pack = load_requirements_skill_pack(requirements_skills_root)
 
     def _emit(
         self,
@@ -691,6 +697,30 @@ class WorkflowKernel:
             stage="repo",
         )
         return True
+
+    def _with_design_skill_guidance(self, prompt: str) -> str:
+        return append_skill_guidance(prompt, self._requirements_skill_pack.design_guidance())
+
+    def _with_design_review_guidance(self, prompt: str) -> str:
+        return append_skill_guidance(prompt, self._requirements_skill_pack.design_review_guidance())
+
+    def _with_plan_skill_guidance(self, prompt: str) -> str:
+        return append_skill_guidance(prompt, self._requirements_skill_pack.plan_guidance())
+
+    def _with_plan_review_guidance(self, prompt: str) -> str:
+        return append_skill_guidance(prompt, self._requirements_skill_pack.plan_review_guidance())
+
+    def _with_phase_skill_guidance(self, prompt: str) -> str:
+        return append_skill_guidance(prompt, self._requirements_skill_pack.phase_guidance())
+
+    def _with_code_review_guidance(self, prompt: str) -> str:
+        return append_skill_guidance(prompt, self._requirements_skill_pack.code_review_guidance())
+
+    def _with_test_plan_skill_guidance(self, prompt: str) -> str:
+        return append_skill_guidance(prompt, self._requirements_skill_pack.test_plan_guidance())
+
+    def _with_test_plan_review_guidance(self, prompt: str) -> str:
+        return append_skill_guidance(prompt, self._requirements_skill_pack.test_plan_review_guidance())
 
     def _stage_index(self, stage_name: str) -> int:
         if stage_name == "design":
@@ -1245,7 +1275,7 @@ class WorkflowKernel:
 
     def _run_design(self, requirement: str) -> tuple[str, bool]:
         owner = self._arch or self._dev
-        prompt = (
+        prompt = self._with_design_skill_guidance(
             ARCH_TECH_DESIGN.format(requirement=requirement)
             if owner is self._arch
             else DEV_TECH_DESIGN.format(requirement=requirement)
@@ -1275,21 +1305,31 @@ class WorkflowKernel:
             owner=owner,
             reviewers=reviewers,
             focus=requirement,
-            review_prompt_builder=lambda artifact, iteration, reviewer_role: QA_DESIGN_REVIEW.format(
-                context=f"Requirement:\n{requirement}",
-                design=artifact,
-                iteration=iteration,
+            review_prompt_builder=lambda artifact, iteration, reviewer_role: self._with_design_review_guidance(
+                QA_DESIGN_REVIEW.format(
+                    context=f"Requirement:\n{requirement}",
+                    design=artifact,
+                    iteration=iteration,
+                )
             ),
             revision_prompt_builder=(
-                (lambda artifact, feedback: ARCH_ADDRESS_DESIGN_COMMENTS.format(
-                    design=artifact,
-                    feedback=feedback,
-                ))
+                (
+                    lambda artifact, feedback: self._with_design_skill_guidance(
+                        ARCH_ADDRESS_DESIGN_COMMENTS.format(
+                            design=artifact,
+                            feedback=feedback,
+                        )
+                    )
+                )
                 if owner is self._arch
-                else (lambda artifact, feedback: DEV_ADDRESS_DESIGN_COMMENTS.format(
-                    design=artifact,
-                    feedback=feedback,
-                ))
+                else (
+                    lambda artifact, feedback: self._with_design_skill_guidance(
+                        DEV_ADDRESS_DESIGN_COMMENTS.format(
+                            design=artifact,
+                            feedback=feedback,
+                        )
+                    )
+                )
             ),
         )
         review_limit_reached = self._last_review_limit_reached
@@ -1309,15 +1349,23 @@ class WorkflowKernel:
             artifact_type="design_doc",
             artifact_title="Technical design",
             revision_prompt_builder=(
-                (lambda artifact, feedback: ARCH_ADDRESS_DESIGN_COMMENTS.format(
-                    design=artifact,
-                    feedback=feedback,
-                ))
+                (
+                    lambda artifact, feedback: self._with_design_skill_guidance(
+                        ARCH_ADDRESS_DESIGN_COMMENTS.format(
+                            design=artifact,
+                            feedback=feedback,
+                        )
+                    )
+                )
                 if owner is self._arch
-                else (lambda artifact, feedback: DEV_ADDRESS_DESIGN_COMMENTS.format(
-                    design=artifact,
-                    feedback=feedback,
-                ))
+                else (
+                    lambda artifact, feedback: self._with_design_skill_guidance(
+                        DEV_ADDRESS_DESIGN_COMMENTS.format(
+                            design=artifact,
+                            feedback=feedback,
+                        )
+                    )
+                )
             ),
         )
         return reviewed, ok
@@ -1327,7 +1375,9 @@ class WorkflowKernel:
         stage_run_id = self._queue_stage_task(
             owner=owner,
             stage_name="plan",
-            prompt=DEV_IMPLEMENTATION_PLAN.format(requirement=requirement, design=design),
+            prompt=self._with_plan_skill_guidance(
+                DEV_IMPLEMENTATION_PLAN.format(requirement=requirement, design=design)
+            ),
             focus=requirement + "\n\n" + design[:4000],
             artifact_type="implementation_plan",
             artifact_title="Implementation plan",
@@ -1347,14 +1397,18 @@ class WorkflowKernel:
             owner=owner,
             reviewers=self._qas,
             focus=requirement + "\n\n" + design[:4000],
-            review_prompt_builder=lambda artifact, iteration, reviewer_role: QA_PLAN_REVIEW.format(
-                context=f"Requirement:\n{requirement}\n\nApproved Design:\n{design}",
-                plan=artifact,
-                iteration=iteration,
+            review_prompt_builder=lambda artifact, iteration, reviewer_role: self._with_plan_review_guidance(
+                QA_PLAN_REVIEW.format(
+                    context=f"Requirement:\n{requirement}\n\nApproved Design:\n{design}",
+                    plan=artifact,
+                    iteration=iteration,
+                )
             ),
-            revision_prompt_builder=lambda artifact, feedback: DEV_ADDRESS_PLAN_COMMENTS.format(
-                plan=artifact,
-                feedback=feedback,
+            revision_prompt_builder=lambda artifact, feedback: self._with_plan_skill_guidance(
+                DEV_ADDRESS_PLAN_COMMENTS.format(
+                    plan=artifact,
+                    feedback=feedback,
+                )
             ),
         )
         review_limit_reached = self._last_review_limit_reached
@@ -1373,9 +1427,11 @@ class WorkflowKernel:
             focus=requirement + "\n\n" + design[:4000],
             artifact_type="implementation_plan",
             artifact_title="Implementation plan",
-            revision_prompt_builder=lambda artifact, feedback: DEV_ADDRESS_PLAN_COMMENTS.format(
-                plan=artifact,
-                feedback=feedback,
+            revision_prompt_builder=lambda artifact, feedback: self._with_plan_skill_guidance(
+                DEV_ADDRESS_PLAN_COMMENTS.format(
+                    plan=artifact,
+                    feedback=feedback,
+                )
             ),
         )
         return reviewed, ok
@@ -1394,7 +1450,7 @@ class WorkflowKernel:
         owner = self._dev
         stage_name = f"phase_{phase_index}"
         completed_phase_context = "\n".join(completed_summaries) or "None"
-        prompt = (
+        prompt = self._with_phase_skill_guidance(
             DEV_IMPLEMENT_PHASE.format(
                 phase_index=phase_index,
                 total_phases=total_phases,
@@ -1431,14 +1487,18 @@ class WorkflowKernel:
             owner=owner,
             reviewers=self._qas,
             focus=requirement + "\n\n" + phase_name,
-            review_prompt_builder=lambda artifact, iteration, reviewer_role: QA_CODE_REVIEW.format(
-                context=f"Requirement:\n{requirement}\n\nApproved Design:\n{design}\n\nPlan:\n{plan}",
-                summary=artifact,
-                iteration=iteration,
+            review_prompt_builder=lambda artifact, iteration, reviewer_role: self._with_code_review_guidance(
+                QA_CODE_REVIEW.format(
+                    context=f"Requirement:\n{requirement}\n\nApproved Design:\n{design}\n\nPlan:\n{plan}",
+                    summary=artifact,
+                    iteration=iteration,
+                )
             ),
-            revision_prompt_builder=lambda artifact, feedback: DEV_ADDRESS_CODE_COMMENTS.format(
-                summary=artifact,
-                feedback=feedback,
+            revision_prompt_builder=lambda artifact, feedback: self._with_phase_skill_guidance(
+                DEV_ADDRESS_CODE_COMMENTS.format(
+                    summary=artifact,
+                    feedback=feedback,
+                )
             ),
         )
         review_limit_reached = self._last_review_limit_reached
@@ -1474,10 +1534,12 @@ class WorkflowKernel:
         stage_run_id = self._queue_stage_task(
             owner=qa_lead,
             stage_name="test_plan",
-            prompt=QA_GA_TEST_PLAN.format(
-                requirement=requirement,
-                design=design,
-                dev_summary=completed_phase_context,
+            prompt=self._with_test_plan_skill_guidance(
+                QA_GA_TEST_PLAN.format(
+                    requirement=requirement,
+                    design=design,
+                    dev_summary=completed_phase_context,
+                )
             ),
             focus=requirement + "\n\n" + design[:4000],
             artifact_type="test_plan",
@@ -1498,14 +1560,18 @@ class WorkflowKernel:
             owner=qa_lead,
             reviewers=[self._dev],
             focus=requirement + "\n\n" + design[:4000],
-            review_prompt_builder=lambda artifact, iteration, reviewer_role: DEV_REVIEW_TEST_PLAN.format(
-                context=f"Requirement:\n{requirement}\n\nApproved Design:\n{design}",
-                test_plan=artifact,
-                iteration=iteration,
+            review_prompt_builder=lambda artifact, iteration, reviewer_role: self._with_test_plan_review_guidance(
+                DEV_REVIEW_TEST_PLAN.format(
+                    context=f"Requirement:\n{requirement}\n\nApproved Design:\n{design}",
+                    test_plan=artifact,
+                    iteration=iteration,
+                )
             ),
-            revision_prompt_builder=lambda artifact, feedback: QA_ADDRESS_TEST_PLAN_COMMENTS.format(
-                test_plan=artifact,
-                feedback=feedback,
+            revision_prompt_builder=lambda artifact, feedback: self._with_test_plan_skill_guidance(
+                QA_ADDRESS_TEST_PLAN_COMMENTS.format(
+                    test_plan=artifact,
+                    feedback=feedback,
+                )
             ),
         )
         review_limit_reached = self._last_review_limit_reached
@@ -1524,9 +1590,11 @@ class WorkflowKernel:
             focus=requirement + "\n\n" + design[:4000],
             artifact_type="test_plan",
             artifact_title="GA test plan",
-            revision_prompt_builder=lambda artifact, feedback: QA_ADDRESS_TEST_PLAN_COMMENTS.format(
-                test_plan=artifact,
-                feedback=feedback,
+            revision_prompt_builder=lambda artifact, feedback: self._with_test_plan_skill_guidance(
+                QA_ADDRESS_TEST_PLAN_COMMENTS.format(
+                    test_plan=artifact,
+                    feedback=feedback,
+                )
             ),
         )
         if not ok:

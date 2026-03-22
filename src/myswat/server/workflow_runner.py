@@ -18,6 +18,7 @@ from myswat.server.mcp_stdio import MySwatMCPDispatcher
 from myswat.server.workflow_client import LocalMCPToolClient, MCPWorkflowCoordinator
 from myswat.workflow.kernel import WorkflowKernel
 from myswat.workflow.modes import WorkMode
+from myswat.workflow.prd_support import derive_requirement_title, resolve_prd_requirement
 from myswat.workflow.runtime import WorkflowRuntime
 
 console = Console()
@@ -105,102 +106,132 @@ def run_workflow(
         store=store,
         project_row=project_row,
     )
-
-    dev_agent, qa_agents = get_workflow_agents(store, int(proj["id"]))
-    arch_agent = _get_architect_agent(store, int(proj["id"])) if mode in {WorkMode.full, WorkMode.design} else None
-
-    if work_item_id is None:
-        item_metadata: dict[str, object] = {
-            "work_mode": mode.value,
-            "execution_mode": "daemon",
-            "submitted_via": "daemon_api",
-            "requested_workdir": effective_workdir,
-        }
-        if with_ga_test:
-            item_metadata["with_ga_test"] = True
-        work_item_id = store.create_work_item(
-            project_id=int(proj["id"]),
-            title=requirement[:200],
-            description=requirement,
-            item_type="design" if mode == WorkMode.design else "code_change",
-            assigned_agent_id=int((arch_agent or dev_agent)["id"]),
-            metadata_json=item_metadata,
-        )
-
-    store.update_work_item_status(work_item_id, "in_progress")
-
-    arch_runtime = WorkflowRuntime(agent_row=arch_agent) if arch_agent is not None else None
-    dev_runtime = WorkflowRuntime(agent_row=dev_agent)
-    qa_runtimes = [WorkflowRuntime(agent_row=qa_agent) for qa_agent in qa_agents]
-
-    if emit_console_output:
-        console.print(f"[bold]Requirement:[/bold] {requirement}")
-        console.print(f"[dim]Work item: {work_item_id}[/dim]")
-
-    def _should_cancel() -> bool:
-        # The daemon cancellation path already cancels open coordination rows,
-        # notifies service waiters, and terminates managed worker processes.
-        # The server-side orchestrator only needs to observe the request.
-        return bool(external_cancel_event is not None and external_cancel_event.is_set())
-
-    service = service or MySwatToolService(store)
-    coordinator = MCPWorkflowCoordinator(LocalMCPToolClient(MySwatMCPDispatcher(service)))
-
-    poll_interval_value = getattr(settings.workflow, "assignment_poll_interval_seconds", 1.0)
-    try:
-        poll_interval_seconds = float(poll_interval_value)
-    except (TypeError, ValueError):
-        poll_interval_seconds = 1.0
-
-    timeout_value = getattr(settings.workflow, "assignment_timeout_seconds", 0)
-    try:
-        timeout_seconds_value = float(timeout_value)
-    except (TypeError, ValueError):
-        timeout_seconds_value = 0.0
-
-    engine = WorkflowKernel(
-        store=store,
-        coordinator=coordinator,
-        dev=dev_runtime,
-        qas=qa_runtimes,
-        arch=arch_runtime,
-        project_id=int(proj["id"]),
-        work_item_id=work_item_id,
-        mode=mode,
-        with_ga_test=with_ga_test,
-        design_plan_review_limit=get_workflow_review_limit(
-            settings.workflow,
-            "design_plan_review_limit",
-        ),
-        dev_plan_review_limit=get_workflow_review_limit(
-            settings.workflow,
-            "dev_plan_review_limit",
-        ),
-        dev_code_review_limit=get_workflow_review_limit(
-            settings.workflow,
-            "dev_code_review_limit",
-        ),
-        ga_plan_review_limit=get_workflow_review_limit(
-            settings.workflow,
-            "ga_plan_review_limit",
-        ),
-        ga_test_review_limit=get_workflow_review_limit(
-            settings.workflow,
-            "ga_test_review_limit",
-        ),
-        auto_approve=auto_approve,
-        should_cancel=_should_cancel,
-        assignment_poll_interval_seconds=poll_interval_seconds,
-        assignment_timeout_seconds=(
-            None if timeout_seconds_value <= 0 else timeout_seconds_value
-        ),
-        repo_path=effective_workdir,
-    )
-
+    submitted_requirement = requirement
+    requirement_for_learn = submitted_requirement
+    error_stage = "workflow_requirement_resolution"
     final_status = "blocked"
     final_summary = "Workflow blocked."
 
     try:
+        requirement_resolution = resolve_prd_requirement(
+            store=store,
+            project_id=int(proj["id"]),
+            requirement=requirement,
+        )
+        requirement = requirement_resolution.effective_requirement
+        requirement_for_learn = requirement
+        error_stage = "workflow_setup"
+
+        dev_agent, qa_agents = get_workflow_agents(store, int(proj["id"]))
+        arch_agent = (
+            _get_architect_agent(store, int(proj["id"]))
+            if mode in {WorkMode.full, WorkMode.design}
+            else None
+        )
+
+        if work_item_id is None:
+            item_metadata: dict[str, object] = {
+                "work_mode": mode.value,
+                "execution_mode": "daemon",
+                "submitted_via": "daemon_api",
+                "requested_workdir": effective_workdir,
+            }
+            if requirement_resolution.uses_prd_artifact:
+                item_metadata["source_prd_artifact_id"] = requirement_resolution.source_artifact_id
+                item_metadata["source_prd_work_item_id"] = requirement_resolution.source_work_item_id
+                if requirement_resolution.source_title:
+                    item_metadata["source_prd_title"] = requirement_resolution.source_title
+            if with_ga_test:
+                item_metadata["with_ga_test"] = True
+            work_item_id = store.create_work_item(
+                project_id=int(proj["id"]),
+                title=derive_requirement_title(
+                    submitted_requirement=submitted_requirement,
+                    resolution=requirement_resolution,
+                ),
+                description=submitted_requirement,
+                item_type="design" if mode == WorkMode.design else "code_change",
+                assigned_agent_id=int((arch_agent or dev_agent)["id"]),
+                metadata_json=item_metadata,
+            )
+
+        store.update_work_item_status(work_item_id, "in_progress")
+
+        arch_runtime = WorkflowRuntime(agent_row=arch_agent) if arch_agent is not None else None
+        dev_runtime = WorkflowRuntime(agent_row=dev_agent)
+        qa_runtimes = [WorkflowRuntime(agent_row=qa_agent) for qa_agent in qa_agents]
+
+        if emit_console_output:
+            console.print(f"[bold]Requirement:[/bold] {submitted_requirement}")
+            if requirement_resolution.uses_prd_artifact:
+                detail = f"Resolved PRD artifact #{requirement_resolution.source_artifact_id}"
+                if requirement_resolution.source_title:
+                    detail += f" ({requirement_resolution.source_title})"
+                console.print(f"[dim]{detail}[/dim]")
+            console.print(f"[dim]Work item: {work_item_id}[/dim]")
+
+        def _should_cancel() -> bool:
+            # The daemon cancellation path already cancels open coordination rows,
+            # notifies service waiters, and terminates managed worker processes.
+            # The server-side orchestrator only needs to observe the request.
+            return bool(external_cancel_event is not None and external_cancel_event.is_set())
+
+        service = service or MySwatToolService(store)
+        coordinator = MCPWorkflowCoordinator(LocalMCPToolClient(MySwatMCPDispatcher(service)))
+
+        poll_interval_value = getattr(settings.workflow, "assignment_poll_interval_seconds", 1.0)
+        try:
+            poll_interval_seconds = float(poll_interval_value)
+        except (TypeError, ValueError):
+            poll_interval_seconds = 1.0
+
+        timeout_value = getattr(settings.workflow, "assignment_timeout_seconds", 0)
+        try:
+            timeout_seconds_value = float(timeout_value)
+        except (TypeError, ValueError):
+            timeout_seconds_value = 0.0
+
+        engine = WorkflowKernel(
+            store=store,
+            coordinator=coordinator,
+            dev=dev_runtime,
+            qas=qa_runtimes,
+            arch=arch_runtime,
+            project_id=int(proj["id"]),
+            work_item_id=work_item_id,
+            mode=mode,
+            with_ga_test=with_ga_test,
+            design_plan_review_limit=get_workflow_review_limit(
+                settings.workflow,
+                "design_plan_review_limit",
+            ),
+            dev_plan_review_limit=get_workflow_review_limit(
+                settings.workflow,
+                "dev_plan_review_limit",
+            ),
+            dev_code_review_limit=get_workflow_review_limit(
+                settings.workflow,
+                "dev_code_review_limit",
+            ),
+            ga_plan_review_limit=get_workflow_review_limit(
+                settings.workflow,
+                "ga_plan_review_limit",
+            ),
+            ga_test_review_limit=get_workflow_review_limit(
+                settings.workflow,
+                "ga_test_review_limit",
+            ),
+            auto_approve=auto_approve,
+            should_cancel=_should_cancel,
+            assignment_poll_interval_seconds=poll_interval_seconds,
+            assignment_timeout_seconds=(
+                None if timeout_seconds_value <= 0 else timeout_seconds_value
+            ),
+            repo_path=effective_workdir,
+            requirements_skills_root=getattr(settings.workflow, "requirements_skills_root", ""),
+        )
+
+        error_stage = "workflow_execution"
         result = engine.run(requirement)
         if _should_cancel():
             current_item = store.get_work_item(work_item_id) or {}
@@ -218,15 +249,23 @@ def run_workflow(
             final_summary = failure_summary or "Workflow finished with unresolved review or test issues."
 
         store.update_work_item_status(work_item_id, final_status)
+    except typer.Exit:
+        raise
     except Exception as exc:
         from myswat.workflow.error_handler import WorkflowError, handle_workflow_error
 
+        if work_item_id is None:
+            raise
+
+        error_requirement = (
+            submitted_requirement if error_stage == "workflow_requirement_resolution" else requirement
+        )
         werr = WorkflowError(
             error=exc,
-            stage="workflow_execution",
+            stage=error_stage,
             context={
                 "project": project_slug,
-                "requirement": requirement[:500],
+                "requirement": error_requirement[:500],
                 "work_item_id": work_item_id,
             },
         )
@@ -245,7 +284,7 @@ def run_workflow(
                 project_id=int(proj["id"]),
                 source_work_item_id=work_item_id,
                 source_session_id=None,
-                requirement=requirement,
+                requirement=requirement_for_learn,
                 final_status=final_status,
                 final_summary=final_summary,
                 mode=mode.value,
