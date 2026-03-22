@@ -63,6 +63,14 @@ class PhaseResult:
     committed: bool = False
 
 
+@dataclass(frozen=True)
+class DeliverySlice:
+    title: str
+    execution_mode: str = ""
+    blocked_by: str = ""
+    parallelization_notes: str = ""
+
+
 @dataclass
 class GATestResult:
     test_plan: str = ""
@@ -722,6 +730,106 @@ class WorkflowKernel:
     def _with_test_plan_review_guidance(self, prompt: str) -> str:
         return append_skill_guidance(prompt, self._requirements_skill_pack.test_plan_review_guidance())
 
+    @staticmethod
+    def _extract_markdown_section(plan: str, *headings: str) -> list[str]:
+        heading_set = {heading.strip().lower() for heading in headings if heading.strip()}
+        if not heading_set:
+            return []
+
+        collected: list[str] = []
+        in_section = False
+        for line in plan.splitlines():
+            stripped = line.strip()
+            if not in_section:
+                if stripped.lower() in heading_set:
+                    in_section = True
+                continue
+            if stripped.startswith("## "):
+                break
+            collected.append(line.rstrip())
+        return collected
+
+    def _parse_delivery_slices(self, plan: str) -> list[DeliverySlice]:
+        section_lines = self._extract_markdown_section(
+            plan,
+            "## Delivery Slices",
+            "## Issue-Ready Delivery Slices",
+        )
+        if not section_lines:
+            return []
+
+        slices: list[DeliverySlice] = []
+        current: dict[str, str] | None = None
+
+        def _flush_current() -> None:
+            nonlocal current
+            if current is None:
+                return
+            title = current.get("title", "").strip()
+            if title:
+                slices.append(
+                    DeliverySlice(
+                        title=title,
+                        execution_mode=current.get("execution_mode", "").strip().upper(),
+                        blocked_by=current.get("blocked_by", "").strip(),
+                        parallelization_notes=current.get("parallelization_notes", "").strip(),
+                    )
+                )
+            current = None
+
+        for raw_line in section_lines:
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+
+            candidate = re.sub(r"^(?:[-*]\s+)?(?:#{1,6}\s+)?", "", stripped).strip()
+            slice_match = re.match(
+                r"^slice(?:\s+\d+)?\s*:\s*(.+?)(?:\s+\[(AFK|HITL)\])?$",
+                candidate,
+                re.IGNORECASE,
+            )
+            if slice_match:
+                _flush_current()
+                current = {
+                    "title": slice_match.group(1).strip(),
+                    "execution_mode": (slice_match.group(2) or "").strip(),
+                    "blocked_by": "",
+                    "parallelization_notes": "",
+                }
+                continue
+
+            if current is None:
+                continue
+
+            lowered = candidate.lower()
+            if lowered.startswith("type:") and not current.get("execution_mode"):
+                current["execution_mode"] = candidate.split(":", 1)[1].strip()
+            elif lowered.startswith("blocked by:"):
+                current["blocked_by"] = candidate.split(":", 1)[1].strip()
+            elif lowered.startswith("parallelization notes:"):
+                current["parallelization_notes"] = candidate.split(":", 1)[1].strip()
+            elif lowered.startswith("parallel notes:"):
+                current["parallelization_notes"] = candidate.split(":", 1)[1].strip()
+
+        _flush_current()
+        return slices
+
+    def _format_delivery_slice_todos(self, plan: str) -> list[str]:
+        slices = self._parse_delivery_slices(plan)
+        if slices:
+            todos: list[str] = []
+            for slice_item in slices[:8]:
+                label = f"Slice: {slice_item.title}"
+                if slice_item.execution_mode:
+                    label += f" [{slice_item.execution_mode}]"
+                if slice_item.blocked_by and slice_item.blocked_by.lower() != "none":
+                    label += f" - Blocked by: {slice_item.blocked_by}"
+                todos.append(label)
+            return todos
+
+        phases = self._parse_phases(plan)
+        return [f"Phase {index}: {name}" for index, name in enumerate(phases[:8], start=1)]
+
     def _stage_index(self, stage_name: str) -> int:
         if stage_name == "design":
             return 10
@@ -1271,7 +1379,14 @@ class WorkflowKernel:
                     else:
                         phases.append(rest.strip())
                     break
-        return phases or ["Implementation"]
+        if phases:
+            return phases
+
+        delivery_slices = self._parse_delivery_slices(plan)
+        if delivery_slices:
+            return [slice_item.title for slice_item in delivery_slices]
+
+        return ["Implementation"]
 
     def _run_design(self, requirement: str) -> tuple[str, bool]:
         owner = self._arch or self._dev
@@ -1434,6 +1549,13 @@ class WorkflowKernel:
                 )
             ),
         )
+        if ok:
+            self._record_status(
+                owner,
+                stage="plan",
+                summary="Implementation plan approved and delivery slices captured.",
+                next_todos=self._format_delivery_slice_todos(reviewed),
+            )
         return reviewed, ok
 
     def _run_phase(

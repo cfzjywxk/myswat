@@ -2298,6 +2298,13 @@ def test_kernel_parses_completed_phase_rows_and_phase_names():
     assert results[1].review_passed is False
     assert results[1].committed is False
     assert kernel._parse_phases("\nPhase Alpha\nStep 2) Ship\n") == ["Alpha", "Ship"]
+    assert kernel._parse_phases(
+        "\n## Delivery Slices\n"
+        "Slice 1: Build auth [AFK]\n"
+        "- Blocked by: none\n"
+        "Slice 2: Build billing [HITL]\n"
+        "- Blocked by: Slice 1\n"
+    ) == ["Build auth", "Build billing"]
 
     store.list_artifacts.return_value = [
         {
@@ -2735,3 +2742,62 @@ def test_plan_phase_and_test_prompts_include_skill_pack_guidance(tmp_path):
     test_stage = test_service.start_stage_run.call_args.args[0]
     assert "acceptance-criteria coverage map" in test_stage.task_prompt
     assert "merge gate" in test_stage.task_prompt
+
+
+def test_run_plan_records_delivery_slices_in_status():
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=21,
+        mode=WorkMode.develop,
+        auto_approve=True,
+    )
+
+    with patch.object(
+        kernel,
+        "_wait_for_stage_result",
+        return_value=SimpleNamespace(status="completed", artifact_content="draft", artifact_id=1000),
+    ):
+        with patch.object(
+            kernel,
+            "_run_review_loop",
+            return_value=(
+                "## Delivery Slices\n"
+                "Slice 1: Build auth [AFK]\n"
+                "- Blocked by: none\n"
+                "Slice 2: Build billing [HITL]\n"
+                "- Blocked by: Slice 1\n",
+                1,
+                True,
+            ),
+        ):
+            with patch.object(
+                kernel,
+                "_checkpoint",
+                return_value=(
+                    "## Delivery Slices\n"
+                    "Slice 1: Build auth [AFK]\n"
+                    "- Blocked by: none\n"
+                    "Slice 2: Build billing [HITL]\n"
+                    "- Blocked by: Slice 1\n",
+                    True,
+                ),
+            ):
+                reviewed, ok = kernel._run_plan("req", "design")
+
+    assert ok is True
+    assert "## Delivery Slices" in reviewed
+    status_request = service.report_status.call_args.args[0]
+    assert status_request.stage == "plan"
+    assert status_request.next_todos == [
+        "Slice: Build auth [AFK]",
+        "Slice: Build billing [HITL] - Blocked by: Slice 1",
+    ]
