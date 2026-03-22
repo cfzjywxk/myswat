@@ -88,8 +88,6 @@ class DaemonClient:
             parsed = json.loads(body)
         except json.JSONDecodeError as exc:
             raise DaemonClientError(f"Invalid daemon response: {body[:200]}") from exc
-        if response.status >= 400:
-            raise DaemonClientError(str(parsed.get("error") or parsed))
         if isinstance(parsed, dict) and parsed.get("error"):
             raise DaemonClientError(str(parsed["error"]))
         return parsed if isinstance(parsed, dict) else {"result": parsed}

@@ -79,6 +79,58 @@ def test_load_project_context_normalizes_workdir(tmp_path):
     assert resolved_workdir == str(Path(workdir).resolve())
 
 
+@patch("myswat.server.workflow_runner.MemoryStore")
+@patch("myswat.server.workflow_runner.ensure_schema")
+@patch("myswat.server.workflow_runner.TiDBPool")
+def test_load_project_context_builds_store_when_missing(
+    mock_pool_cls,
+    mock_ensure_schema,
+    mock_store_cls,
+):
+    settings = SimpleNamespace(
+        tidb=object(),
+        embedding=SimpleNamespace(tidb_model="tidb-model", backend="local"),
+    )
+    store = Mock()
+    store.get_project_by_slug.return_value = {
+        "id": 1,
+        "slug": "proj",
+        "name": "Proj",
+        "repo_path": None,
+    }
+    mock_store_cls.return_value = store
+
+    resolved_settings, resolved_store, resolved_project, resolved_workdir = load_project_context(
+        "proj",
+        None,
+        settings=settings,
+    )
+
+    assert resolved_settings is settings
+    assert resolved_store is store
+    assert resolved_project == store.get_project_by_slug.return_value
+    assert resolved_workdir is None
+    mock_pool_cls.assert_called_once_with(settings.tidb)
+    mock_ensure_schema.assert_called_once_with(mock_pool_cls.return_value)
+    mock_store_cls.assert_called_once_with(
+        mock_pool_cls.return_value,
+        tidb_embedding_model="tidb-model",
+        embedding_backend="local",
+    )
+
+
+def test_get_workflow_agents_requires_developer():
+    store = Mock()
+    store.get_agent.side_effect = lambda _project_id, role: {
+        "developer": None,
+        "qa_main": _agent_row("qa_main", agent_id=20),
+        "qa_vice": None,
+    }.get(role)
+
+    with pytest.raises(ClickExit):
+        get_workflow_agents(store, 1)
+
+
 def test_get_workflow_agents_requires_qa():
     store = Mock()
     store.get_agent.side_effect = lambda _project_id, role: {
@@ -320,3 +372,103 @@ def test_run_workflow_marks_blocked_when_engine_returns_failure_summary(
         mode="develop",
         workdir=str(tmp_path.resolve()),
     )
+
+
+@patch("myswat.server.workflow_runner.submit_workflow_summary_learn_request")
+@patch("myswat.server.workflow_runner.WorkflowKernel")
+def test_run_workflow_defaults_cancelled_status_and_assignment_fallbacks(
+    mock_kernel_cls,
+    mock_submit_learn,
+    tmp_path,
+):
+    store = Mock()
+    project = _project(str(tmp_path))
+    settings = _settings()
+    settings.workflow.assignment_poll_interval_seconds = object()
+    settings.workflow.assignment_timeout_seconds = object()
+    store.get_work_item.return_value = {"status": "pending_cancel"}
+    store.get_agent.side_effect = lambda _project_id, role: {
+        "developer": _agent_row("developer", agent_id=10),
+        "qa_main": _agent_row("qa_main", agent_id=20),
+        "qa_vice": None,
+    }.get(role)
+    mock_kernel_cls.return_value = Mock(run=Mock(return_value=SimpleNamespace(success=True)))
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    work_item_id = run_workflow(
+        "proj",
+        "cancel this",
+        work_item_id=78,
+        mode=WorkMode.develop,
+        auto_approve=True,
+        external_cancel_event=cancel_event,
+        emit_console_output=False,
+        settings=settings,
+        store=store,
+        project_row=project,
+        service=MagicMock(),
+    )
+
+    assert work_item_id == 78
+    kernel_kwargs = mock_kernel_cls.call_args.kwargs
+    assert kernel_kwargs["assignment_poll_interval_seconds"] == 1.0
+    assert kernel_kwargs["assignment_timeout_seconds"] is None
+    store.update_work_item_status.assert_any_call(78, "cancelled")
+    mock_submit_learn.assert_called_once_with(
+        store=store,
+        settings=ANY,
+        project_id=1,
+        source_work_item_id=78,
+        source_session_id=None,
+        requirement="cancel this",
+        final_status="cancelled",
+        final_summary="Workflow cancelled.",
+        mode="develop",
+        workdir=str(tmp_path.resolve()),
+    )
+
+
+@patch("myswat.server.workflow_runner.submit_workflow_summary_learn_request")
+@patch("myswat.server.workflow_runner.console.print")
+@patch("myswat.server.workflow_runner.WorkflowKernel")
+def test_run_workflow_prints_progress_and_ignores_summary_learn_failures(
+    mock_kernel_cls,
+    mock_console_print,
+    mock_submit_learn,
+    tmp_path,
+):
+    store = Mock()
+    project = _project(str(tmp_path))
+    store.get_agent.side_effect = lambda _project_id, role: {
+        "developer": _agent_row("developer", agent_id=10),
+        "qa_main": _agent_row("qa_main", agent_id=20),
+        "qa_vice": None,
+    }.get(role)
+    mock_kernel_cls.return_value = Mock(
+        run=Mock(return_value=SimpleNamespace(success=False, failure_summary="   ")),
+    )
+    mock_submit_learn.side_effect = RuntimeError("learn down")
+
+    work_item_id = run_workflow(
+        "proj",
+        "needs help",
+        work_item_id=53,
+        mode=WorkMode.develop,
+        auto_approve=True,
+        emit_console_output=True,
+        settings=_settings(),
+        store=store,
+        project_row=project,
+        service=MagicMock(),
+    )
+
+    assert work_item_id == 53
+    store.update_work_item_status.assert_any_call(53, "in_progress")
+    store.update_work_item_status.assert_any_call(53, "blocked")
+    assert mock_submit_learn.call_args.kwargs["final_summary"] == (
+        "Workflow finished with unresolved review or test issues."
+    )
+    mock_console_print.assert_any_call("[bold]Requirement:[/bold] needs help")
+    mock_console_print.assert_any_call("[dim]Work item: 53[/dim]")
+    mock_console_print.assert_any_call("\n[dim]Workflow state persisted to TiDB.[/dim]")
