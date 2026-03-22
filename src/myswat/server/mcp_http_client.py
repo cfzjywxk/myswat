@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from urllib.error import URLError
+import socket
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
@@ -37,11 +38,27 @@ class MCPHTTPClient:
         try:
             with urlopen(request, timeout=self._timeout) as response:
                 body = response.read().decode("utf-8")
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise MCPHTTPClientError(
+                f"MCP endpoint returned HTTP {exc.code} for {name}: {body[:200] or exc.reason}"
+            ) from exc
+        except (TimeoutError, socket.timeout) as exc:
+            raise MCPHTTPClientError(
+                f"MCP request timed out after {self._timeout}s: {name}"
+            ) from exc
         except URLError as exc:
-            raise MCPHTTPClientError(f"MCP endpoint is unavailable at {self._endpoint}: {exc}") from exc
-        parsed = json.loads(body) if body else {}
+            raise MCPHTTPClientError(
+                f"MCP endpoint is unavailable at {self._endpoint}: {exc}"
+            ) from exc
+        try:
+            parsed = json.loads(body) if body else {}
+        except json.JSONDecodeError as exc:
+            raise MCPHTTPClientError(f"Invalid MCP response: {body[:200]}") from exc
         if isinstance(parsed, dict) and parsed.get("error"):
-            raise MCPHTTPClientError(str(parsed["error"].get("message") or parsed["error"]))
+            raise MCPHTTPClientError(
+                str(parsed["error"].get("message") or parsed["error"])
+            )
         result = parsed.get("result", {}) if isinstance(parsed, dict) else {}
         if not isinstance(result, dict):
             raise MCPHTTPClientError(f"Invalid MCP response: {result!r}")
@@ -49,5 +66,7 @@ class MCPHTTPClient:
         if structured is None:
             return {}
         if not isinstance(structured, dict):
-            raise MCPHTTPClientError(f"Missing structuredContent in MCP response: {result!r}")
+            raise MCPHTTPClientError(
+                f"Missing structuredContent in MCP response: {result!r}"
+            )
         return structured
