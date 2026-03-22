@@ -241,12 +241,21 @@ def _extract_delegation(text: str) -> tuple[str, str] | None:
 
 
 def _extract_prd_block(text: str) -> str | None:
-    import re
-
-    match = re.search(r"```prd\s*\n(.*?)```", text, re.DOTALL | re.IGNORECASE)
-    if not match:
+    lines = text.splitlines()
+    start_index: int | None = None
+    for index, line in enumerate(lines):
+        if line.strip().lower() == "```prd":
+            start_index = index + 1
+            break
+    if start_index is None:
         return None
-    return match.group(1).strip()
+
+    collected: list[str] = []
+    for line in lines[start_index:]:
+        if line.strip() == "```":
+            return "\n".join(collected).strip()
+        collected.append(line)
+    return None
 
 
 def _cancel_prd_work_item(store: MemoryStore, work_item_id: int, summary: str) -> None:
@@ -265,6 +274,25 @@ def _cancel_prd_work_item(store: MemoryStore, work_item_id: int, summary: str) -
         summary=summary,
         from_role="user",
         to_role="architect",
+    )
+
+
+def _block_prd_work_item(
+    store: MemoryStore,
+    work_item_id: int,
+    *,
+    summary: str,
+    next_todo: str,
+    updated_by_agent_id: int | None = None,
+) -> None:
+    store.update_work_item_status(work_item_id, "blocked")
+    store.update_work_item_state(
+        work_item_id,
+        current_stage="prd_blocked",
+        latest_summary=summary,
+        next_todos=[next_todo],
+        open_issues=[],
+        updated_by_agent_id=updated_by_agent_id,
     )
 
 
@@ -1135,15 +1163,24 @@ def _run_prd_workflow_interactive(
                 task_description=f"PRD: {task[:120]}",
             )
         except (DaemonClientError, MCPHTTPClientError) as exc:
-            store.update_work_item_status(work_item_id, "blocked")
-            store.update_work_item_state(
+            _block_prd_work_item(
+                store,
                 work_item_id,
-                current_stage="prd_blocked",
-                latest_summary=str(exc),
-                next_todos=["Resume PRD drafting in chat after the architect session is available again."],
+                summary=str(exc),
+                next_todo="Resume PRD drafting in chat after the architect session is available again.",
                 updated_by_agent_id=proposer_sm.agent_id,
             )
             _print_daemon_error(exc)
+            return
+        except Exception as exc:
+            _block_prd_work_item(
+                store,
+                work_item_id,
+                summary=f"PRD workflow crashed: {type(exc).__name__}: {exc}",
+                next_todo="Retry the PRD workflow after resolving the unexpected chat failure.",
+                updated_by_agent_id=proposer_sm.agent_id,
+            )
+            console.print(f"[red]PRD workflow crashed: {exc}[/red]")
             return
 
         if response.cancelled:

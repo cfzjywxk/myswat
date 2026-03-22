@@ -317,6 +317,32 @@ class TestRunPRDWorkflowInteractive:
         )
         store.update_work_item_status.assert_any_call(41, "approved")
 
+    @patch("myswat.cli.chat_cmd.console.print")
+    @patch("myswat.cli.chat_cmd._send_with_timer", side_effect=RuntimeError("boom"))
+    def test_blocks_work_item_on_unexpected_exception(
+        self,
+        mock_send_with_timer,
+        mock_console_print,
+    ):
+        store = MagicMock()
+        store.create_work_item.return_value = 41
+        proposer_sm = MagicMock()
+        proposer_sm.agent_id = 7
+
+        _run_prd_workflow_interactive(
+            store=store,
+            proj=_proj(),
+            proposer_sm=proposer_sm,
+            workdir="/tmp",
+            settings=MagicMock(),
+            task="Write a PRD for billing",
+            prompt_session=MagicMock(),
+        )
+
+        mock_send_with_timer.assert_called_once()
+        store.update_work_item_status.assert_any_call(41, "blocked")
+        assert any("PRD workflow crashed" in str(call) for call in mock_console_print.call_args_list)
+
 
 class TestRunWorkflow:
     @patch("myswat.cli.chat_cmd._run_remote_workflow")

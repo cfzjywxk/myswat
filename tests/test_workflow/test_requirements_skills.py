@@ -53,3 +53,18 @@ def test_append_skill_guidance_appends_extra_section():
 
     assert result.startswith("base prompt")
     assert result.endswith("extra guidance\n")
+
+
+def test_design_guidance_is_dedented(tmp_path):
+    skills_root = tmp_path / "skills"
+    write_prd_dir = skills_root / "write-a-prd"
+    write_prd_dir.mkdir(parents=True)
+    (skills_root / "tdd").mkdir(parents=True)
+    (write_prd_dir / "SKILL.md").write_text("---\nname: write-a-prd\n---\n", encoding="utf-8")
+    ((skills_root / "tdd") / "SKILL.md").write_text("---\nname: tdd\n---\n", encoding="utf-8")
+
+    pack = load_requirements_skill_pack(skills_root)
+    guidance = pack.design_guidance()
+
+    assert guidance.startswith("## Integrated Requirement Skills")
+    assert "\n            ## Integrated Requirement Skills" not in guidance
