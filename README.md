@@ -13,6 +13,10 @@ You architect. Agents build and review. **MySwat connects them.**
 
 MySwat automates the copy-paste routing between AI agents. It persists shared workflow state to TiDB, exposes coordination through an MCP server, and loops dev/QA review cycles until LGTM — while you stay in the architect seat.
 
+## Getting Started
+
+New to MySwat? Follow the **[Installation Guide](docs/installation.md)** for step-by-step setup: cloning, TiDB Cloud configuration, agent CLI installation, and running your first workflow.
+
 ## Quick Start
 
 ```bash
@@ -67,10 +71,6 @@ myswat search "bloom filter" -p my-project
 - Python 3.12+
 - [TiDB Cloud](https://tidbcloud.com) account (free tier works)
 - At least one AI CLI: [Codex](https://github.com/openai/codex), [Claude Code](https://claude.com/claude-code), or [Kimi](https://www.kimi.com/code)
-
-## Getting Started
-
-New to MySwat? Follow the **[Installation Guide](docs/installation.md)** for step-by-step setup: cloning, TiDB Cloud configuration, agent CLI installation, and running your first workflow.
 
 ## Documentation
 
