@@ -5,6 +5,7 @@ from __future__ import annotations
 import typer
 from rich.console import Console
 
+from myswat.cli.daemon_errors import print_daemon_error
 from myswat.config.settings import MySwatSettings
 from myswat.server.control_client import DaemonClient, DaemonClientError
 from myswat.workflow.modes import WorkMode
@@ -13,8 +14,7 @@ console = Console()
 
 
 def _print_daemon_error(exc: Exception) -> None:
-    console.print(f"[red]{exc}[/red]")
-    console.print("[dim]Start the daemon first: myswat server[/dim]")
+    print_daemon_error(exc, console=console)
 
 
 def _validate_daemon_workflow_request(

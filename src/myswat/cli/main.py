@@ -6,6 +6,7 @@ import time
 
 import typer
 
+from myswat.cli.daemon_errors import print_daemon_error
 from myswat.cli.progress import _describe_process_event
 from myswat.cli.memory_cmd import memory_app, search as run_search_command
 from myswat.workflow.modes import WorkMode, resolve_cli_work_mode
@@ -263,8 +264,7 @@ def work(
     try:
         result = client.submit_work(**submit_kwargs)
     except DaemonClientError as exc:
-        console.print(f"[red]{exc}[/red]")
-        console.print(f"[dim]Start the daemon first: myswat server[/dim]")
+        print_daemon_error(exc, console=console)
         raise typer.Exit(1)
 
     console.print(f"[bold]Queued workflow:[/bold] {requirement}")
@@ -346,8 +346,7 @@ def stop(
     try:
         result = client.control_work(project=project, work_item_id=work_item_id, action="cancel")
     except DaemonClientError as exc:
-        console.print(f"[red]{exc}[/red]")
-        console.print(f"[dim]Start the daemon first: myswat server[/dim]")
+        print_daemon_error(exc, console=console)
         raise typer.Exit(1) from exc
 
     console.print(f"[green]Cancellation requested for work item {result.get('work_item_id')}.[/green]")
@@ -466,8 +465,7 @@ def init(
             description=description,
         )
     except DaemonClientError as exc:
-        console.print(f"[red]{exc}[/red]")
-        console.print(f"[dim]Start the daemon first: myswat server[/dim]")
+        print_daemon_error(exc, console=console)
         raise typer.Exit(1)
 
     console.print(f"[green]Project initialized through daemon.[/green]")
@@ -504,8 +502,7 @@ def cleanup(
     try:
         result = client.cleanup_project(project=project)
     except DaemonClientError as exc:
-        console.print(f"[red]{exc}[/red]")
-        console.print(f"[dim]Start the daemon first: myswat server[/dim]")
+        print_daemon_error(exc, console=console)
         raise typer.Exit(1)
 
     console.print(f"[green]Project '{result.get('project') or project}' removed.[/green]")

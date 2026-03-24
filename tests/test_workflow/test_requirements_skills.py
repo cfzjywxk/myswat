@@ -105,6 +105,26 @@ def test_design_review_guidance_includes_deep_module_criteria(tmp_path):
     assert "alternatives" in guidance.lower()
 
 
+def test_plan_guidance_encourages_parallel_independent_slices(tmp_path):
+    pack = _make_skill_pack(tmp_path)
+    guidance = pack.plan_guidance()
+
+    assert "independent slices run in parallel" in guidance.lower()
+    assert "compile, test, or run" in guidance.lower()
+    assert "concrete data, api, or schema dependency" in guidance.lower()
+    assert "shared contract slice" in guidance.lower()
+
+
+def test_plan_review_guidance_rejects_artificial_linear_dependencies(tmp_path):
+    pack = _make_skill_pack(tmp_path)
+    guidance = pack.plan_review_guidance()
+
+    assert "compile, test, or run" in guidance.lower()
+    assert "concrete data, api, or schema dependency" in guidance.lower()
+    assert "shared contract slice" in guidance.lower()
+    assert "fail to compile without slice a's code" not in guidance.lower()
+
+
 def test_phase_guidance_includes_vertical_slice_tdd(tmp_path):
     pack = _make_skill_pack(tmp_path)
     guidance = pack.phase_guidance()

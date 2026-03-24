@@ -16,6 +16,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from myswat.agents.base import AgentResponse
+from myswat.cli.daemon_errors import print_daemon_error
 from myswat.cli.prompting import create_prompt_session
 from myswat.cli.progress import (
     _describe_process_event,
@@ -404,16 +405,7 @@ def _strip_wrapping_quotes(text: str) -> str:
 
 
 def _print_daemon_error(exc: Exception) -> None:
-    message = str(exc)
-    console.print(f"[red]{message}[/red]")
-    lowered = message.lower()
-    if "unavailable at" in lowered or "connection refused" in lowered:
-        console.print("[dim]Start the daemon first: myswat server[/dim]")
-        return
-    if "timed out" in lowered:
-        console.print(
-            "[dim]The daemon is running, but the request is still in progress or blocked.[/dim]"
-        )
+    print_daemon_error(exc, console=console)
 
 
 def _public_chat_work_mode(mode: WorkMode) -> WorkMode:

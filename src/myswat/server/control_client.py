@@ -22,7 +22,9 @@ class DaemonClient:
     def __init__(self, settings: MySwatSettings | None = None) -> None:
         self._settings = settings or MySwatSettings()
         self._base_url = f"http://{self._settings.server.host}:{self._settings.server.port}"
-        self._timeout = max(1, int(self._settings.server.request_timeout_seconds))
+        # Local daemon control requests may legitimately take minutes. Do not
+        # impose a transport deadline here.
+        self._timeout: int | None = None
 
     @property
     def base_url(self) -> str:
@@ -51,14 +53,12 @@ class DaemonClient:
         method: str,
         path: str,
         payload: dict | None = None,
-        timeout_seconds: int | None = None,
     ) -> dict:
         data = None
         headers = {}
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        timeout = self._timeout if timeout_seconds is None else max(1, int(timeout_seconds))
         request = Request(
             url=self._base_url + path,
             data=data,
@@ -66,15 +66,20 @@ class DaemonClient:
             method=method,
         )
         try:
-            with urlopen(request, timeout=timeout) as response:
+            with urlopen(request, timeout=self._timeout) as response:
                 body = response.read().decode("utf-8")
         except HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             message = self._parse_error_body(body) or str(exc)
             raise DaemonClientError(message) from exc
         except (TimeoutError, socket.timeout) as exc:
+            if self._timeout is None:
+                raise DaemonClientError(
+                    f"MySwat daemon request timed out: {method} {self._base_url + path}",
+                    retryable=True,
+                ) from exc
             raise DaemonClientError(
-                f"MySwat daemon request timed out after {timeout}s: {method} {self._base_url + path}",
+                f"MySwat daemon request timed out after {self._timeout}s: {method} {self._base_url + path}",
                 retryable=True,
             ) from exc
         except URLError as exc:
@@ -157,5 +162,4 @@ class DaemonClient:
             payload={
                 "project": project,
             },
-            timeout_seconds=max(self._timeout, 300),
         )

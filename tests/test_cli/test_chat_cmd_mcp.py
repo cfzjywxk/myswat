@@ -357,7 +357,7 @@ def test_print_daemon_error_clarifies_timeout_without_start_hint():
     printed: list[str] = []
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("myswat.cli.chat_cmd.console.print", lambda message: printed.append(str(message)))
-        _print_daemon_error(RuntimeError("MCP request timed out after 30s: send_chat_message"))
+        _print_daemon_error(RuntimeError("MCP request timed out: send_chat_message"))
     assert "timed out" in printed[0]
     assert "still in progress or blocked" in printed[1]
     assert all("myswat server" not in line for line in printed[1:])

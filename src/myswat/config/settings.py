@@ -95,9 +95,6 @@ class WorkflowSettings(BaseSettings):
 class ServerSettings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8765
-    # HTTP timeout for short control-plane daemon requests. Long-lived MCP chat
-    # sends and managed-worker RPCs intentionally do not use this timeout.
-    request_timeout_seconds: int = 30
 
     model_config = {"env_prefix": "MYSWAT_SERVER_"}
 

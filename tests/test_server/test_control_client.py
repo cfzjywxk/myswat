@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+from types import SimpleNamespace
 from urllib.error import HTTPError, URLError
 
 import pytest
@@ -71,13 +72,13 @@ def test_request_wraps_timeout_as_retryable_client_error(monkeypatch):
     )
     client = DaemonClient()
 
-    with pytest.raises(DaemonClientError, match="timed out after") as exc_info:
+    with pytest.raises(DaemonClientError, match="MySwat daemon request timed out:") as exc_info:
         client.get_work_item(project="fib-demo", work_item_id=41)
 
     assert exc_info.value.retryable is True
 
 
-def test_cleanup_project_uses_extended_timeout(monkeypatch):
+def test_cleanup_project_is_timeoutless(monkeypatch):
     observed: dict[str, object] = {}
 
     class _Response:
@@ -104,7 +105,7 @@ def test_cleanup_project_uses_extended_timeout(monkeypatch):
 
     assert result == {"ok": True}
     assert observed["url"].endswith("/api/project-cleanup")
-    assert observed["timeout"] == 300
+    assert observed["timeout"] is None
 
 
 def test_submit_work_includes_with_ga_test_when_requested(monkeypatch):
@@ -165,6 +166,7 @@ def test_health_uses_get_and_returns_empty_mapping_for_empty_body(monkeypatch):
     assert client.health() == {}
     assert observed["url"] == client.base_url + "/api/health"
     assert observed["method"] == "GET"
+    assert observed["timeout"] is None
 
 
 def test_request_wraps_url_error_as_retryable_client_error(monkeypatch):
@@ -212,7 +214,30 @@ def test_request_wraps_non_mapping_json_payload(monkeypatch):
     assert client.health() == {"result": 7}
 
 
-def test_init_project_and_control_work_send_expected_payloads(monkeypatch):
+def test_daemon_client_ignores_request_timeout_setting(monkeypatch):
+    observed: dict[str, object] = {}
+
+    def _urlopen(request, timeout):
+        observed["url"] = request.full_url
+        observed["timeout"] = timeout
+        return _Response('{"ok": true}')
+
+    monkeypatch.setattr("myswat.server.control_client.urlopen", _urlopen)
+    settings = SimpleNamespace(
+        server=SimpleNamespace(
+            host="127.0.0.1",
+            port=8765,
+            request_timeout_seconds=1,
+        )
+    )
+    client = DaemonClient(settings)
+
+    assert client.health() == {"ok": True}
+    assert observed["url"] == client.base_url + "/api/health"
+    assert observed["timeout"] is None
+
+
+def test_init_project_and_control_work_send_expected_payloads_without_timeout(monkeypatch):
     observed: list[dict[str, object]] = []
 
     def _urlopen(request, timeout):
@@ -220,6 +245,7 @@ def test_init_project_and_control_work_send_expected_payloads(monkeypatch):
             {
                 "url": request.full_url,
                 "payload": json.loads(request.data.decode("utf-8")),
+                "timeout": timeout,
             }
         )
         return _Response('{"ok": true}')
@@ -238,6 +264,7 @@ def test_init_project_and_control_work_send_expected_payloads(monkeypatch):
                 "repo_path": "/tmp/repo",
                 "description": "demo",
             },
+            "timeout": None,
         },
         {
             "url": client.base_url + "/api/work-control",
@@ -246,5 +273,6 @@ def test_init_project_and_control_work_send_expected_payloads(monkeypatch):
                 "work_item_id": 41,
                 "action": "cancel",
             },
+            "timeout": None,
         },
     ]

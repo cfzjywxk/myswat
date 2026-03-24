@@ -946,7 +946,7 @@ class TestCommandRouting:
         client = MagicMock()
         client.get_work_item.side_effect = [
             DaemonClientError(
-                "MySwat daemon request timed out after 30s: POST http://127.0.0.1:8765/api/work-item",
+                "MySwat daemon request timed out: POST http://127.0.0.1:8765/api/work-item",
                 retryable=True,
             ),
             {
@@ -1332,14 +1332,18 @@ class TestCommandRouting:
         from myswat.cli.main import app
 
         mock_client = MagicMock()
-        mock_client.control_work.side_effect = DaemonClientError("daemon down")
+        mock_client.control_work.side_effect = DaemonClientError(
+            "MySwat daemon is unavailable at http://127.0.0.1:8765: <urlopen error [Errno 111] connection refused>",
+            retryable=True,
+        )
         mock_client_cls.return_value = mock_client
 
         runner = CliRunner()
         result = runner.invoke(app, ["stop", "42", "--project", "proj"])
 
         assert result.exit_code == 1
-        assert "daemon down" in result.output
+        assert "unavailable" in result.output
+        assert "Start the daemon first" in result.output
 
     @patch("myswat.server.control_client.DaemonClient")
     def test_cleanup_command(self, mock_client_cls):
@@ -1409,3 +1413,23 @@ class TestCommandRouting:
             repo_path=None,
             description=None,
         )
+
+    @patch("myswat.server.control_client.DaemonClient")
+    def test_init_command_timeout_reports_in_progress_hint(self, mock_client_cls):
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
+
+        mock_client = MagicMock()
+        mock_client.init_project.side_effect = DaemonClientError(
+            "MySwat daemon request timed out: POST http://127.0.0.1:8765/api/init",
+            retryable=True,
+        )
+        mock_client_cls.return_value = mock_client
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["init", "my-project"])
+
+        assert result.exit_code == 1
+        assert "timed out" in result.output
+        assert "still in progress or blocked" in result.output
+        assert "Start the daemon first" not in result.output

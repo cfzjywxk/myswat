@@ -89,19 +89,26 @@ def test_call_tool_allows_timeoutless_requests(monkeypatch):
 
 
 def test_call_tool_normalizes_missing_structured_content(monkeypatch):
-    monkeypatch.setattr(
-        "myswat.server.mcp_http_client.urlopen",
-        lambda request, timeout: _FakeResponse(
+    observed = {}
+
+    def _fake_urlopen(request, timeout):
+        observed["timeout"] = timeout
+        return _FakeResponse(
             {
                 "jsonrpc": "2.0",
                 "id": 1,
                 "result": {"structuredContent": None},
             }
-        ),
+        )
+
+    monkeypatch.setattr(
+        "myswat.server.mcp_http_client.urlopen",
+        _fake_urlopen,
     )
     client = MCPHTTPClient("http://127.0.0.1:8765")
 
     assert client.call_tool("heartbeat_runtime", {"runtime_registration_id": 1}) == {}
+    assert observed["timeout"] is None
 
 
 def test_call_tool_raises_for_transport_errors(monkeypatch):
@@ -218,6 +225,20 @@ def test_healthcheck_returns_true_for_ok_payload(monkeypatch):
 
     assert client.healthcheck() is True
     assert observed["url"] == "http://127.0.0.1:8765/api/health"
+    assert observed["timeout"] is None
+
+
+def test_healthcheck_accepts_explicit_timeout_override(monkeypatch):
+    observed = {}
+
+    def _fake_urlopen(request, timeout):
+        observed["timeout"] = timeout
+        return _FakeResponse({"ok": True})
+
+    monkeypatch.setattr("myswat.server.mcp_http_client.urlopen", _fake_urlopen)
+    client = MCPHTTPClient("http://127.0.0.1:8765")
+
+    assert client.healthcheck(timeout_seconds=5) is True
     assert observed["timeout"] == 5
 
 

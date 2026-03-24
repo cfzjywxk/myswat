@@ -13,7 +13,7 @@ class MCPHTTPClientError(RuntimeError):
 
 
 class MCPHTTPClient:
-    def __init__(self, server_url: str, timeout_seconds: int | None = 30) -> None:
+    def __init__(self, server_url: str, timeout_seconds: int | None = None) -> None:
         self._base_url = server_url.rstrip("/")
         self._endpoint = self._base_url + "/mcp"
         self._timeout = (
@@ -78,7 +78,7 @@ class MCPHTTPClient:
             )
         return structured
 
-    def healthcheck(self, timeout_seconds: int | None = 5) -> bool:
+    def healthcheck(self, timeout_seconds: int | None = None) -> bool:
         request = Request(
             url=self._base_url + "/api/health",
             method="GET",

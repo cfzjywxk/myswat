@@ -171,13 +171,21 @@ class RequirementsSkillPack:
             vertical slices. For each slice include:
             - Title
             - Type: AFK or HITL
-            - Blocked by
+            - Blocked by (omit if none — independent slices run in parallel)
             - Covers: user stories or acceptance criteria
             - Parallelization notes
             - Done when: observable behavior works through a public interface and tests pass
 
             Prefer thin vertical slices that cut through interface, implementation, and tests together.
             Do NOT create horizontal slices such as "schema first", "API later", or "tests later".
+
+            ### Maximizing parallelism
+            Default to **independent slices** unless there is a concrete data, API, or schema dependency.
+            Only add `Blocked by:` when a slice literally cannot compile, test, or run without another
+            slice's output (e.g. it imports a type or calls an endpoint that doesn't exist yet).
+            Shared interfaces or protocols are NOT a blocking dependency — define the contract (trait,
+            protobuf, shared types crate) in its own thin slice, then let consumers run in parallel.
+            When in doubt, prefer two independent slices with a shared contract slice over a linear chain.
 
             After the slices, keep the sequential `Phase N:` section count as low as possible. A phase may
             group one or more slices, but tests must stay inside the same slice or phase as the behavior they verify.
@@ -195,6 +203,10 @@ class RequirementsSkillPack:
             - Separate testing into a later phase or dedicated cleanup issue.
             - Hide dependencies needed for safe parallel work.
             - Fail to expose which slices can run independently.
+            - Chain slices linearly when they could run in parallel with a shared contract.
+              Ask: "Would slice B literally fail to compile, test, or run without slice A's
+              output, or is there another concrete data, API, or schema dependency?" If not,
+              the dependency is artificial — remove it or extract a shared contract slice.
             """
         )
 
