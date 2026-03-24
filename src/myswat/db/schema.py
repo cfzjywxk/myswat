@@ -329,6 +329,24 @@ SCHEMA_STATEMENTS = [
         FOREIGN KEY (agent_id) REFERENCES agents(id)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS delivery_slice_states (
+        id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+        work_item_id    BIGINT NOT NULL,
+        slice_id        VARCHAR(24) NOT NULL,
+        title           VARCHAR(500) NOT NULL,
+        status          VARCHAR(32) NOT NULL DEFAULT 'pending',
+        workspace_branch VARCHAR(256) DEFAULT NULL,
+        workspace_path  VARCHAR(1024) DEFAULT NULL,
+        stage_run_id    BIGINT DEFAULT NULL,
+        review_cycle_id BIGINT DEFAULT NULL,
+        metadata_json   TEXT DEFAULT NULL,
+        updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_work_slice (work_item_id, slice_id),
+        INDEX idx_slice_work_item (work_item_id),
+        FOREIGN KEY (work_item_id) REFERENCES work_items(id)
+    )
+    """,
 ]
 
 

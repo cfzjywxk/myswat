@@ -7,7 +7,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from myswat.large_payloads import resolve_externalized_text, resolve_externalized_value
 from myswat.repo_ops import (
@@ -51,6 +51,13 @@ from myswat.workflow.requirements_skills import (
     append_skill_guidance,
     load_requirements_skill_pack,
 )
+from myswat.workflow.dag import (
+    DeliverySlice,
+    SliceDAG,
+    SliceDAGError,
+    SliceStatus,
+    generate_slice_id,
+)
 from myswat.workflow.runtime import WorkflowRuntime
 
 
@@ -64,7 +71,8 @@ class PhaseResult:
 
 
 @dataclass(frozen=True)
-class DeliverySlice:
+class _LegacyDeliverySlice:
+    """Legacy frozen slice used by _format_delivery_slice_todos and _parse_phases."""
     title: str
     execution_mode: str = ""
     blocked_by: str = ""
@@ -221,6 +229,7 @@ class WorkflowKernel:
             self._ga_test_review_limit,
         )
         self._ask = ask_user or (lambda prompt: input(f"\n{prompt}").strip())
+        self._has_interactive_ask = ask_user is not None
         self._auto_approve = auto_approve
         self._should_cancel = should_cancel
         self._resume_stage = resume_stage
@@ -749,7 +758,7 @@ class WorkflowKernel:
             collected.append(line.rstrip())
         return collected
 
-    def _parse_delivery_slices(self, plan: str) -> list[DeliverySlice]:
+    def _parse_delivery_slices(self, plan: str) -> list[_LegacyDeliverySlice]:
         section_lines = self._extract_markdown_section(
             plan,
             "## Delivery Slices",
@@ -758,7 +767,7 @@ class WorkflowKernel:
         if not section_lines:
             return []
 
-        slices: list[DeliverySlice] = []
+        slices: list[_LegacyDeliverySlice] = []
         current: dict[str, str] | None = None
 
         def _flush_current() -> None:
@@ -768,7 +777,7 @@ class WorkflowKernel:
             title = current.get("title", "").strip()
             if title:
                 slices.append(
-                    DeliverySlice(
+                    _LegacyDeliverySlice(
                         title=title,
                         execution_mode=current.get("execution_mode", "").strip().upper(),
                         blocked_by=current.get("blocked_by", "").strip(),
@@ -812,6 +821,178 @@ class WorkflowKernel:
                 current["parallelization_notes"] = candidate.split(":", 1)[1].strip()
 
         _flush_current()
+        return slices
+
+    def _parse_dag_delivery_slices(
+        self, plan: str, work_item_id: int,
+    ) -> list[DeliverySlice]:
+        """Parse delivery slices into enriched DAG-capable DeliverySlice objects.
+
+        Extracts: title, description (text between header and next slice),
+        acceptance_criteria (bullets under "Done when:"/"Acceptance criteria:"),
+        blocked_by as list of slice IDs (resolved from titles), execution_mode.
+        Generates content-hash IDs. Enforces unique-title invariant.
+        """
+        section_lines = self._extract_markdown_section(
+            plan,
+            "## Delivery Slices",
+            "## Issue-Ready Delivery Slices",
+        )
+        if not section_lines:
+            return []
+
+        # First pass: extract raw slice data
+        raw_slices: list[dict[str, Any]] = []
+        current: dict[str, Any] | None = None
+        in_acceptance = False
+
+        def _flush() -> None:
+            nonlocal current, in_acceptance
+            if current is not None and current.get("title", "").strip():
+                raw_slices.append(current)
+            current = None
+            in_acceptance = False
+
+        for raw_line in section_lines:
+            stripped = raw_line.strip()
+            if not stripped:
+                if in_acceptance:
+                    in_acceptance = False
+                continue
+
+            candidate = re.sub(r"^(?:[-*]\s+)?(?:#{1,6}\s+)?", "", stripped).strip()
+            slice_match = re.match(
+                r"^slice(?:\s+\d+)?\s*:\s*(.+?)(?:\s+\[(AFK|HITL)\])?$",
+                candidate,
+                re.IGNORECASE,
+            )
+            if slice_match:
+                _flush()
+                current = {
+                    "title": slice_match.group(1).strip(),
+                    "execution_mode": (slice_match.group(2) or "AFK").strip().upper(),
+                    "blocked_by_raw": "",
+                    "parallelization_notes": "",
+                    "description_lines": [],
+                    "acceptance_criteria": [],
+                }
+                continue
+
+            if current is None:
+                continue
+
+            lowered = candidate.lower()
+
+            # Acceptance criteria collection
+            if lowered.startswith("done when:") or lowered.startswith("acceptance criteria:"):
+                in_acceptance = True
+                rest = candidate.split(":", 1)[1].strip()
+                if rest:
+                    current["acceptance_criteria"].append(rest)
+                continue
+
+            if in_acceptance:
+                # Bullet items under acceptance criteria
+                bullet = re.sub(r"^[-*]\s+", "", stripped).strip()
+                if bullet:
+                    current["acceptance_criteria"].append(bullet)
+                continue
+
+            # Known metadata fields
+            if lowered.startswith("type:") and not current.get("execution_mode_set"):
+                current["execution_mode"] = candidate.split(":", 1)[1].strip().upper()
+                current["execution_mode_set"] = True
+            elif lowered.startswith("blocked by:"):
+                current["blocked_by_raw"] = candidate.split(":", 1)[1].strip()
+            elif lowered.startswith("parallelization notes:") or lowered.startswith("parallel notes:"):
+                current["parallelization_notes"] = candidate.split(":", 1)[1].strip()
+            else:
+                # Everything else is description
+                current["description_lines"].append(stripped)
+
+        _flush()
+
+        if not raw_slices:
+            return []
+
+        # Unique-title check
+        titles = [s["title"] for s in raw_slices]
+        seen: set[str] = set()
+        for t in titles:
+            if t in seen:
+                raise SliceDAGError(f"Duplicate slice title: {t!r}")
+            seen.add(t)
+
+        # Build title -> id registry
+        title_to_id: dict[str, str] = {}
+        for s in raw_slices:
+            sid = generate_slice_id(s["title"], work_item_id)
+            title_to_id[s["title"]] = sid
+
+        # Resolve blocked_by references (titles, "Slice N", etc.) to IDs
+        def _resolve_blocked_by(raw: str) -> list[str]:
+            if not raw or raw.lower() == "none":
+                return []
+            refs = [r.strip() for r in raw.split(",")]
+            resolved: list[str] = []
+            for ref in refs:
+                if not ref:
+                    continue
+                # Try exact title match
+                if ref in title_to_id:
+                    resolved.append(title_to_id[ref])
+                    continue
+                # Try "Slice N" reference → match by position
+                m = re.match(r"^slice\s+(\d+)$", ref, re.IGNORECASE)
+                if m:
+                    idx = int(m.group(1)) - 1
+                    if 0 <= idx < len(raw_slices):
+                        resolved.append(title_to_id[raw_slices[idx]["title"]])
+                        continue
+                # Try case-insensitive title match
+                for title, sid in title_to_id.items():
+                    if title.lower() == ref.lower():
+                        resolved.append(sid)
+                        break
+                else:
+                    # Last resort: try substring match (reject if ambiguous)
+                    substring_matches = [
+                        (title, sid)
+                        for title, sid in title_to_id.items()
+                        if ref.lower() in title.lower()
+                    ]
+                    if len(substring_matches) == 1:
+                        resolved.append(substring_matches[0][1])
+                    elif len(substring_matches) > 1:
+                        matched_titles = [t for t, _ in substring_matches]
+                        raise SliceDAGError(
+                            f"Ambiguous blocked_by reference: {ref!r} "
+                            f"matches multiple slices: {matched_titles}"
+                        )
+                    else:
+                        raise SliceDAGError(
+                            f"Unresolved blocked_by reference: {ref!r}. "
+                            f"Known slices: {list(title_to_id.keys())}"
+                        )
+            return resolved
+
+        # Build DeliverySlice objects
+        slices: list[DeliverySlice] = []
+        for idx, raw in enumerate(raw_slices):
+            sid = title_to_id[raw["title"]]
+            slices.append(
+                DeliverySlice(
+                    id=sid,
+                    title=raw["title"],
+                    description="\n".join(raw.get("description_lines", [])),
+                    acceptance_criteria=raw.get("acceptance_criteria", []),
+                    execution_mode=raw.get("execution_mode", "AFK"),
+                    blocked_by=_resolve_blocked_by(raw.get("blocked_by_raw", "")),
+                    parallelization_notes=raw.get("parallelization_notes", ""),
+                    plan_position=idx,
+                )
+            )
+
         return slices
 
     def _format_delivery_slice_todos(self, plan: str) -> list[str]:
@@ -1771,6 +1952,231 @@ class WorkflowKernel:
             return completion.artifact_content
         return "\n".join(completed_summaries) if completed_summaries else "No completed work to report."
 
+    def _try_run_dag_serial(
+        self,
+        *,
+        requirement: str,
+        design: str,
+        plan: str,
+        completed_phases: list[PhaseResult],
+        completed_summaries: list[str],
+        result: WorkflowResult,
+    ) -> bool | None:
+        """Try to run delivery slices as a serial DAG.
+
+        Returns:
+            None  — no delivery slices found (caller should use legacy phase loop)
+            True  — DAG execution completed successfully
+            False — DAG execution failed or blocked (result already populated)
+        """
+        # Parse delivery slices from the plan (needed for first run AND partial-persist recovery)
+        try:
+            delivery_slices = self._parse_dag_delivery_slices(plan, self._work_item_id)
+        except SliceDAGError as exc:
+            # Validation error (duplicate titles, unresolved blockers, etc.)
+            # This is a real plan error — do NOT fall back to legacy silently.
+            self._emit("error", f"Delivery slice validation error: {exc}", stage="dag")
+            result.blocked = True
+            result.failure_summary = f"Delivery slice validation error: {exc}"
+            result.final_report = result.failure_summary
+            return False
+
+        if not delivery_slices:
+            return None  # no slices found, fall back to legacy
+
+        # Check for persisted DAG state (resume path)
+        try:
+            persisted = self._store.get_slice_states(self._work_item_id)
+        except (AttributeError, Exception):
+            persisted = None
+
+        if persisted and isinstance(persisted, list) and len(persisted) > 0:
+            # Detect partial/stale persistence: compare slice IDs, not just count
+            persisted_ids = {row["slice_id"] for row in persisted}
+            parsed_ids = {s.id for s in delivery_slices}
+            if persisted_ids == parsed_ids:
+                try:
+                    dag = SliceDAG.from_store(self._store, self._work_item_id)
+                except (SliceDAGError, TypeError, KeyError) as exc:
+                    self._emit(
+                        "warning",
+                        f"DAG resume error ({exc}); re-persisting from plan",
+                        stage="dag",
+                    )
+                    try:
+                        dag = SliceDAG.from_slices(delivery_slices)
+                    except SliceDAGError as exc2:
+                        self._emit("error", f"DAG rebuild error: {exc2}", stage="dag")
+                        result.blocked = True
+                        result.failure_summary = f"DAG rebuild error: {exc2}"
+                        result.final_report = result.failure_summary
+                        return False
+                    dag.persist_initial(self._store, self._work_item_id)
+            else:
+                self._emit(
+                    "warning",
+                    f"DAG persistence mismatch "
+                    f"(persisted={persisted_ids}, parsed={parsed_ids}); "
+                    f"re-persisting from plan",
+                    stage="dag",
+                )
+                try:
+                    dag = SliceDAG.from_slices(delivery_slices)
+                except SliceDAGError as exc:
+                    self._emit("error", f"DAG rebuild error: {exc}", stage="dag")
+                    result.blocked = True
+                    result.failure_summary = f"DAG rebuild error: {exc}"
+                    result.final_report = result.failure_summary
+                    return False
+                # Only delete stale rows after successful rebuild
+                self._store.delete_slice_states(self._work_item_id)
+                dag.persist_initial(self._store, self._work_item_id)
+        else:
+            # First run: build DAG and persist
+            try:
+                dag = SliceDAG.from_slices(delivery_slices)
+            except SliceDAGError as exc:
+                self._emit("error", f"DAG construction error: {exc}", stage="dag")
+                result.blocked = True
+                result.failure_summary = f"DAG construction error: {exc}"
+                result.final_report = result.failure_summary
+                return False
+
+            dag.persist_initial(self._store, self._work_item_id)
+
+        self._emit("info", f"Running {len(dag.slices)} delivery slices serially", stage="dag")
+        return self._run_dag_serial(
+            dag=dag,
+            requirement=requirement,
+            design=design,
+            plan=plan,
+            completed_summaries=completed_summaries,
+            result=result,
+        )
+
+    def _run_dag_serial(
+        self,
+        *,
+        dag: SliceDAG,
+        requirement: str,
+        design: str,
+        plan: str,
+        completed_summaries: list[str],
+        result: WorkflowResult,
+    ) -> bool:
+        """Execute slices one at a time in topological order. No worktrees.
+
+        Returns True on success, False on failure/blocked.
+        """
+        _TERMINAL = frozenset({SliceStatus.done, SliceStatus.failed, SliceStatus.branch_complete})
+        _DEP_SATISFIED = frozenset({SliceStatus.done, SliceStatus.branch_complete})
+
+        for s in dag.topological_order():
+            if self._cancelled():
+                result.blocked = True
+                result.failure_summary = "Workflow cancelled."
+                result.final_report = result.failure_summary
+                return False
+
+            if s.status in _TERMINAL:
+                continue
+
+            # Check for failed dependencies
+            failed_deps = [
+                dep for dep in s.blocked_by
+                if dag.slices[dep].status == SliceStatus.failed
+            ]
+            if failed_deps:
+                dag.mark_failed(s.id)
+                continue
+
+            # Check all deps satisfied
+            non_done_deps = [
+                dep for dep in s.blocked_by
+                if dag.slices[dep].status not in _DEP_SATISFIED
+            ]
+            if non_done_deps:
+                continue  # deps not ready yet
+
+            # HITL gate
+            if s.execution_mode == "HITL" and not self._auto_approve:
+                if self._has_interactive_ask:
+                    answer = self._ask(
+                        f'Slice "{s.title}" requires human review before starting. Proceed? [y/n]'
+                    )
+                    if answer.lower() not in ("y", "yes"):
+                        dag.mark_hitl_deferred(s.id)
+                        continue
+                else:
+                    # No interactive callback (daemon mode) — defer, don't block on stdin
+                    dag.mark_hitl_deferred(s.id)
+                    continue
+
+            # Build revision-aware context if available
+            revision_feedback = None
+            if s.status == SliceStatus.needs_revision:
+                revision_feedback = s.metadata_json.get("revision_feedback")
+
+            # Execute as a phase — inject revision feedback as prior context
+            phase_index = s.plan_position + 1
+            phase_summaries = list(completed_summaries)
+            if revision_feedback:
+                fb_summary = revision_feedback.get("summary", "")
+                fb_issues = revision_feedback.get("issues", [])
+                revision_ctx = f"REVISION REQUIRED for slice {phase_index} ({s.title}):\n{fb_summary}"
+                if fb_issues:
+                    revision_ctx += "\nIssues to address:\n" + "\n".join(
+                        f"- {issue}" for issue in fb_issues
+                    )
+                phase_summaries.append(revision_ctx)
+
+            phase_result = self._run_phase(
+                requirement=requirement,
+                design=design,
+                plan=plan,
+                phase_name=s.title,
+                phase_index=phase_index,
+                total_phases=len(dag.slices),
+                completed_summaries=phase_summaries,
+            )
+            result.phases.append(phase_result)
+            completed_summaries.append(
+                f"Slice {phase_index} ({s.title}): {phase_result.summary[:500]}"
+            )
+
+            if not phase_result.committed:
+                dag.mark_failed(s.id)
+                self._emit(
+                    "warning",
+                    f'Slice "{s.title}" failed — continuing with independent slices',
+                    stage=f"slice_{s.id}",
+                )
+                continue  # independent branches may still proceed
+
+            dag.mark_done(s.id)
+
+        if not dag.all_terminal():
+            result.blocked = True
+            result.failure_summary = (
+                "Workflow paused: remaining slices require human review "
+                "or have unresolved dependencies."
+            )
+            result.final_report = result.failure_summary
+            return False
+
+        # Check if any slices failed
+        failed = dag.slices_in_status(SliceStatus.failed)
+        if failed:
+            result.blocked = True
+            result.failure_summary = (
+                f"{len(failed)} slice(s) failed: "
+                + ", ".join(s.title for s in failed)
+            )
+            result.final_report = result.failure_summary
+            return False
+
+        return True
+
     def run(self, requirement: str) -> WorkflowResult:
         result = WorkflowResult(requirement=requirement)
         if self._cancelled():
@@ -1824,25 +2230,38 @@ class WorkflowKernel:
                 return result
 
         if self._mode in {WorkMode.full, WorkMode.develop}:
-            phases = self._parse_phases(result.plan or "Phase 1: Implementation")
-            start_index = len(completed_phases) + 1
-            for phase_index, phase_name in enumerate(phases[start_index - 1:], start_index):
-                phase_result = self._run_phase(
-                    requirement=requirement,
-                    design=result.design or requirement,
-                    plan=result.plan or requirement,
-                    phase_name=phase_name,
-                    phase_index=phase_index,
-                    total_phases=len(phases),
-                    completed_summaries=completed_summaries,
-                )
-                result.phases.append(phase_result)
-                completed_summaries.append(f"Phase {phase_index}: {phase_result.summary[:500]}")
-                if not phase_result.committed:
-                    result.blocked = True
-                    result.failure_summary = self._failure_summary or f"Phase {phase_index} failed."
-                    result.final_report = result.failure_summary
-                    return result
+            dag_result = self._try_run_dag_serial(
+                requirement=requirement,
+                design=result.design or requirement,
+                plan=result.plan or requirement,
+                completed_phases=completed_phases,
+                completed_summaries=completed_summaries,
+                result=result,
+            )
+            if dag_result is None:
+                # No delivery slices found — legacy phase loop
+                phases = self._parse_phases(result.plan or "Phase 1: Implementation")
+                start_index = len(completed_phases) + 1
+                for phase_index, phase_name in enumerate(phases[start_index - 1:], start_index):
+                    phase_result = self._run_phase(
+                        requirement=requirement,
+                        design=result.design or requirement,
+                        plan=result.plan or requirement,
+                        phase_name=phase_name,
+                        phase_index=phase_index,
+                        total_phases=len(phases),
+                        completed_summaries=completed_summaries,
+                    )
+                    result.phases.append(phase_result)
+                    completed_summaries.append(f"Phase {phase_index}: {phase_result.summary[:500]}")
+                    if not phase_result.committed:
+                        result.blocked = True
+                        result.failure_summary = self._failure_summary or f"Phase {phase_index} failed."
+                        result.final_report = result.failure_summary
+                        return result
+            elif not dag_result:
+                # DAG execution failed or was blocked
+                return result
 
         if self._mode == WorkMode.test or (self._mode == WorkMode.full and self._with_ga_test):
             ga_test = self._run_test(

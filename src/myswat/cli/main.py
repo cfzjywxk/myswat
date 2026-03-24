@@ -1314,6 +1314,25 @@ def _display_mode(item: dict, fallback: str) -> str:
     return work_mode if work_mode else fallback
 
 
+def _maybe_print_dag_status(console, store, item: dict | None) -> None:
+    """Print DAG status for a work item if it has delivery slice states."""
+    if not item or not item.get("id"):
+        return
+    try:
+        slice_states = store.get_slice_states(item["id"])
+    except Exception:
+        return
+    if not slice_states:
+        return
+    try:
+        from myswat.workflow.dag import SliceDAG
+        from myswat.cli.dag_display import render_dag_status
+        dag = SliceDAG.from_store(store, item["id"])
+        console.print(render_dag_status(dag, item["id"]))
+    except Exception:
+        pass  # Don't break status command if DAG rendering fails
+
+
 def _print_task_state(console, item: dict) -> None:
     metadata = item.get("metadata_json") if isinstance(item, dict) else None
     background = metadata.get("background") if isinstance(metadata, dict) else {}
@@ -1446,6 +1465,7 @@ def status(
 
     if not details:
         _print_current_work_item(console, current_item, has_items=bool(items))
+        _maybe_print_dag_status(console, store, current_item)
         _print_alerts(console, _collect_project_alerts(items, runtime_rows))
         flow_item = _select_status_flow_item(items)
         flow_entries = _build_teamwork_flow_entries(pool, flow_item) if flow_item else []
@@ -1533,6 +1553,7 @@ def status(
                     f"{_markup_for_item_status(str(item.get('status') or 'unknown'))}"
                 )
                 _print_task_state(console, item)
+                _maybe_print_dag_status(console, store, item)
                 _print_teamwork_details(pool, item, console, details=True, show_header=False)
     else:
         console.print("\n[dim]No work items yet.[/dim]")

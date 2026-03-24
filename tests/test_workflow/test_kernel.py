@@ -9,7 +9,8 @@ from unittest.mock import Mock, patch
 
 from myswat.repo_ops import GitCommitResult, GitProbeResult, GitPushResult
 from myswat.server.contracts import ReviewCycleCancellationRequest, ReviewVerdictEnvelope, StageRunCompletion
-from myswat.workflow.kernel import GATestResult, PhaseResult, WorkflowKernel, _extract_json_block
+from myswat.workflow.kernel import GATestResult, PhaseResult, WorkflowKernel, WorkflowResult, _extract_json_block
+from myswat.workflow.dag import DeliverySlice, SliceDAG, SliceDAGError, SliceStatus, generate_slice_id
 from myswat.workflow.modes import WorkMode
 from myswat.workflow.runtime import WorkflowRuntime
 
@@ -2801,3 +2802,329 @@ def test_run_plan_records_delivery_slices_in_status():
         "Slice: Build auth [AFK]",
         "Slice: Build billing [HITL] - Blocked by: Slice 1",
     ]
+
+
+def test_dag_serial_hitl_deferred_in_daemon_mode():
+    """HITL slice is deferred (not stuck on stdin) when ask_user=None and auto_approve=False."""
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=99,
+        mode=WorkMode.develop,
+        auto_approve=False,
+        # ask_user intentionally omitted — simulates daemon path
+    )
+
+    # Build a single HITL slice with no deps (immediately dispatchable)
+    hitl_slice = DeliverySlice(
+        id=generate_slice_id("Manual Review Step", 99),
+        title="Manual Review Step",
+        execution_mode="HITL",
+        status=SliceStatus.ready,
+    )
+    dag = SliceDAG.from_slices([hitl_slice])
+
+    wr = WorkflowResult(requirement="test req")
+    ok = kernel._run_dag_serial(
+        dag=dag,
+        requirement="test req",
+        design="test design",
+        plan="test plan",
+        completed_summaries=[],
+        result=wr,
+    )
+
+    # Slice should be deferred, not executed or stuck on stdin
+    assert hitl_slice.status == SliceStatus.hitl_deferred
+    # Workflow blocked because not all slices reached terminal
+    assert ok is False
+    assert wr.blocked is True
+
+
+def test_dag_serial_hitl_auto_approved_skips_gate():
+    """HITL gate is skipped when auto_approve=True — slice is dispatched, not deferred."""
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=99,
+        mode=WorkMode.develop,
+        auto_approve=True,
+    )
+
+    hitl_slice = DeliverySlice(
+        id=generate_slice_id("Manual Review Step", 99),
+        title="Manual Review Step",
+        execution_mode="HITL",
+        status=SliceStatus.ready,
+    )
+    dag = SliceDAG.from_slices([hitl_slice])
+
+    wr = WorkflowResult(requirement="test req")
+    # Patch _run_phase to avoid deep mocking — we only care that the HITL gate was skipped
+    with patch.object(kernel, "_run_phase", return_value=PhaseResult(name="Manual Review Step", summary="ok", committed=True)):
+        kernel._run_dag_serial(
+            dag=dag,
+            requirement="test req",
+            design="test design",
+            plan="test plan",
+            completed_summaries=[],
+            result=wr,
+        )
+
+    # With auto_approve, HITL gate is skipped — slice should be executed (done), not deferred
+    assert hitl_slice.status != SliceStatus.hitl_deferred
+    assert hitl_slice.status == SliceStatus.done
+
+
+def test_dag_serial_hitl_interactive_decline():
+    """HITL slice is deferred when interactive user declines."""
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+
+    decline_callback = Mock(return_value="n")
+
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=99,
+        mode=WorkMode.develop,
+        auto_approve=False,
+        ask_user=decline_callback,
+    )
+
+    hitl_slice = DeliverySlice(
+        id=generate_slice_id("Manual Review Step", 99),
+        title="Manual Review Step",
+        execution_mode="HITL",
+        status=SliceStatus.ready,
+    )
+    dag = SliceDAG.from_slices([hitl_slice])
+
+    wr = WorkflowResult(requirement="test req")
+    kernel._run_dag_serial(
+        dag=dag,
+        requirement="test req",
+        design="test design",
+        plan="test plan",
+        completed_summaries=[],
+        result=wr,
+    )
+
+    assert hitl_slice.status == SliceStatus.hitl_deferred
+    decline_callback.assert_called_once()
+
+
+def test_try_dag_serial_mismatch_rebuild_failure_preserves_old_rows():
+    """When ID-mismatch rebuild fails (e.g. cycle), result is blocked and old rows are NOT deleted."""
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+
+    # Persisted rows have slice IDs that differ from what the parser will return
+    old_id = generate_slice_id("Old Slice", 99)
+    store.get_slice_states.return_value = [
+        {"slice_id": old_id, "title": "Old Slice", "status": "pending", "metadata_json": {}},
+    ]
+    store.delete_slice_states = Mock()
+
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=99,
+        mode=WorkMode.develop,
+        auto_approve=True,
+    )
+
+    # Build cyclic slices so from_slices() will raise SliceDAGError
+    id_a = generate_slice_id("A", 99)
+    id_b = generate_slice_id("B", 99)
+    cyclic_slices = [
+        DeliverySlice(id=id_a, title="A", blocked_by=[id_b]),
+        DeliverySlice(id=id_b, title="B", blocked_by=[id_a]),
+    ]
+
+    wr = WorkflowResult(requirement="test req")
+    # Patch _parse_dag_delivery_slices to return the cyclic slices
+    with patch.object(kernel, "_parse_dag_delivery_slices", return_value=cyclic_slices):
+        ok = kernel._try_run_dag_serial(
+            requirement="test req",
+            design="test design",
+            plan="test plan",
+            completed_phases=[],
+            completed_summaries=[],
+            result=wr,
+        )
+
+    assert ok is False
+    assert wr.blocked is True
+    assert "rebuild" in wr.failure_summary.lower() or "cycle" in wr.failure_summary.lower()
+    # Old rows must NOT have been deleted since rebuild failed
+    store.delete_slice_states.assert_not_called()
+
+
+def test_try_dag_serial_mismatch_rebuild_success_deletes_old_rows():
+    """When ID-mismatch rebuild succeeds, old rows ARE deleted before re-persist."""
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+
+    old_id = generate_slice_id("Old Slice", 99)
+    store.get_slice_states.return_value = [
+        {"slice_id": old_id, "title": "Old Slice", "status": "pending", "metadata_json": {}},
+    ]
+    store.delete_slice_states = Mock()
+
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=99,
+        mode=WorkMode.develop,
+        auto_approve=True,
+    )
+
+    # Valid new slice (different ID from persisted)
+    new_slice = DeliverySlice(
+        id=generate_slice_id("New Slice", 99),
+        title="New Slice",
+        status=SliceStatus.ready,
+    )
+
+    wr = WorkflowResult(requirement="test req")
+    with patch.object(kernel, "_parse_dag_delivery_slices", return_value=[new_slice]):
+        with patch.object(kernel, "_run_dag_serial", return_value=True):
+            ok = kernel._try_run_dag_serial(
+                requirement="test req",
+                design="test design",
+                plan="test plan",
+                completed_phases=[],
+                completed_summaries=[],
+                result=wr,
+            )
+
+    assert ok is True
+    store.delete_slice_states.assert_called_once_with(99)
+
+
+def test_try_dag_serial_from_store_failure_rebuilds_from_plan():
+    """When IDs match but from_store() raises, rebuild from parsed slices and re-persist."""
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+
+    slice_id = generate_slice_id("Worker", 99)
+    # Persisted rows match the parsed slice ID, but from_store will fail
+    store.get_slice_states.return_value = [
+        {"slice_id": slice_id, "title": "Worker", "status": "pending", "metadata_json": {}},
+    ]
+
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=99,
+        mode=WorkMode.develop,
+        auto_approve=True,
+    )
+
+    valid_slice = DeliverySlice(
+        id=slice_id,
+        title="Worker",
+        status=SliceStatus.ready,
+    )
+
+    wr = WorkflowResult(requirement="test req")
+    with patch.object(kernel, "_parse_dag_delivery_slices", return_value=[valid_slice]):
+        with patch("myswat.workflow.kernel.SliceDAG.from_store", side_effect=SliceDAGError("corrupt")):
+            with patch.object(kernel, "_run_dag_serial", return_value=True):
+                ok = kernel._try_run_dag_serial(
+                    requirement="test req",
+                    design="test design",
+                    plan="test plan",
+                    completed_phases=[],
+                    completed_summaries=[],
+                    result=wr,
+                )
+
+    assert ok is True
+    # Verify re-persist happened via upsert_slice_state (called by persist_initial)
+    assert store.upsert_slice_state.called
+
+
+def test_try_dag_serial_from_store_failure_with_bad_plan_blocks():
+    """When IDs match, from_store() raises, AND rebuild also fails → blocked, not crash."""
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+
+    id_a = generate_slice_id("A", 99)
+    id_b = generate_slice_id("B", 99)
+    store.get_slice_states.return_value = [
+        {"slice_id": id_a, "title": "A", "status": "pending", "metadata_json": {}},
+        {"slice_id": id_b, "title": "B", "status": "pending", "metadata_json": {}},
+    ]
+
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=99,
+        mode=WorkMode.develop,
+        auto_approve=True,
+    )
+
+    # Cyclic slices: from_slices() will raise
+    cyclic_slices = [
+        DeliverySlice(id=id_a, title="A", blocked_by=[id_b]),
+        DeliverySlice(id=id_b, title="B", blocked_by=[id_a]),
+    ]
+
+    wr = WorkflowResult(requirement="test req")
+    with patch.object(kernel, "_parse_dag_delivery_slices", return_value=cyclic_slices):
+        with patch("myswat.workflow.kernel.SliceDAG.from_store", side_effect=SliceDAGError("corrupt")):
+            ok = kernel._try_run_dag_serial(
+                requirement="test req",
+                design="test design",
+                plan="test plan",
+                completed_phases=[],
+                completed_summaries=[],
+                result=wr,
+            )
+
+    assert ok is False
+    assert wr.blocked is True
+    assert "rebuild" in wr.failure_summary.lower() or "cycle" in wr.failure_summary.lower()

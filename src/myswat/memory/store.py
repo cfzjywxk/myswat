@@ -49,6 +49,8 @@ RELATION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\b(?P<src>[A-Za-z][A-Za-z0-9_-]+)\s+requires\s+(?P<tgt>[A-Za-z][A-Za-z0-9 _-]+)", re.IGNORECASE), "requires"),
 )
 
+_UNSET = object()  # sentinel for "parameter not provided"
+
 MERGE_PROMPT = """You are merging two project knowledge entries that refer to the same topic.
 
 Rules:
@@ -2639,6 +2641,112 @@ class MemoryStore:
         metadata["task_state"] = task_state
         self.update_work_item_metadata(item_id, metadata)
         return event
+
+    # ──────────────────────── Delivery Slice States ─────────────────────
+
+    def upsert_slice_state(
+        self,
+        work_item_id: int,
+        slice_id: str,
+        title: str,
+        status: str,
+        *,
+        metadata_json: str | None = None,
+    ) -> None:
+        """Insert or update a single slice state row.
+
+        On conflict, resets runtime columns (workspace_branch, workspace_path,
+        stage_run_id, review_cycle_id) to NULL so stale values from prior runs
+        don't linger after a re-persist.
+        """
+        self._pool.execute(
+            "INSERT INTO delivery_slice_states "
+            "(work_item_id, slice_id, title, status, metadata_json) "
+            "VALUES (%s, %s, %s, %s, %s) "
+            "ON DUPLICATE KEY UPDATE title = VALUES(title), "
+            "status = VALUES(status), metadata_json = VALUES(metadata_json), "
+            "workspace_branch = NULL, workspace_path = NULL, "
+            "stage_run_id = NULL, review_cycle_id = NULL",
+            (work_item_id, slice_id, title, status, metadata_json),
+        )
+
+    def update_slice_state(
+        self,
+        work_item_id: int,
+        slice_id: str,
+        *,
+        status: str | None = None,
+        stage_run_id: int | None = _UNSET,
+        review_cycle_id: int | None = _UNSET,
+        workspace_branch: str | None = _UNSET,
+        workspace_path: str | None = _UNSET,
+        metadata_json: str | None = _UNSET,
+    ) -> None:
+        """Atomic single-row UPDATE with only the provided columns.
+
+        Uses _UNSET sentinel: only columns explicitly passed are included
+        in the SET clause. Pass None to null out a column.
+        """
+        sets: list[str] = []
+        params: list[Any] = []
+
+        if status is not None:
+            sets.append("status = %s")
+            params.append(status)
+        if stage_run_id is not _UNSET:
+            sets.append("stage_run_id = %s")
+            params.append(stage_run_id)
+        if review_cycle_id is not _UNSET:
+            sets.append("review_cycle_id = %s")
+            params.append(review_cycle_id)
+        if workspace_branch is not _UNSET:
+            sets.append("workspace_branch = %s")
+            params.append(workspace_branch)
+        if workspace_path is not _UNSET:
+            sets.append("workspace_path = %s")
+            params.append(workspace_path)
+        if metadata_json is not _UNSET:
+            sets.append("metadata_json = %s")
+            params.append(metadata_json)
+
+        if not sets:
+            return
+
+        params.extend([work_item_id, slice_id])
+        self._pool.execute(
+            f"UPDATE delivery_slice_states SET {', '.join(sets)} "
+            f"WHERE work_item_id = %s AND slice_id = %s",
+            tuple(params),
+        )
+
+    def get_slice_states(self, work_item_id: int) -> list[dict]:
+        """Load all slice state rows for a work item."""
+        rows = self._pool.fetch_all(
+            "SELECT * FROM delivery_slice_states "
+            "WHERE work_item_id = %s ORDER BY id",
+            (work_item_id,),
+        )
+        result = []
+        for row in rows:
+            d = dict(row)
+            # Parse metadata_json string to dict
+            meta = d.get("metadata_json")
+            if isinstance(meta, str):
+                try:
+                    d["metadata_json"] = json.loads(meta)
+                except (json.JSONDecodeError, TypeError):
+                    d["metadata_json"] = {}
+            elif meta is None:
+                d["metadata_json"] = {}
+            result.append(d)
+        return result
+
+    def delete_slice_states(self, work_item_id: int) -> None:
+        """Delete all slice state rows for a work item."""
+        self._pool.execute(
+            "DELETE FROM delivery_slice_states WHERE work_item_id = %s",
+            (work_item_id,),
+        )
 
     # ──────────────────────────── Stage Runs ────────────────────────────
 
