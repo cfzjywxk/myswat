@@ -517,47 +517,16 @@ class WorkflowKernel:
             )
             return False
 
-        self._register_managed_repo_path(doc_path)
-        summary = f"Exported the approved design plan to {doc_path.relative_to(self._repo_path)}."
+        # Planning artifacts are reference docs for the workflow itself.
+        # Keep them local-only and out of final repo sync so ignored or
+        # untracked design-plan paths never block delivery.
+        summary = f"Exported the approved design plan locally to {doc_path.relative_to(self._repo_path)}."
         self._record_repo_event(
             event_type="repo_exported",
             title="Design plan exported",
             summary=summary,
             stage="plan",
         )
-
-        if not self._repo_commit_ready:
-            return True
-
-        commit_result = commit_repo_changes(
-            self._repo_path,
-            message="docs: sync myswat design plan",
-            paths=[doc_path],
-            trailers=self._commit_trailers_for(self._dev),
-        )
-        if not commit_result.ok:
-            self._blocked = True
-            self._failure_summary = (
-                "Failed to commit the exported design plan doc. "
-                f"{commit_result.message}".strip()
-            )
-            self._record_repo_event(
-                event_type="repo_commit_failed",
-                title="Design plan commit failed",
-                summary=self._failure_summary,
-                stage="plan",
-                warning=True,
-            )
-            return False
-
-        self._record_repo_event(
-            event_type="repo_commit",
-            title="Design plan committed" if commit_result.committed else "Design plan commit skipped",
-            summary=commit_result.message or "No design-plan doc changes to commit.",
-            stage="plan",
-        )
-        if commit_result.committed:
-            self._repo_commits_created = True
         return True
 
     def _export_final_report_to_docs(self, report: str) -> bool:
@@ -2575,7 +2544,7 @@ class WorkflowKernel:
         if not dag.all_terminal():
             result.blocked = True
             result.failure_summary = (
-                "Workflow paused: remaining slices require human review "
+                "Workflow blocked: remaining slices require human review "
                 "or have unresolved dependencies."
             )
             result.final_report = result.failure_summary

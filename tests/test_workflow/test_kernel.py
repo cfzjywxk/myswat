@@ -213,7 +213,7 @@ def test_develop_mode_queues_plan_phase_and_final_report():
     assert service.request_review.call_count == 2
 
 
-def test_run_exports_design_plan_to_docs_and_commits_when_plan_finalized(tmp_path):
+def test_run_exports_design_plan_to_docs_locally_when_plan_finalized(tmp_path):
     store = _store()
     service = _service()
     dev = _participant(10, "developer")
@@ -241,10 +241,7 @@ def test_run_exports_design_plan_to_docs_and_commits_when_plan_finalized(tmp_pat
                         "myswat.workflow.kernel.write_design_plan_doc",
                         return_value=repo_path / "myswat-design-plan.md",
                     ) as mock_write:
-                        with patch(
-                            "myswat.workflow.kernel.commit_repo_changes",
-                            return_value=GitCommitResult(True, True, "Committed local changes."),
-                        ) as mock_commit:
+                        with patch("myswat.workflow.kernel.commit_repo_changes") as mock_commit:
                             result = kernel.run("ship it")
 
     assert result.success is True
@@ -254,11 +251,11 @@ def test_run_exports_design_plan_to_docs_and_commits_when_plan_finalized(tmp_pat
         design="approved design",
         plan="approved plan",
     )
-    mock_commit.assert_called_once_with(
-        repo_path.resolve(),
-        message="docs: sync myswat design plan",
-        paths=[repo_path / "myswat-design-plan.md"],
-        trailers=["Co-Authored-By: MySwat Dev (GPT-5.4) <noreply@myswat.invalid>"],
+    mock_commit.assert_not_called()
+    assert kernel._repo_managed_paths == set()
+    assert any(
+        "design plan locally" in call.kwargs.get("summary", "").lower()
+        for call in store.append_work_item_process_event.call_args_list
     )
 
 
@@ -1525,6 +1522,44 @@ def test_export_final_report_to_docs_keeps_workflow_report_local_only(tmp_path):
     mock_commit.assert_not_called()
     assert any(
         "workflow report locally" in call.kwargs.get("summary", "").lower()
+        for call in store.append_work_item_process_event.call_args_list
+    )
+
+
+def test_export_design_plan_to_docs_keeps_design_plan_local_only(tmp_path):
+    store = _store()
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    kernel = WorkflowKernel(
+        store=store,
+        service=_service(),
+        dev=_participant(10, "developer"),
+        qas=[_participant(20, "qa_main")],
+        project_id=1,
+        work_item_id=92,
+        mode=WorkMode.design,
+        auto_approve=True,
+        repo_path=str(repo_path),
+    )
+    kernel._repo_commit_checked = True
+    kernel._repo_commit_ready = True
+
+    with patch(
+        "myswat.workflow.kernel.write_design_plan_doc",
+        return_value=repo_path / "myswat-design-plan-20260326.md",
+    ):
+        with patch("myswat.workflow.kernel.commit_repo_changes") as mock_commit:
+            ok = kernel._export_design_plan_to_docs(
+                requirement="ship it",
+                design="approved design",
+                plan="approved plan",
+            )
+
+    assert ok is True
+    assert kernel._repo_managed_paths == set()
+    mock_commit.assert_not_called()
+    assert any(
+        "design plan locally" in call.kwargs.get("summary", "").lower()
         for call in store.append_work_item_process_event.call_args_list
     )
 
@@ -3232,6 +3267,10 @@ def test_dag_serial_hitl_deferred_in_daemon_mode():
     # Workflow blocked because not all slices reached terminal
     assert ok is False
     assert wr.blocked is True
+    assert wr.failure_summary == (
+        "Workflow blocked: remaining slices require human review "
+        "or have unresolved dependencies."
+    )
 
 
 def test_dag_serial_hitl_auto_approved_skips_gate():

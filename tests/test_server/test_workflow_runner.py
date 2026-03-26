@@ -280,6 +280,32 @@ def test_derive_final_status_blocks_when_successful_result_reports_incomplete_sc
     assert "scope is still incomplete" in final_summary
 
 
+def test_derive_final_status_pauses_only_for_explicit_pause_request():
+    result = SimpleNamespace(success=True, final_report="# done")
+
+    final_status, final_summary = _derive_final_status_and_summary(
+        result,
+        cancelled=True,
+        requested_status="paused",
+    )
+
+    assert final_status == "paused"
+    assert final_summary == "Workflow paused."
+
+
+def test_derive_final_status_blocks_unsuccessful_results():
+    result = SimpleNamespace(success=False, failure_summary="review failed")
+
+    final_status, final_summary = _derive_final_status_and_summary(
+        result,
+        cancelled=False,
+        requested_status="cancelled",
+    )
+
+    assert final_status == "blocked"
+    assert final_summary == "review failed"
+
+
 @patch("myswat.server.workflow_runner.submit_workflow_summary_learn_request")
 @patch("myswat.server.workflow_runner.WorkflowKernel")
 def test_run_workflow_resolves_prd_artifact_reference_before_kernel_run(

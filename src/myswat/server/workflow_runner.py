@@ -77,6 +77,10 @@ def get_workflow_agents(store: MemoryStore, project_id: int) -> tuple[dict, list
 
 
 def _derive_final_status_and_summary(result, *, cancelled: bool, requested_status: str) -> tuple[str, str]:
+    # Pauses/cancellations come only from an explicit external stop request.
+    # Everything else that does not end in a complete approved result is
+    # blocked, including engine failures and "success=True" runs whose own
+    # final report says the approved scope is still incomplete.
     if cancelled:
         final_status = requested_status
         final_summary = "Workflow paused." if requested_status == "paused" else "Workflow cancelled."
