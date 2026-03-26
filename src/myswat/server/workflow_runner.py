@@ -16,7 +16,7 @@ from myswat.memory.store import MemoryStore
 from myswat.server import MySwatToolService
 from myswat.server.mcp_stdio import MySwatMCPDispatcher
 from myswat.server.workflow_client import LocalMCPToolClient, MCPWorkflowCoordinator
-from myswat.workflow.kernel import WorkflowKernel
+from myswat.workflow.kernel import WorkflowKernel, detect_incomplete_scope_report
 from myswat.workflow.modes import WorkMode
 from myswat.workflow.prd_support import derive_requirement_title, resolve_prd_requirement
 from myswat.workflow.runtime import WorkflowRuntime
@@ -74,6 +74,27 @@ def get_workflow_agents(store: MemoryStore, project_id: int) -> tuple[dict, list
         raise typer.Exit(1)
 
     return dev_agent, qa_agents
+
+
+def _derive_final_status_and_summary(result, *, cancelled: bool, requested_status: str) -> tuple[str, str]:
+    if cancelled:
+        final_status = requested_status
+        final_summary = "Workflow paused." if requested_status == "paused" else "Workflow cancelled."
+        return final_status, final_summary
+
+    if bool(getattr(result, "success", False)):
+        final_report = str(getattr(result, "final_report", "") or "")
+        incomplete_scope_reasons = detect_incomplete_scope_report(final_report)
+        if incomplete_scope_reasons:
+            return (
+                "blocked",
+                "Workflow report says the approved scope is still incomplete: "
+                + "; ".join(incomplete_scope_reasons[:3]),
+            )
+        return "completed", "Workflow completed successfully."
+
+    failure_summary = str(getattr(result, "failure_summary", "") or "").strip()
+    return "blocked", (failure_summary or "Workflow finished with unresolved review or test issues.")
 
 
 def _get_architect_agent(store: MemoryStore, project_id: int) -> dict | None:
@@ -240,20 +261,15 @@ def run_workflow(
 
         error_stage = "workflow_execution"
         result = engine.run(requirement)
-        if _should_cancel():
-            current_item = store.get_work_item(work_item_id) or {}
-            requested_status = str(current_item.get("status") or "")
-            if requested_status not in {"cancelled", "paused"}:
-                requested_status = "cancelled"
-            final_status = requested_status
-            final_summary = "Workflow paused." if requested_status == "paused" else "Workflow cancelled."
-        elif result.success:
-            final_status = "completed"
-            final_summary = "Workflow completed successfully."
-        else:
-            final_status = "blocked"
-            failure_summary = str(getattr(result, "failure_summary", "") or "").strip()
-            final_summary = failure_summary or "Workflow finished with unresolved review or test issues."
+        current_item = store.get_work_item(work_item_id) or {}
+        requested_status = str(current_item.get("status") or "")
+        if requested_status not in {"cancelled", "paused"}:
+            requested_status = "cancelled"
+        final_status, final_summary = _derive_final_status_and_summary(
+            result,
+            cancelled=_should_cancel(),
+            requested_status=requested_status,
+        )
 
         store.update_work_item_status(work_item_id, final_status)
         if final_status == "completed":

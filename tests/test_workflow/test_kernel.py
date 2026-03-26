@@ -9,7 +9,14 @@ from unittest.mock import Mock, patch
 
 from myswat.repo_ops import GitCommitResult, GitProbeResult, GitPushResult
 from myswat.server.contracts import ReviewCycleCancellationRequest, ReviewVerdictEnvelope, StageRunCompletion
-from myswat.workflow.kernel import GATestResult, PhaseResult, WorkflowKernel, WorkflowResult, _extract_json_block
+from myswat.workflow.kernel import (
+    GATestResult,
+    PhaseResult,
+    WorkflowKernel,
+    WorkflowResult,
+    _extract_json_block,
+    detect_incomplete_scope_report,
+)
 from myswat.workflow.dag import DeliverySlice, SliceDAG, SliceDAGError, SliceStatus, generate_slice_id
 from myswat.workflow.modes import WorkMode
 from myswat.workflow.runtime import WorkflowRuntime
@@ -362,9 +369,9 @@ def test_design_stage_and_review_prompts_include_requirement_and_design_context(
     assert plan_stage.stage_name == "plan"
     assert "The following design has been approved" in plan_stage.task_prompt
     assert "# Design\nUse iterative fibonacci." in plan_stage.task_prompt
-    assert "Default to exactly 1 phase." in plan_stage.task_prompt
+    assert "Default to the minimum number of phases that still preserves full approved scope." in plan_stage.task_prompt
     assert "Use multiple phases ONLY when the work is genuinely large" in plan_stage.task_prompt
-    assert "Add Phase 2+ only if the work genuinely requires additional sequential milestones." in plan_stage.task_prompt
+    assert "you may NOT silently drop scope" in plan_stage.task_prompt
 
 
 def test_plan_review_feedback_builds_revision_prompt_with_collected_issues():
@@ -2951,6 +2958,235 @@ def test_run_plan_records_delivery_slices_in_status():
         "Slice: Build auth [AFK]",
         "Slice: Build billing [HITL] - Blocked by: Slice 1",
     ]
+
+
+def test_run_plan_blocks_when_plan_drops_approved_design_slices():
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=210,
+        mode=WorkMode.develop,
+        auto_approve=True,
+    )
+    design = (
+        "## Issue-Ready Delivery Slices\n"
+        "Slice 1: Foundation seam\n"
+        "Slice 2: Point-get tracer bullet\n"
+        "Slice 3: Scan and DML migration\n"
+    )
+    collapsed_plan = (
+        "## Delivery Slices\n"
+        "Slice 1: Point-get tracer bullet\n"
+        "Type: AFK\n"
+        "\n"
+        "Phase 1: Point-get tracer bullet\n"
+        "Implement the tracer bullet only.\n"
+    )
+
+    with patch.object(
+        kernel,
+        "_wait_for_stage_result",
+        return_value=SimpleNamespace(status="completed", artifact_content="draft", artifact_id=1000),
+    ):
+        with patch.object(kernel, "_run_review_loop", return_value=(collapsed_plan, 1, True)):
+            with patch.object(kernel, "_checkpoint", return_value=(collapsed_plan, True)):
+                reviewed, ok = kernel._run_plan("req", design)
+
+    assert reviewed == collapsed_plan
+    assert ok is False
+    assert kernel._blocked is True
+    assert "Missing approved delivery slices" in kernel._failure_summary
+    store.update_work_item_state.assert_any_call(
+        210,
+        current_stage="plan_scope_invalid",
+        latest_summary=kernel._failure_summary,
+        next_todos=["Regenerate the implementation plan so it covers every approved delivery slice."],
+        open_issues=[
+            "Missing approved delivery slice in plan: Foundation seam",
+            "Missing approved delivery slice in plan: Scan and DML migration",
+        ],
+        updated_by_agent_id=10,
+    )
+
+
+def test_run_reruns_saved_plan_when_existing_plan_shrank_scope():
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+    store.list_artifacts.return_value = [
+        {
+            "id": 200,
+            "artifact_type": "phase_result",
+            "iteration": 1,
+            "title": "Old phase 1",
+            "content": "old summary",
+            "metadata_json": {
+                "phase_index": 1,
+                "phase_name": "Old phase 1",
+                "committed": True,
+            },
+        },
+    ]
+    store.get_latest_artifact_by_type.side_effect = lambda work_item_id, artifact_type: {
+        "design_doc": {
+            "id": 10,
+            "content": (
+                "## Issue-Ready Delivery Slices\n"
+                "Slice 1: Foundation seam\n"
+                "Slice 2: Point-get tracer bullet\n"
+            ),
+        },
+        "implementation_plan": {
+            "id": 11,
+            "content": "Phase 1: Point-get tracer bullet\nOnly do the tracer bullet.\n",
+        },
+    }.get(artifact_type)
+
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=211,
+        mode=WorkMode.develop,
+        auto_approve=True,
+    )
+
+    with patch.object(kernel, "_run_plan", return_value=("revised plan", True)) as run_plan:
+        with patch.object(
+            kernel,
+            "_run_phase",
+            return_value=PhaseResult(name="Point-get tracer bullet", summary="done", committed=True),
+        ) as run_phase:
+            with patch.object(kernel, "_generate_final_report", return_value="Status: COMPLETE\nAll done."):
+                with patch.object(kernel, "_export_final_report_to_docs", return_value=True):
+                    with patch.object(kernel, "_finalize_workflow_repo_sync", return_value=True):
+                        result = kernel.run("reduce boundaries")
+
+    assert result.plan == "revised plan"
+    run_plan.assert_called_once()
+    run_phase.assert_called_once()
+
+
+def test_detect_incomplete_scope_report_flags_structured_and_textual_markers():
+    report = (
+        "## Scope completeness\n"
+        "Status: INCOMPLETE\n"
+        "\n"
+        "The checked repository currently implements a narrower subset.\n"
+        "The TxnStoragePort seam is not present yet.\n"
+    )
+
+    reasons = detect_incomplete_scope_report(report)
+
+    assert "the final report marks scope completeness as INCOMPLETE" in reasons
+    assert "the report says only a narrower subset was implemented" in reasons
+    assert "the report says planned pieces are not present yet" in reasons
+
+
+def test_run_blocks_when_final_report_says_scope_is_incomplete():
+    store = _store()
+    service = _service()
+    dev = _participant(10, "developer")
+    qa = _participant(20, "qa_main")
+
+    service.wait_for_stage_run_completion.side_effect = [
+        StageRunCompletion(
+            stage_run_id=100,
+            work_item_id=212,
+            stage_name="plan",
+            status="completed",
+            summary="Plan drafted.",
+            artifact_id=1000,
+            artifact_content="Phase 1: Implement kernel\nDo the change.\n",
+        ),
+        StageRunCompletion(
+            stage_run_id=101,
+            work_item_id=212,
+            stage_name="phase_1",
+            status="completed",
+            summary="Phase implementation complete.",
+            artifact_id=1001,
+            artifact_content="Summary of phase 1",
+        ),
+        StageRunCompletion(
+            stage_run_id=102,
+            work_item_id=212,
+            stage_name="report",
+            status="completed",
+            summary="Final report generated.",
+            artifact_id=1002,
+            artifact_content=(
+                "## Scope completeness\n"
+                "Status: INCOMPLETE\n"
+                "\n"
+                "The checked repository currently implements a narrower subset.\n"
+                "The manifest coordinator is not present yet.\n"
+            ),
+        ),
+    ]
+    service.wait_for_review_verdicts.side_effect = [
+        [
+            ReviewVerdictEnvelope(
+                cycle_id=2000,
+                reviewer_role="qa_main",
+                verdict="lgtm",
+                summary="Plan approved.",
+            ),
+        ],
+        [
+            ReviewVerdictEnvelope(
+                cycle_id=2001,
+                reviewer_role="qa_main",
+                verdict="lgtm",
+                summary="Code approved.",
+            ),
+        ],
+    ]
+
+    kernel = WorkflowKernel(
+        store=store,
+        service=service,
+        dev=dev,
+        qas=[qa],
+        project_id=1,
+        work_item_id=212,
+        mode=WorkMode.develop,
+        auto_approve=True,
+    )
+
+    with patch.object(kernel, "_export_final_report_to_docs", return_value=True):
+        with patch.object(kernel, "_finalize_workflow_repo_sync", return_value=True) as finalize_sync:
+            result = kernel.run("Implement the new workflow kernel")
+
+    assert result.success is False
+    assert result.blocked is True
+    assert "scope is still incomplete" in result.failure_summary
+    finalize_sync.assert_not_called()
+    store.update_work_item_state.assert_any_call(
+        212,
+        current_stage="workflow_finished_with_issues",
+        latest_summary=result.failure_summary,
+        next_todos=[
+            "Resume the workflow and finish the remaining approved slices before marking it complete.",
+        ],
+        open_issues=[
+            "the final report marks scope completeness as INCOMPLETE",
+            "the report says only a narrower subset was implemented",
+            "the report says planned pieces are not present yet",
+        ],
+        updated_by_agent_id=10,
+    )
 
 
 def test_dag_serial_hitl_deferred_in_daemon_mode():

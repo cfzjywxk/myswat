@@ -212,7 +212,11 @@ def work(
         "--auto-approve/--interactive-checkpoints",
         help="Automatically continue through workflow checkpoints by default. Use --interactive-checkpoints to require manual approval.",
     ),
-    resume: int = typer.Option(None, "--resume", help="Resume a blocked/failed work item by ID."),
+    resume: int = typer.Option(
+        None,
+        "--resume",
+        help="Resume a blocked/paused work item, or a completed item whose final report marked the scope incomplete.",
+    ),
 ):
     """Submit a teamwork workflow to the local MySwat daemon."""
     from rich.console import Console

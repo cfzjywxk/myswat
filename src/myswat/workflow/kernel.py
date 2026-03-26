@@ -100,6 +100,57 @@ class WorkflowResult:
     failure_summary: str = ""
 
 
+_SCOPE_NORMALIZE_RE = re.compile(r"[^a-z0-9]+")
+_INCOMPLETE_SCOPE_STATUS_RE = re.compile(
+    r"^status:\s*incomplete\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+# The structured status line is the primary signal. These textual patterns are
+# best-effort backstops for older saved reports and prompt drift; they are not
+# intended to exhaustively recognize every way an agent could describe missing scope.
+_INCOMPLETE_SCOPE_SIGNAL_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r"\bnarrower subset\b", re.IGNORECASE),
+        "the report says only a narrower subset was implemented",
+    ),
+    (
+        re.compile(
+            r"\bnot (?:the )?(?:full|complete)\s+"
+            r"(?:design(?:-slice)?\s+set|design|scope|implementation|refactor|migration|feature)\b",
+            re.IGNORECASE,
+        ),
+        "the report says the full approved scope is not complete",
+    ),
+    (
+        re.compile(r"\bnot present yet\b", re.IGNORECASE),
+        "the report says planned pieces are not present yet",
+    ),
+    (
+        re.compile(r"\bonly partially migrated\b", re.IGNORECASE),
+        "the report says the migration is only partial",
+    ),
+    (
+        re.compile(r"\bstill pending\b", re.IGNORECASE),
+        "the report says approved work is still pending",
+    ),
+)
+
+
+def _normalize_scope_text(value: str) -> str:
+    return re.sub(r"\s+", " ", _SCOPE_NORMALIZE_RE.sub(" ", (value or "").casefold())).strip()
+
+
+def detect_incomplete_scope_report(report: str) -> list[str]:
+    text = report or ""
+    reasons: list[str] = []
+    if _INCOMPLETE_SCOPE_STATUS_RE.search(text):
+        reasons.append("the final report marks scope completeness as INCOMPLETE")
+    for pattern, message in _INCOMPLETE_SCOPE_SIGNAL_PATTERNS:
+        if pattern.search(text):
+            reasons.append(message)
+    return list(dict.fromkeys(reasons))
+
+
 def _extract_json_block(text: str) -> dict | list | None:
     def _strip_code_fences(value: str) -> str:
         if "```json" in value:
@@ -248,6 +299,7 @@ class WorkflowKernel:
         self._repo_initial_dirty_paths: set[str] = set()
         self._repo_managed_paths: set[str] = set()
         self._repo_commits_created = False
+        self._plan_was_rerun = False
         self._requirements_skill_pack = load_requirements_skill_pack(requirements_skills_root)
 
     def _resume_entry_point(self) -> str:
@@ -1050,6 +1102,31 @@ class WorkflowKernel:
 
         phases = self._parse_phases(plan)
         return [f"Phase {index}: {name}" for index, name in enumerate(phases[:8], start=1)]
+
+    def _missing_design_slice_titles(self, design: str, plan: str) -> list[str]:
+        design_slices = self._parse_delivery_slices(design)
+        if not design_slices:
+            return []
+
+        normalized_plan = _normalize_scope_text(plan)
+        missing: list[str] = []
+        for slice_item in design_slices:
+            normalized_title = _normalize_scope_text(slice_item.title)
+            if normalized_title and normalized_title not in normalized_plan:
+                missing.append(slice_item.title)
+        return missing
+
+    def _plan_scope_validation_error(self, design: str, plan: str) -> str | None:
+        missing = self._missing_design_slice_titles(design, plan)
+        if not missing:
+            return None
+
+        preview = ", ".join(missing[:5])
+        suffix = "" if len(missing) <= 5 else f" (+{len(missing) - 5} more)"
+        return (
+            "Implementation plan does not cover the full approved design. "
+            f"Missing approved delivery slices: {preview}{suffix}."
+        )
 
     def _stage_index(self, stage_name: str) -> int:
         if stage_name == "design":
@@ -1968,6 +2045,43 @@ class WorkflowKernel:
             artifact_title="Implementation plan",
             revision_prompt_builder=revision_prompt_builder,
         )
+        validation_error = self._plan_scope_validation_error(design, reviewed)
+        if ok and validation_error:
+            missing_titles = self._missing_design_slice_titles(design, reviewed)
+            open_issues = [
+                f"Missing approved delivery slice in plan: {title}"
+                for title in missing_titles[:20]
+            ]
+            next_todos = [
+                "Regenerate the implementation plan so it covers every approved delivery slice.",
+            ]
+            self._blocked = True
+            self._failure_summary = validation_error
+            self._record_status(
+                owner,
+                stage="plan_scope_invalid",
+                summary=validation_error,
+                next_todos=next_todos,
+                open_issues=open_issues,
+                title="Implementation plan narrowed approved scope",
+            )
+            self._store.update_work_item_state(
+                self._work_item_id,
+                current_stage="plan_scope_invalid",
+                latest_summary=validation_error,
+                next_todos=next_todos,
+                open_issues=open_issues,
+                updated_by_agent_id=owner.agent_id,
+            )
+            self._append_process_event(
+                event_type="plan_scope_invalid",
+                title="Implementation plan narrowed approved scope",
+                summary=validation_error,
+                from_role="myswat",
+                to_role=owner.agent_role,
+                updated_by_agent_id=owner.agent_id,
+            )
+            return reviewed, False
         if ok:
             self._record_status(
                 owner,
@@ -1988,9 +2102,14 @@ class WorkflowKernel:
             return "rerun"
         return "load"
 
-    def _plan_stage_action(self, *, entry: str, plan: str) -> str:
+    def _plan_stage_action(self, *, entry: str, plan: str, design: str) -> str:
         if self._mode not in {WorkMode.full, WorkMode.design, WorkMode.develop}:
             return "load"
+        # Revalidate saved plans on every resume entrypoint. If the approved
+        # design and saved plan disagree on scope, we rerun planning and treat
+        # previously completed phases as untrusted under the corrected plan.
+        if plan and self._plan_scope_validation_error(design, plan):
+            return "rerun"
         if entry == "plan":
             return "rerun"
         if entry == "plan_review":
@@ -2026,7 +2145,8 @@ class WorkflowKernel:
         entry: str,
         plan: str,
     ) -> tuple[str, bool]:
-        action = self._plan_stage_action(entry=entry, plan=plan)
+        action = self._plan_stage_action(entry=entry, plan=plan, design=design)
+        self._plan_was_rerun = (action == "rerun")
         if action == "rerun":
             return self._run_plan(requirement, design)
         if action == "resume_review":
@@ -2523,6 +2643,11 @@ class WorkflowKernel:
             result.failure_summary = self._failure_summary or "Planning stage failed."
             result.final_report = result.failure_summary
             return result
+        if self._plan_was_rerun:
+            completed_phases = []
+            completed_phase_indices = set()
+            completed_summaries = []
+            result.phases = []
 
         if result.design and result.plan:
             if not self._export_design_plan_to_docs(
@@ -2620,6 +2745,35 @@ class WorkflowKernel:
             result.blocked = True
             result.failure_summary = self._failure_summary or "Failed to export workflow report."
             result.final_report = result.failure_summary
+            return result
+        incomplete_scope_reasons = detect_incomplete_scope_report(result.final_report)
+        if incomplete_scope_reasons:
+            summary = (
+                "Workflow report says the approved scope is still incomplete: "
+                + "; ".join(incomplete_scope_reasons[:3])
+            )
+            self._blocked = True
+            self._failure_summary = summary
+            result.blocked = True
+            result.failure_summary = summary
+            self._store.update_work_item_state(
+                self._work_item_id,
+                current_stage="workflow_finished_with_issues",
+                latest_summary=summary,
+                next_todos=[
+                    "Resume the workflow and finish the remaining approved slices before marking it complete.",
+                ],
+                open_issues=incomplete_scope_reasons[:20],
+                updated_by_agent_id=self._dev.agent_id,
+            )
+            self._append_process_event(
+                event_type="workflow_incomplete_scope",
+                title="Workflow report says scope is incomplete",
+                summary=summary,
+                from_role="myswat",
+                to_role=self._dev.agent_role,
+                updated_by_agent_id=self._dev.agent_id,
+            )
             return result
         if self._mode in {WorkMode.full, WorkMode.develop}:
             if not self._finalize_workflow_repo_sync():

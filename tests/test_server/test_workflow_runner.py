@@ -12,6 +12,7 @@ import typer
 from click.exceptions import Exit as ClickExit
 
 from myswat.server.workflow_runner import (
+    _derive_final_status_and_summary,
     get_workflow_agents,
     load_project_context,
     run_workflow,
@@ -257,6 +258,26 @@ def test_run_workflow_existing_item_passes_resume_stage_to_kernel(
         next_todos=[],
         open_issues=[],
     )
+
+
+def test_derive_final_status_blocks_when_successful_result_reports_incomplete_scope():
+    result = SimpleNamespace(
+        success=True,
+        final_report=(
+            "## Scope completeness\n"
+            "Status: INCOMPLETE\n"
+            "The checked repository currently implements a narrower subset.\n"
+        ),
+    )
+
+    final_status, final_summary = _derive_final_status_and_summary(
+        result,
+        cancelled=False,
+        requested_status="cancelled",
+    )
+
+    assert final_status == "blocked"
+    assert "scope is still incomplete" in final_summary
 
 
 @patch("myswat.server.workflow_runner.submit_workflow_summary_learn_request")

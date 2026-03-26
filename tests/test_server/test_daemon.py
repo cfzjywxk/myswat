@@ -214,6 +214,7 @@ def test_handle_work_resume_rejects_non_resumable_status():
         "description": "implement fibonacci",
         "metadata_json": {"work_mode": "full"},
     }
+    daemon._store.get_latest_artifact_by_type.return_value = None
 
     try:
         daemon.handle_work(
@@ -227,6 +228,64 @@ def test_handle_work_resume_rejects_non_resumable_status():
         assert "not resumable" in str(exc)
     else:
         raise AssertionError("Expected non-resumable work item rejection")
+
+
+def test_handle_work_resume_allows_completed_item_when_final_report_marks_incomplete_scope():
+    daemon = MySwatDaemon.__new__(MySwatDaemon)
+    daemon._lock = threading.RLock()
+    daemon._store = Mock()
+    daemon._find_active_work_item = Mock(return_value=None)
+    daemon.ensure_workers = Mock(return_value=["architect", "developer", "qa_main"])
+    daemon._start_workflow_thread = Mock()
+    daemon._store.get_project_by_slug.return_value = {"id": 1, "slug": "fib-demo"}
+    daemon._store.get_work_item.return_value = {
+        "id": 89,
+        "project_id": 1,
+        "status": "completed",
+        "title": "fibonacci",
+        "description": "implement fibonacci",
+        "metadata_json": {
+            "work_mode": "full",
+            "requested_workdir": "/tmp/fib-demo",
+        },
+    }
+    daemon._store.get_latest_artifact_by_type.return_value = {
+        "id": 1001,
+        "content": (
+            "## Scope completeness\n"
+            "Status: INCOMPLETE\n"
+            "The checked repository currently implements a narrower subset.\n"
+        ),
+    }
+
+    result = daemon.handle_work(
+        project="fib-demo",
+        requirement="",
+        workdir=None,
+        mode=WorkMode.full.value,
+        resume_work_item_id=89,
+    )
+
+    assert result == {
+        "ok": True,
+        "work_item_id": 89,
+        "workers": ["architect", "developer", "qa_main"],
+    }
+    daemon._store.update_work_item_status.assert_called_once_with(89, "pending")
+    daemon._store.update_work_item_state.assert_called_once_with(
+        89,
+        current_stage="workflow_finished_with_issues",
+        latest_summary="MySwat daemon resumed the existing work item because its final report marked the approved scope as incomplete.",
+        next_todos=[
+            "Continue the saved workflow and finish the remaining approved slices.",
+        ],
+        open_issues=[
+            "the final report marks scope completeness as INCOMPLETE",
+            "the report says only a narrower subset was implemented",
+        ],
+    )
+    daemon._store.append_work_item_process_event.assert_called_once()
+    assert "scope as incomplete" in daemon._store.append_work_item_process_event.call_args.kwargs["summary"]
 
 
 def test_handle_work_serializes_concurrent_submissions():

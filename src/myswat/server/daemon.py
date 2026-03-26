@@ -27,6 +27,7 @@ from myswat.memory.store import MemoryStore
 from myswat.server.mcp_stdio import MySwatMCPDispatcher, dispatch_rpc_request
 from myswat.server.service import MySwatToolService
 from myswat.server.workflow_runner import run_workflow
+from myswat.workflow.kernel import detect_incomplete_scope_report
 from myswat.workflow.modes import WorkMode
 
 _ACTIVE_WORK_ITEM_STATUSES = frozenset({"pending", "in_progress", "review"})
@@ -847,7 +848,15 @@ class MySwatDaemon:
                 if not item or int(item.get("project_id") or 0) != int(project_row["id"]):
                     raise ValueError(f"Work item {resume_work_item_id} not found in project '{project}'")
                 item_status = str(item.get("status") or "")
-                if item_status not in {"blocked", "paused"}:
+                report_reasons: list[str] = []
+                if item_status == "completed":
+                    latest_report = self._store.get_latest_artifact_by_type(
+                        resume_work_item_id,
+                        "final_report",
+                    )
+                    report_text = str((latest_report or {}).get("content") or "")
+                    report_reasons = detect_incomplete_scope_report(report_text)
+                if item_status not in {"blocked", "paused"} and not report_reasons:
                     raise ValueError(
                         f"Work item {resume_work_item_id} is not resumable "
                         f"(status={item_status or 'unknown'})."
@@ -873,11 +882,26 @@ class MySwatDaemon:
                 log_requirement = requirement
                 roles = self.ensure_workers(project_slug=project, mode=work_mode, workdir=workdir)
                 self._store.update_work_item_status(work_item_id, "pending")
+                resume_summary = (
+                    "MySwat daemon resumed the existing work item because its final report marked the approved scope as incomplete."
+                    if report_reasons
+                    else "MySwat daemon resumed the existing work item from its saved stage."
+                )
+                if report_reasons:
+                    self._store.update_work_item_state(
+                        work_item_id,
+                        current_stage="workflow_finished_with_issues",
+                        latest_summary=resume_summary,
+                        next_todos=[
+                            "Continue the saved workflow and finish the remaining approved slices.",
+                        ],
+                        open_issues=report_reasons[:20],
+                    )
                 self._store.append_work_item_process_event(
                     work_item_id,
                     event_type="workflow_resumed",
                     title="Workflow resumed",
-                    summary="MySwat daemon resumed the existing work item from its saved stage.",
+                    summary=resume_summary,
                     from_role="user",
                     to_role="myswat",
                 )

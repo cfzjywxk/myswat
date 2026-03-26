@@ -979,9 +979,9 @@ class TestRunPlanning:
         result = engine._run_planning("design", "requirement")
         assert result == "the plan"
         prompt = dev.send.call_args.args[0]
-        assert "Default to exactly 1 phase." in prompt
+        assert "Default to the minimum number of phases that still preserves full approved scope." in prompt
         assert "Do NOT split work just to add detail" in prompt
-        assert "Add Phase 2+ only if the work genuinely requires additional sequential milestones." in prompt
+        assert "you may NOT silently drop scope" in prompt
 
     def test_failure_returns_empty(self):
         engine, dev, _ = _make_engine(dev_responses=[_fail()])

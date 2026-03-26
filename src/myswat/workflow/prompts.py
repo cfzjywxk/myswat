@@ -350,7 +350,7 @@ Output ONLY a JSON object:
 # ── Stage 3: Implementation Planning ──
 
 DEV_IMPLEMENTATION_PLAN = """You are a senior developer. The following design has been approved.
-Create the smallest sensible implementation plan.
+Create the smallest sensible implementation plan that still covers the full approved design.
 
 ## Requirement
 {requirement}
@@ -360,7 +360,8 @@ Create the smallest sensible implementation plan.
 
 ## Your Deliverable
 Decide first whether phased delivery is actually needed.
-- Default to exactly 1 phase.
+- Default to the minimum number of phases that still preserves full approved scope.
+- If the approved design already names delivery slices, milestones, or tracer-bullet plus follow-up slices, your plan MUST cover all of them. You may group slices into one phase, but you may NOT silently drop scope.
 - Use multiple phases ONLY when the work is genuinely large, risky, or naturally splits into independent milestones that should land separately.
 - For small or self-contained tasks, a single phase is preferred.
 - Do NOT split work just to add detail, isolate tests into their own phase, or create artificial checkpoints.
@@ -369,6 +370,11 @@ Return the minimum number of sequential phases needed. Each phase should be:
 - Independently implementable and testable
 - Large enough to be a meaningful milestone, not a tiny slice
 - Committable on its own (no broken state between phases)
+
+If the design includes a `## Delivery Slices` or `## Issue-Ready Delivery Slices` section:
+- Preserve every approved slice title somewhere in the plan.
+- Keep a `## Delivery Slices` section in the plan before the sequential phase list.
+- Make it clear how each approved slice is delivered, even if several slices are grouped into one phase.
 
 For simple tasks such as a small utility, algorithm, CLI command, or basic service, one phase is usually correct.
 
@@ -398,6 +404,7 @@ DEV_ADDRESS_PLAN_COMMENTS = """Address the following review comments on your imp
 Address each comment and provide the complete updated plan.
 Keep the same Phase N: <name> format.
 Keep the phase count as low as possible.
+Do NOT narrow the approved scope while revising the plan.
 Do NOT add extra phases unless the feedback reveals real implementation complexity that requires them.
 """
 
@@ -410,6 +417,7 @@ QA_PLAN_REVIEW = """You are a QA engineer reviewing an implementation plan.
 
 ## Review Criteria
 1. **Completeness** — Does the plan cover the full approved design?
+   Reject any plan that silently reduces the approved scope, lands only the first slice, or omits approved delivery slices/milestones.
 2. **Ordering** — Are phases in a logical sequence?
 3. **Granularity** — Prefer the minimum number of phases that still yields clear, reviewable milestones. Simple or self-contained tasks should usually stay as a single phase; request changes if the plan is split more finely than the work justifies.
 4. **Testability** — Can each phase be verified independently?
@@ -801,9 +809,12 @@ DEV_FINAL_REPORT = """Provide a final summary of the complete implementation.
 
 ## Instructions
 Summarize:
-1. What was built overall
-2. Architecture of the final solution
-3. Key files and their purposes
-4. How to test/verify the implementation
-5. Any known limitations or future work
+1. Scope completeness
+   Start with exactly one line: `Status: COMPLETE` or `Status: INCOMPLETE`
+   If incomplete, explicitly list the remaining approved slices / missing scope.
+2. What was built overall
+3. Architecture of the final solution
+4. Key files and their purposes
+5. How to test/verify the implementation
+6. Any known limitations or future work
 """
