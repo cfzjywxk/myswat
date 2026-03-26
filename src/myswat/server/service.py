@@ -1108,6 +1108,13 @@ class MySwatToolService:
             latest_summary=request.summary,
             updated_by_agent_id=request.agent_id,
         )
+        self._store.append_work_item_process_event(
+            request.work_item_id,
+            event_type="stage_blocked",
+            summary=request.summary,
+            from_role=request.agent_role,
+            updated_by_agent_id=request.agent_id,
+        )
         self._store.append_coordination_event(
             work_item_id=request.work_item_id,
             stage_run_id=request.stage_run_id,
@@ -1116,6 +1123,7 @@ class MySwatToolService:
             summary=request.summary,
             from_agent_id=request.agent_id,
             from_role=request.agent_role,
+            payload_json=request.metadata_json,
         )
         self._notifier.notify_stage(request.stage_run_id)
         return StageRunCompletion(

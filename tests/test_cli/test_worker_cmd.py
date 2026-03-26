@@ -207,7 +207,19 @@ def test_run_worker_reports_failed_stage_roundtrip():
     service.heartbeat_runtime.return_value = None
     service.update_runtime_status.return_value = {"runtime_registration_id": 8, "status": "offline"}
 
-    runner = _FakeRunner([(False, "cargo test failed due to borrow checker errors")])
+    runner = _FakeRunner(
+        [
+            (
+                False,
+                "cargo test failed due to borrow checker errors",
+                {
+                    "exit_code": 101,
+                    "raw_stderr": "error[E0502]: cannot borrow `rows` as mutable",
+                    "cancelled": False,
+                },
+            )
+        ]
+    )
     result = run_worker(
         project_slug="fib-demo",
         role="developer",
@@ -223,7 +235,65 @@ def test_run_worker_reports_failed_stage_roundtrip():
     request = service.fail_stage_task.call_args.args[0]
     assert request.stage_run_id == 24
     assert request.stage_name == "phase_1"
+    assert request.metadata_json["failure_kind"] == "runner_exit"
+    assert request.metadata_json["runner_exit_code"] == 101
+    assert "cannot borrow `rows` as mutable" in request.metadata_json["stderr_tail"]
+    assert "borrow checker errors" in request.metadata_json["response_excerpt"]
+    assert "exit=101" in request.summary
     assert "borrow checker errors" in request.summary
+
+
+def test_run_worker_reports_stage_runner_exception_as_blocked_stage():
+    service = Mock()
+    service.register_runtime.return_value = SimpleNamespace(
+        model_dump=lambda: {"runtime_registration_id": 28}
+    )
+    service.claim_next_assignment.side_effect = _assignment_stream(
+        AssignmentEnvelope(
+            assignment_kind="stage",
+            runtime_registration_id=28,
+            project_id=1,
+            work_item_id=13,
+            stage_run_id=25,
+            stage_name="design",
+            agent_id=3,
+            agent_role="architect",
+            iteration=1,
+            prompt="Revise the design",
+            system_context="kind=stage;stage=design",
+            artifact_type="design_doc",
+            artifact_title="Technical design",
+        )
+    )
+    service.fail_stage_task.return_value = StageRunCompletion(
+        stage_run_id=25,
+        work_item_id=13,
+        stage_name="design",
+        status="blocked",
+        summary="network down",
+    )
+    service.heartbeat_runtime.return_value = None
+    service.update_runtime_status.return_value = {"runtime_registration_id": 28, "status": "offline"}
+
+    runner = _FakeRunner([RuntimeError("network down")])
+    result = run_worker(
+        project_slug="fib-demo",
+        role="architect",
+        server_url="http://unused",
+        project_row={"id": 1, "slug": "fib-demo", "repo_path": "/tmp/fib-demo"},
+        agent_row=_agent_row("architect"),
+        runner=runner,
+        mcp_client=_DirectMCPClient(service),
+        idle_exit_seconds=0.05,
+    )
+
+    assert result == {"stage_assignments": 1, "review_assignments": 0}
+    request = service.fail_stage_task.call_args.args[0]
+    assert request.stage_run_id == 25
+    assert request.metadata_json["failure_kind"] == "runner_exception"
+    assert request.metadata_json["exception_type"] == "RuntimeError"
+    assert request.metadata_json["exception_message"] == "network down"
+    assert request.summary == "network down"
 
 
 def test_run_worker_renews_stage_lease_while_assignment_is_running():
@@ -321,6 +391,13 @@ def test_run_worker_cancels_runner_when_stage_keepalive_fails():
     )
     service.heartbeat_runtime.return_value = None
     service.renew_stage_run_lease.side_effect = RuntimeError("lease lost")
+    service.fail_stage_task.return_value = StageRunCompletion(
+        stage_run_id=66,
+        work_item_id=46,
+        stage_name="phase_1",
+        status="blocked",
+        summary="lease lost",
+    )
     service.update_runtime_status.return_value = {"runtime_registration_id": 811, "status": "offline"}
 
     started = threading.Event()
@@ -350,9 +427,13 @@ def test_run_worker_cancels_runner_when_stage_keepalive_fails():
         thread.join(timeout=2)
 
     assert thread.is_alive() is False
-    assert "result" not in result_holder
-    assert isinstance(result_holder.get("error"), RuntimeError)
-    assert "lease lost" in str(result_holder["error"])
+    assert "error" not in result_holder
+    assert result_holder["result"] == {"stage_assignments": 1, "review_assignments": 0}
+    request = service.fail_stage_task.call_args.args[0]
+    assert request.stage_run_id == 66
+    assert request.metadata_json["failure_kind"] == "runner_exception"
+    assert request.metadata_json["exception_message"] == "lease lost"
+    assert request.summary == "lease lost"
     assert runner.cancel_calls == 1
 
 

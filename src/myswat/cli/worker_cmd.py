@@ -41,6 +41,8 @@ _RUNTIME_LEASE_SECONDS = 300
 _ASSIGNMENT_LEASE_SECONDS = 300
 _KEEPALIVE_INTERVAL_SECONDS = 60.0
 _REVIEW_MAX_ATTEMPTS = 2
+_STAGE_DIAGNOSTIC_TEXT_LIMIT = 2_000
+_STAGE_EXCEPTION_TEXT_LIMIT = 1_000
 _REVIEW_DIAGNOSTIC_TEXT_LIMIT = 2_000
 _REVIEW_EXCEPTION_TEXT_LIMIT = 1_000
 
@@ -67,6 +69,12 @@ class ReviewAttemptResult:
     failure_kind: str | None = None
     summary: str = ""
     diagnostics: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class StageFailureResult:
+    summary: str
+    metadata_json: dict[str, Any] = field(default_factory=dict)
 
 
 def _configure_logging() -> None:
@@ -157,7 +165,7 @@ def _clip_diagnostic_text(value: Any, *, limit: int) -> str:
     return text[-limit:]
 
 
-def _looks_nonretryable_review_failure(*parts: str) -> bool:
+def _looks_nonretryable_runner_failure(*parts: str) -> bool:
     text = " ".join(part for part in parts if part).lower()
     return any(
         needle in text
@@ -203,7 +211,7 @@ def _classify_review_attempt(
     }
     if error is not None:
         summary = diagnostics["exception_message"] or "Review execution raised an exception."
-        failure_kind = "environment_misconfiguration" if _looks_nonretryable_review_failure(summary) else "runner_exception"
+        failure_kind = "environment_misconfiguration" if _looks_nonretryable_runner_failure(summary) else "runner_exception"
         return ReviewAttemptResult(
             outcome=(
                 ReviewAttemptOutcome.RETRYABLE_FAILURE
@@ -263,7 +271,7 @@ def _classify_review_attempt(
         )
 
     summary = failure_text or "Review execution failed."
-    failure_kind = "environment_misconfiguration" if _looks_nonretryable_review_failure(summary) else "execution_failed"
+    failure_kind = "environment_misconfiguration" if _looks_nonretryable_runner_failure(summary) else "execution_failed"
     return ReviewAttemptResult(
         outcome=(
             ReviewAttemptOutcome.RETRYABLE_FAILURE
@@ -273,6 +281,77 @@ def _classify_review_attempt(
         failure_kind=failure_kind,
         summary=summary,
         diagnostics=diagnostics,
+    )
+
+
+def _classify_stage_failure(
+    *,
+    response: Any | None = None,
+    resolved_content: str = "",
+    error: Exception | None = None,
+) -> StageFailureResult:
+    diagnostics = {
+        "failure_kind": "",
+        "runner_exit_code": getattr(response, "exit_code", None),
+        "cancelled": bool(getattr(response, "cancelled", False)),
+        "stderr_tail": _clip_diagnostic_text(
+            getattr(response, "raw_stderr", ""),
+            limit=_STAGE_DIAGNOSTIC_TEXT_LIMIT,
+        ),
+        "response_excerpt": _clip_diagnostic_text(
+            resolved_content or getattr(response, "content", ""),
+            limit=_STAGE_DIAGNOSTIC_TEXT_LIMIT,
+        ),
+        "exception_type": type(error).__name__ if error is not None else "",
+        "exception_message": _clip_diagnostic_text(
+            str(error) if error is not None else "",
+            limit=_STAGE_EXCEPTION_TEXT_LIMIT,
+        ),
+    }
+
+    detail_text = diagnostics["response_excerpt"] or diagnostics["stderr_tail"]
+
+    if error is not None:
+        summary = diagnostics["exception_message"] or "Stage execution raised an exception."
+        diagnostics["failure_kind"] = (
+            "environment_misconfiguration"
+            if _looks_nonretryable_runner_failure(
+                summary,
+                diagnostics["stderr_tail"],
+                diagnostics["response_excerpt"],
+            )
+            else "runner_exception"
+        )
+        return StageFailureResult(
+            summary=summary[:4000],
+            metadata_json=diagnostics,
+        )
+
+    if diagnostics["cancelled"]:
+        diagnostics["failure_kind"] = "cancelled"
+        return StageFailureResult(
+            summary="Stage execution was cancelled.",
+            metadata_json=diagnostics,
+        )
+
+    exit_code = diagnostics["runner_exit_code"]
+    if _looks_nonretryable_runner_failure(detail_text, diagnostics["stderr_tail"]):
+        diagnostics["failure_kind"] = "environment_misconfiguration"
+    elif exit_code not in (None, 0):
+        diagnostics["failure_kind"] = "runner_exit"
+    else:
+        diagnostics["failure_kind"] = "unsuccessful_response"
+
+    if exit_code not in (None, 0):
+        summary = f"Stage execution failed (exit={exit_code})."
+    else:
+        summary = "Stage execution failed."
+    if detail_text:
+        summary = f"{summary} {detail_text}".strip()
+
+    return StageFailureResult(
+        summary=summary[:4000],
+        metadata_json=diagnostics,
     )
 
 
@@ -577,20 +656,28 @@ def _handle_stage_assignment(
         role=role,
     )
     runner.reset_session()
-    response = _invoke_runner_with_keepalive(
-        assignment=assignment,
-        runner=runner,
-        prompt=prompt,
-        system_context=system_context,
-        mcp=mcp,
-        runtime_registration_id=runtime_registration_id,
-    )
-    resolved_content = _resolve_runner_response_content(response.content)
+    response: Any | None = None
+    resolved_content = ""
+    error: Exception | None = None
+    try:
+        response = _invoke_runner_with_keepalive(
+            assignment=assignment,
+            runner=runner,
+            prompt=prompt,
+            system_context=system_context,
+            mcp=mcp,
+            runtime_registration_id=runtime_registration_id,
+        )
+        resolved_content = _resolve_runner_response_content(
+            str(getattr(response, "content", "") or "")
+        )
+    except Exception as exc:
+        error = exc
 
     stage_run_id = int(assignment["stage_run_id"])
     work_item_id = int(assignment["work_item_id"])
     stage_name = str(assignment["stage_name"])
-    if response.success:
+    if error is None and bool(getattr(response, "success", False)):
         mcp.call_tool(
             "complete_stage_task",
             {
@@ -609,6 +696,11 @@ def _handle_stage_assignment(
         )
         return
 
+    failure = _classify_stage_failure(
+        response=response,
+        resolved_content=resolved_content,
+        error=error,
+    )
     mcp.call_tool(
         "fail_stage_task",
         {
@@ -618,7 +710,8 @@ def _handle_stage_assignment(
             "agent_id": int(agent_row["id"]),
             "agent_role": role,
             "stage_name": stage_name,
-            "summary": resolved_content[:4000] or f"{role} failed during {stage_name}",
+            "summary": failure.summary,
+            "metadata_json": failure.metadata_json,
         },
     )
 

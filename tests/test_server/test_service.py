@@ -21,6 +21,7 @@ from myswat.server.contracts import (
     CompleteStageTaskRequest,
     CoordinationEventRecord,
     DecisionPersistenceRequest,
+    FailStageTaskRequest,
     KnowledgeSearchRequest,
     RecentArtifactsRequest,
     ReviewCycleCancellationRequest,
@@ -1133,6 +1134,73 @@ def test_request_review_creates_pending_cycle_and_logs_event():
         task_json={
             "task_prompt": "Please review this artifact",
             "task_focus": "rollback safety",
+        },
+    )
+
+
+def test_fail_stage_task_records_blocked_state_and_process_event():
+    store = Mock(spec=MemoryStore)
+    service = MySwatToolService(store)
+
+    result = service.fail_stage_task(
+        FailStageTaskRequest(
+            stage_run_id=55,
+            runtime_registration_id=91,
+            work_item_id=11,
+            agent_id=3,
+            agent_role="developer",
+            stage_name="phase_1",
+            summary="Stage execution failed (exit=101). borrow checker regression",
+            metadata_json={
+                "failure_kind": "runner_exit",
+                "runner_exit_code": 101,
+                "stderr_tail": "error[E0502]",
+            },
+        )
+    )
+
+    assert result.status == "blocked"
+    assert result.metadata_json == {
+        "failure_kind": "runner_exit",
+        "runner_exit_code": 101,
+        "stderr_tail": "error[E0502]",
+    }
+    store.update_stage_run.assert_called_once_with(
+        55,
+        status="blocked",
+        summary="Stage execution failed (exit=101). borrow checker regression",
+        completed=True,
+        metadata_json={
+            "failure_kind": "runner_exit",
+            "runner_exit_code": 101,
+            "stderr_tail": "error[E0502]",
+        },
+    )
+    store.update_work_item_state.assert_called_once_with(
+        11,
+        current_stage="phase_1",
+        latest_summary="Stage execution failed (exit=101). borrow checker regression",
+        updated_by_agent_id=3,
+    )
+    store.append_work_item_process_event.assert_called_once_with(
+        11,
+        event_type="stage_blocked",
+        summary="Stage execution failed (exit=101). borrow checker regression",
+        from_role="developer",
+        updated_by_agent_id=3,
+    )
+    store.append_coordination_event.assert_called_once_with(
+        work_item_id=11,
+        stage_run_id=55,
+        stage_name="phase_1",
+        event_type="stage_blocked",
+        summary="Stage execution failed (exit=101). borrow checker regression",
+        from_agent_id=3,
+        from_role="developer",
+        payload_json={
+            "failure_kind": "runner_exit",
+            "runner_exit_code": 101,
+            "stderr_tail": "error[E0502]",
         },
     )
 
