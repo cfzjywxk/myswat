@@ -2443,6 +2443,38 @@ def test_run_resume_design_review_uses_saved_design_without_rerunning_design():
     )
 
 
+def test_run_resume_plan_uses_saved_plan_without_rerunning_plan():
+    store = _store()
+    store.get_latest_artifact_by_type.side_effect = (
+        lambda _work_item_id, artifact_type: {"id": 2, "content": "saved plan"}
+        if artifact_type == "implementation_plan"
+        else None
+    )
+    kernel = WorkflowKernel(
+        store=store,
+        service=_service(),
+        dev=_participant(10, "developer"),
+        qas=[_participant(20, "qa_main")],
+        project_id=1,
+        work_item_id=10,
+        mode=WorkMode.develop,
+        auto_approve=True,
+        resume_stage="plan",
+    )
+
+    with patch.object(kernel, "_run_plan") as run_plan:
+        with patch.object(kernel, "_try_run_dag_serial", return_value=True):
+            with patch.object(kernel, "_export_design_plan_to_docs", return_value=True):
+                with patch.object(kernel, "_generate_final_report", return_value="report"):
+                    with patch.object(kernel, "_export_final_report_to_docs", return_value=True):
+                        with patch.object(kernel, "_finalize_workflow_repo_sync", return_value=True):
+                            result = kernel.run("req")
+
+    assert result.success is True
+    assert result.plan == "saved plan"
+    run_plan.assert_not_called()
+
+
 def test_run_resume_phase_review_uses_saved_phase_artifact_and_skips_committed_phases():
     store = _store()
     store.get_latest_artifact_by_type.side_effect = (

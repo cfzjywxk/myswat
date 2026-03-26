@@ -527,6 +527,11 @@ def test_run_workflow_marks_blocked_when_engine_returns_failure_summary(
 ):
     store = Mock()
     project = _project(str(tmp_path))
+    store.get_work_item_state.return_value = {
+        "current_stage": "plan",
+        "next_todos": ["resume execution"],
+        "open_issues": ["known issue"],
+    }
     store.get_agent.side_effect = lambda _project_id, role: {
         "developer": _agent_row("developer", agent_id=10),
         "qa_main": _agent_row("qa_main", agent_id=20),
@@ -552,6 +557,13 @@ def test_run_workflow_marks_blocked_when_engine_returns_failure_summary(
     assert work_item_id == 52
     store.update_work_item_status.assert_any_call(52, "in_progress")
     store.update_work_item_status.assert_any_call(52, "blocked")
+    store.update_work_item_state.assert_called_with(
+        52,
+        current_stage="plan",
+        latest_summary="review failed",
+        next_todos=["resume execution"],
+        open_issues=["known issue"],
+    )
     mock_submit_learn.assert_called_once_with(
         store=store,
         settings=ANY,
@@ -564,6 +576,62 @@ def test_run_workflow_marks_blocked_when_engine_returns_failure_summary(
         mode="develop",
         workdir=str(tmp_path.resolve()),
     )
+
+
+@patch("myswat.server.workflow_runner.submit_workflow_summary_learn_request")
+@patch("myswat.server.workflow_runner.WorkflowKernel")
+def test_run_workflow_reads_state_before_setting_blocked_status(
+    mock_kernel_cls,
+    mock_submit_learn,
+    tmp_path,
+):
+    store = Mock()
+    project = _project(str(tmp_path))
+    current_state = {
+        "current_stage": "plan",
+        "next_todos": ["resume execution"],
+        "open_issues": ["known issue"],
+    }
+    store.get_work_item_state.return_value = current_state
+    def _clobber_status(_item_id, status):
+        if status == "blocked":
+            store.get_work_item_state.return_value = {
+                "current_stage": "workflow_finished_with_issues",
+                "next_todos": [],
+                "open_issues": [],
+            }
+    store.update_work_item_status.side_effect = _clobber_status
+    store.get_agent.side_effect = lambda _project_id, role: {
+        "developer": _agent_row("developer", agent_id=10),
+        "qa_main": _agent_row("qa_main", agent_id=20),
+        "qa_vice": None,
+    }.get(role)
+    mock_kernel_cls.return_value = Mock(
+        run=Mock(return_value=SimpleNamespace(success=False, failure_summary="review failed")),
+    )
+
+    work_item_id = run_workflow(
+        "proj",
+        "needs review",
+        work_item_id=54,
+        mode=WorkMode.develop,
+        auto_approve=True,
+        emit_console_output=False,
+        settings=_settings(),
+        store=store,
+        project_row=project,
+        service=MagicMock(),
+    )
+
+    assert work_item_id == 54
+    store.update_work_item_state.assert_called_with(
+        54,
+        current_stage="plan",
+        latest_summary="review failed",
+        next_todos=["resume execution"],
+        open_issues=["known issue"],
+    )
+    mock_submit_learn.assert_called_once()
 
 
 @patch("myswat.server.workflow_runner.submit_workflow_summary_learn_request")
@@ -632,6 +700,11 @@ def test_run_workflow_prints_progress_and_ignores_summary_learn_failures(
 ):
     store = Mock()
     project = _project(str(tmp_path))
+    store.get_work_item_state.return_value = {
+        "current_stage": "phase_2",
+        "next_todos": ["keep going"],
+        "open_issues": [],
+    }
     store.get_agent.side_effect = lambda _project_id, role: {
         "developer": _agent_row("developer", agent_id=10),
         "qa_main": _agent_row("qa_main", agent_id=20),
@@ -658,6 +731,13 @@ def test_run_workflow_prints_progress_and_ignores_summary_learn_failures(
     assert work_item_id == 53
     store.update_work_item_status.assert_any_call(53, "in_progress")
     store.update_work_item_status.assert_any_call(53, "blocked")
+    store.update_work_item_state.assert_called_with(
+        53,
+        current_stage="phase_2",
+        latest_summary="Workflow finished with unresolved review or test issues.",
+        next_todos=["keep going"],
+        open_issues=[],
+    )
     assert mock_submit_learn.call_args.kwargs["final_summary"] == (
         "Workflow finished with unresolved review or test issues."
     )

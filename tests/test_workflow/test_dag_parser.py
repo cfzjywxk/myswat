@@ -166,6 +166,51 @@ Blocked by: Slice 1
         parser_id = generate_slice_id("Parser", 1)
         assert slices[1].blocked_by == [parser_id]
 
+    def test_blocked_by_slice_number_and_title_with_semicolons(self):
+        """Model-generated refs like 'Slice 1: Parser; Slice 2: Planner' must resolve."""
+        plan = """\
+## Delivery Slices
+
+### Slice 1: Parser
+Parse things.
+
+### Slice 2: Planner
+Plan things.
+
+### Slice 3: Executor
+Execute things.
+
+Blocked by: Slice 1: Parser; Slice 2: Planner
+"""
+        kernel = _StubKernel()
+        slices = kernel._parse_dag_delivery_slices(plan, work_item_id=1)
+
+        parser_id = generate_slice_id("Parser", 1)
+        planner_id = generate_slice_id("Planner", 1)
+        assert slices[2].blocked_by == [parser_id, planner_id]
+
+    def test_blocked_by_misnumbered_slice_and_title_prefers_title(self):
+        """A contradictory 'Slice N: Title' ref must not silently trust the number."""
+        plan = """\
+## Delivery Slices
+
+### Slice 1: Parser
+Parse things.
+
+### Slice 2: Planner
+Plan things.
+
+### Slice 3: Executor
+Execute things.
+
+Blocked by: Slice 1: Planner
+"""
+        kernel = _StubKernel()
+        slices = kernel._parse_dag_delivery_slices(plan, work_item_id=1)
+
+        planner_id = generate_slice_id("Planner", 1)
+        assert slices[2].blocked_by == [planner_id]
+
     def test_id_stability_across_parses(self):
         """Same plan, same work_item_id → same IDs."""
         kernel = _StubKernel()

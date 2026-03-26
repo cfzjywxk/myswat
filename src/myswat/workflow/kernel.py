@@ -994,7 +994,7 @@ class WorkflowKernel:
         def _resolve_blocked_by(raw: str) -> list[str]:
             if not raw or raw.lower() == "none":
                 return []
-            refs = [r.strip() for r in raw.split(",")]
+            refs = [r.strip() for r in re.split(r"[;,]", raw)]
             resolved: list[str] = []
             for ref in refs:
                 if not ref:
@@ -1003,6 +1003,20 @@ class WorkflowKernel:
                 if ref in title_to_id:
                     resolved.append(title_to_id[ref])
                     continue
+                # Try "Slice N: Title" reference. Only trust the numeric
+                # position when the claimed title matches; otherwise fall back
+                # to resolving by the claimed title so misnumbered model output
+                # does not silently point at the wrong slice.
+                m = re.match(r"^slice\s+(\d+)\s*:\s*(.+)$", ref, re.IGNORECASE)
+                if m:
+                    idx = int(m.group(1)) - 1
+                    claimed_title = m.group(2).strip()
+                    if 0 <= idx < len(raw_slices):
+                        actual_title = raw_slices[idx]["title"]
+                        if claimed_title.lower() == actual_title.lower():
+                            resolved.append(title_to_id[actual_title])
+                            continue
+                    ref = claimed_title
                 # Try "Slice N" reference → match by position
                 m = re.match(r"^slice\s+(\d+)$", ref, re.IGNORECASE)
                 if m:
@@ -2080,7 +2094,7 @@ class WorkflowKernel:
         if plan and self._plan_scope_validation_error(design, plan):
             return "rerun"
         if entry == "plan":
-            return "rerun"
+            return "load" if plan else "rerun"
         if entry == "plan_review":
             return "resume_review"
         if not plan and entry in {"start", "phases", "ga_test", "report"}:

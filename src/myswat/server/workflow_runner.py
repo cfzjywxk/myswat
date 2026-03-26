@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 import threading
 
@@ -22,6 +23,7 @@ from myswat.workflow.prd_support import derive_requirement_title, resolve_prd_re
 from myswat.workflow.runtime import WorkflowRuntime
 
 console = Console()
+LOGGER = logging.getLogger(__name__)
 
 
 def _normalize_workdir(workdir: str | None) -> str | None:
@@ -275,6 +277,14 @@ def run_workflow(
             requested_status=requested_status,
         )
 
+        current_state = store.get_work_item_state(work_item_id) or {}
+        if not isinstance(current_state, dict):
+            LOGGER.warning(
+                "Unexpected work item state type during workflow finalization: work_item_id=%s type=%s",
+                work_item_id,
+                type(current_state).__name__,
+            )
+            current_state = {}
         store.update_work_item_status(work_item_id, final_status)
         if final_status == "completed":
             store.update_work_item_state(
@@ -283,6 +293,32 @@ def run_workflow(
                 latest_summary=final_summary,
                 next_todos=[],
                 open_issues=[],
+            )
+        else:
+            next_todos = current_state.get("next_todos")
+            if not isinstance(next_todos, list):
+                if next_todos is not None:
+                    LOGGER.warning(
+                        "Unexpected next_todos type during workflow finalization: work_item_id=%s type=%s",
+                        work_item_id,
+                        type(next_todos).__name__,
+                    )
+                next_todos = []
+            open_issues = current_state.get("open_issues")
+            if not isinstance(open_issues, list):
+                if open_issues is not None:
+                    LOGGER.warning(
+                        "Unexpected open_issues type during workflow finalization: work_item_id=%s type=%s",
+                        work_item_id,
+                        type(open_issues).__name__,
+                    )
+                open_issues = []
+            store.update_work_item_state(
+                work_item_id,
+                current_stage=current_state.get("current_stage"),
+                latest_summary=final_summary,
+                next_todos=next_todos,
+                open_issues=open_issues,
             )
     except typer.Exit:
         raise
