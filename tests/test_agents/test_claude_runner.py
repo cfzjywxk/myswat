@@ -93,10 +93,21 @@ class TestOutputParsing:
         )
         assert runner.format_live_line(line) == "Investigating\n[tool] Bash"
 
-    def test_parse_output_prefers_result(self, runner):
+    def test_parse_output_prefers_last_assistant_text_over_result_metadata(self, runner):
         stdout = "\n".join(
             [
-                '{"type":"assistant","message":{"content":[{"type":"text","text":"draft"}]}}',
+                '{"type":"assistant","message":{"content":[{"type":"text","text":"review preamble"}]}}',
+                '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write"}]}}',
+                '{"type":"assistant","message":{"content":[{"type":"text","text":"```json\\n{\\"verdict\\":\\"changes_requested\\"}\\n```"}]}}',
+                '{"type":"result","subtype":"success","result":"review completed"}',
+            ]
+        )
+        assert runner.parse_output(stdout, "") == '```json\n{"verdict":"changes_requested"}\n```'
+
+    def test_parse_output_uses_result_when_no_assistant_text_exists(self, runner):
+        stdout = "\n".join(
+            [
+                '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write"}]}}',
                 '{"type":"result","subtype":"success","result":"final answer"}',
             ]
         )

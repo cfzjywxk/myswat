@@ -181,30 +181,39 @@ class ClaudeRunner(AgentRunner):
                 if text:
                     result_texts.append(text)
             elif etype == "assistant":
-                text = self._extract_event_text(event)
+                # Claude's terminal answer is emitted as an assistant message.
+                # The trailing result event is runner metadata and can contain a
+                # non-answer string, so only use it as a fallback.
+                text = self._extract_event_text(event, include_tool_markers=False)
                 if text:
                     assistant_texts.append(text)
 
-        if result_texts:
-            return result_texts[-1]
         if assistant_texts:
             return assistant_texts[-1]
+        if result_texts:
+            return result_texts[-1]
         return stdout.strip() or stderr.strip()
 
     @staticmethod
-    def _extract_event_text(event: dict) -> str:
+    def _extract_event_text(event: dict, *, include_tool_markers: bool = True) -> str:
         message = event.get("message")
         if isinstance(message, dict):
-            text = ClaudeRunner._extract_content_text(message.get("content"))
+            text = ClaudeRunner._extract_content_text(
+                message.get("content"),
+                include_tool_markers=include_tool_markers,
+            )
             if text:
                 return text
             if isinstance(message.get("text"), str):
                 return message["text"].strip()
 
-        return ClaudeRunner._extract_content_text(event.get("content"))
+        return ClaudeRunner._extract_content_text(
+            event.get("content"),
+            include_tool_markers=include_tool_markers,
+        )
 
     @staticmethod
-    def _extract_content_text(content) -> str:
+    def _extract_content_text(content, *, include_tool_markers: bool = True) -> str:
         if isinstance(content, str):
             return content.strip()
         if isinstance(content, dict):
@@ -220,7 +229,7 @@ class ClaudeRunner(AgentRunner):
                         text = str(part.get("text", "")).strip()
                         if text:
                             parts.append(text)
-                    elif ptype == "tool_use":
+                    elif ptype == "tool_use" and include_tool_markers:
                         name = str(part.get("name", "")).strip()
                         if name:
                             parts.append(f"[tool] {name}")
