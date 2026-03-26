@@ -151,6 +151,84 @@ def test_handle_work_rejects_when_project_already_has_active_workflow():
         raise AssertionError("Expected active workflow rejection")
 
 
+def test_handle_work_resume_reuses_existing_item_and_saved_workflow_settings():
+    daemon = MySwatDaemon.__new__(MySwatDaemon)
+    daemon._lock = threading.RLock()
+    daemon._store = Mock()
+    daemon._find_active_work_item = Mock(return_value=None)
+    daemon.ensure_workers = Mock(return_value=["architect", "developer", "qa_main"])
+    daemon._start_workflow_thread = Mock()
+    daemon._store.get_project_by_slug.return_value = {"id": 1, "slug": "fib-demo"}
+    daemon._store.get_work_item.return_value = {
+        "id": 88,
+        "project_id": 1,
+        "status": "blocked",
+        "title": "fibonacci",
+        "description": "implement fibonacci",
+        "metadata_json": {
+            "work_mode": "design",
+            "with_ga_test": True,
+            "requested_workdir": "/tmp/saved-repo",
+        },
+    }
+
+    result = daemon.handle_work(
+        project="fib-demo",
+        requirement="",
+        workdir=None,
+        mode=WorkMode.full.value,
+        resume_work_item_id=88,
+    )
+
+    assert result == {
+        "ok": True,
+        "work_item_id": 88,
+        "workers": ["architect", "developer", "qa_main"],
+    }
+    daemon.ensure_workers.assert_called_once_with(
+        project_slug="fib-demo",
+        mode=WorkMode.design,
+        workdir="/tmp/saved-repo",
+    )
+    daemon._store.update_work_item_status.assert_called_once_with(88, "pending")
+    daemon._start_workflow_thread.assert_called_once_with(
+        project_slug="fib-demo",
+        requirement="implement fibonacci",
+        work_item_id=88,
+        workdir="/tmp/saved-repo",
+        mode=WorkMode.design,
+        with_ga_test=True,
+    )
+
+
+def test_handle_work_resume_rejects_non_resumable_status():
+    daemon = MySwatDaemon.__new__(MySwatDaemon)
+    daemon._lock = threading.RLock()
+    daemon._store = Mock()
+    daemon._find_active_work_item = Mock(return_value=None)
+    daemon._store.get_project_by_slug.return_value = {"id": 1, "slug": "fib-demo"}
+    daemon._store.get_work_item.return_value = {
+        "id": 88,
+        "project_id": 1,
+        "status": "completed",
+        "description": "implement fibonacci",
+        "metadata_json": {"work_mode": "full"},
+    }
+
+    try:
+        daemon.handle_work(
+            project="fib-demo",
+            requirement="",
+            workdir=None,
+            mode=WorkMode.full.value,
+            resume_work_item_id=88,
+        )
+    except ValueError as exc:
+        assert "not resumable" in str(exc)
+    else:
+        raise AssertionError("Expected non-resumable work item rejection")
+
+
 def test_handle_work_serializes_concurrent_submissions():
     daemon = MySwatDaemon.__new__(MySwatDaemon)
     daemon._lock = threading.RLock()

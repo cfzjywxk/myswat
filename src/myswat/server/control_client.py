@@ -119,6 +119,7 @@ class DaemonClient:
         workdir: str | None,
         mode: str,
         with_ga_test: bool = False,
+        resume_work_item_id: int | None = None,
     ) -> dict:
         payload = {
             "project": project,
@@ -128,6 +129,8 @@ class DaemonClient:
         }
         if with_ga_test:
             payload["with_ga_test"] = True
+        if resume_work_item_id is not None:
+            payload["resume_work_item_id"] = resume_work_item_id
         return self._request(
             method="POST",
             path="/api/work",

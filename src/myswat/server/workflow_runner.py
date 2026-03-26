@@ -111,6 +111,7 @@ def run_workflow(
     error_stage = "workflow_requirement_resolution"
     final_status = "blocked"
     final_summary = "Workflow blocked."
+    resume_stage: str | None = None
 
     try:
         requirement_resolution = resolve_prd_requirement(
@@ -154,6 +155,11 @@ def run_workflow(
                 assigned_agent_id=int((arch_agent or dev_agent)["id"]),
                 metadata_json=item_metadata,
             )
+        else:
+            task_state = store.get_work_item_state(work_item_id) or {}
+            current_stage = task_state.get("current_stage")
+            if isinstance(current_stage, str) and current_stage.strip():
+                resume_stage = current_stage.strip()
 
         store.update_work_item_status(work_item_id, "in_progress")
 
@@ -229,6 +235,7 @@ def run_workflow(
             ),
             repo_path=effective_workdir,
             requirements_skills_root=getattr(settings.workflow, "requirements_skills_root", ""),
+            resume_stage=resume_stage,
         )
 
         error_stage = "workflow_execution"
@@ -249,6 +256,14 @@ def run_workflow(
             final_summary = failure_summary or "Workflow finished with unresolved review or test issues."
 
         store.update_work_item_status(work_item_id, final_status)
+        if final_status == "completed":
+            store.update_work_item_state(
+                work_item_id,
+                current_stage="workflow_completed",
+                latest_summary=final_summary,
+                next_todos=[],
+                open_issues=[],
+            )
     except typer.Exit:
         raise
     except Exception as exc:

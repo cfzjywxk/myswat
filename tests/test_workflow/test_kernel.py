@@ -2333,6 +2333,155 @@ def test_kernel_parses_completed_phase_rows_and_phase_names():
     assert [result.name for result in results] == ["Dict Name", "OtherMeta"]
 
 
+def test_run_resume_design_reruns_design_even_when_artifact_exists():
+    store = _store()
+    store.get_latest_artifact_by_type.side_effect = (
+        lambda _work_item_id, artifact_type: {"id": 1, "content": "old design"}
+        if artifact_type == "design_doc"
+        else None
+    )
+    kernel = WorkflowKernel(
+        store=store,
+        service=_service(),
+        dev=_participant(10, "developer"),
+        qas=[_participant(20, "qa_main")],
+        arch=_participant(30, "architect"),
+        project_id=1,
+        work_item_id=10,
+        mode=WorkMode.design,
+        auto_approve=True,
+        resume_stage="design",
+    )
+
+    with patch.object(kernel, "_run_design", return_value=("new design", True)) as run_design:
+        with patch.object(kernel, "_run_plan", return_value=("plan", True)):
+            with patch.object(kernel, "_export_design_plan_to_docs", return_value=True):
+                with patch.object(kernel, "_export_final_report_to_docs", return_value=True):
+                    result = kernel.run("req")
+
+    assert result.success is True
+    assert result.design == "new design"
+    run_design.assert_called_once_with("req")
+
+
+def test_run_resume_design_review_uses_saved_design_without_rerunning_design():
+    store = _store()
+    store.get_latest_artifact_by_type.side_effect = (
+        lambda _work_item_id, artifact_type: {"id": 1, "content": "saved design"}
+        if artifact_type == "design_doc"
+        else None
+    )
+    kernel = WorkflowKernel(
+        store=store,
+        service=_service(),
+        dev=_participant(10, "developer"),
+        qas=[_participant(20, "qa_main")],
+        arch=_participant(30, "architect"),
+        project_id=1,
+        work_item_id=10,
+        mode=WorkMode.design,
+        auto_approve=True,
+        resume_stage="design_review",
+    )
+
+    with patch.object(kernel, "_run_design") as run_design:
+        run_design.return_value = ("reviewed design", True)
+        with patch.object(kernel, "_run_plan", return_value=("plan", True)):
+            with patch.object(kernel, "_export_design_plan_to_docs", return_value=True):
+                with patch.object(kernel, "_export_final_report_to_docs", return_value=True):
+                    result = kernel.run("req")
+
+    assert result.success is True
+    assert result.design == "reviewed design"
+    run_design.assert_called_once_with(
+        "req",
+        initial_design="saved design",
+        initial_artifact_id=1,
+        skip_generation=True,
+    )
+
+
+def test_run_resume_phase_review_uses_saved_phase_artifact_and_skips_committed_phases():
+    store = _store()
+    store.get_latest_artifact_by_type.side_effect = (
+        lambda _work_item_id, artifact_type: {
+            "id": 2,
+            "content": "Phase 1: Build auth\nPhase 2: Build billing",
+        }
+        if artifact_type == "implementation_plan"
+        else None
+    )
+    store.list_artifacts.return_value = [
+        {
+            "artifact_type": "phase_result",
+            "iteration": 1,
+            "title": "Phase 1: Build auth",
+            "content": "phase 1 done",
+            "metadata_json": {
+                "phase_index": 1,
+                "phase_name": "Build auth",
+                "review_iterations": 1,
+                "review_passed": True,
+                "committed": True,
+            },
+        },
+        {
+            "artifact_type": "phase_result",
+            "iteration": 2,
+            "title": "Phase 2: Build billing",
+            "content": "phase 2 draft",
+            "metadata_json": {
+                "phase_index": 2,
+                "phase_name": "Build billing",
+                "review_iterations": 1,
+                "review_passed": False,
+                "committed": False,
+            },
+        },
+    ]
+    kernel = WorkflowKernel(
+        store=store,
+        service=_service(),
+        dev=_participant(10, "developer"),
+        qas=[_participant(20, "qa_main")],
+        project_id=1,
+        work_item_id=10,
+        mode=WorkMode.develop,
+        auto_approve=True,
+        resume_stage="phase_2_review",
+    )
+    observed_call: dict[str, object] = {}
+
+    with patch.object(kernel, "_try_run_dag_serial", return_value=None):
+        with patch.object(kernel, "_parse_phases", return_value=["Build auth", "Build billing"]):
+            def _resume_phase(**kwargs):
+                observed_call.update(kwargs)
+                observed_call["completed_summaries"] = list(kwargs["completed_summaries"])
+                return PhaseResult(name="Build billing", summary="phase 2 done", committed=True)
+
+            with patch.object(kernel, "_run_phase", side_effect=_resume_phase) as run_phase:
+                with patch.object(kernel, "_generate_final_report", return_value="report"):
+                    with patch.object(kernel, "_export_final_report_to_docs", return_value=True):
+                        with patch.object(kernel, "_finalize_workflow_repo_sync", return_value=True):
+                            result = kernel.run("req")
+
+    assert result.success is True
+    assert [phase.name for phase in result.phases] == ["Build auth", "Build billing"]
+    run_phase.assert_called_once()
+    assert observed_call == {
+        "requirement": "req",
+        "design": "req",
+        "plan": "Phase 1: Build auth\nPhase 2: Build billing",
+        "phase_name": "Build billing",
+        "phase_index": 2,
+        "total_phases": 2,
+        "completed_summaries": ["Phase 1: phase 1 done"],
+        "initial_summary": "phase 2 draft",
+        "initial_artifact_id": None,
+        "skip_implementation": True,
+    }
+
+
 def test_kernel_generates_report_fallback_and_run_failure_states():
     dev = _participant(10, "developer")
     qa = _participant(20, "qa_main")

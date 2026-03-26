@@ -212,6 +212,55 @@ def test_run_workflow_creates_item_and_wires_kernel(
 
 @patch("myswat.server.workflow_runner.submit_workflow_summary_learn_request")
 @patch("myswat.server.workflow_runner.WorkflowKernel")
+def test_run_workflow_existing_item_passes_resume_stage_to_kernel(
+    mock_kernel_cls,
+    mock_submit_learn,
+    tmp_path,
+):
+    store = Mock()
+    project = _project(str(tmp_path))
+    store.get_work_item_state.return_value = {"current_stage": "design_review"}
+    store.get_agent.side_effect = lambda _project_id, role: {
+        "architect": _agent_row("architect", agent_id=30),
+        "developer": _agent_row("developer", agent_id=10),
+        "qa_main": _agent_row("qa_main", agent_id=20),
+        "qa_vice": None,
+    }.get(role)
+    kernel = Mock()
+    kernel.run.return_value = SimpleNamespace(success=True)
+    mock_kernel_cls.return_value = kernel
+    service = MagicMock()
+
+    work_item_id = run_workflow(
+        "proj",
+        "ship it",
+        workdir=None,
+        work_item_id=42,
+        mode=WorkMode.full,
+        with_ga_test=False,
+        auto_approve=True,
+        emit_console_output=False,
+        settings=_settings(),
+        store=store,
+        project_row=project,
+        service=service,
+    )
+
+    assert work_item_id == 42
+    store.create_work_item.assert_not_called()
+    kernel_kwargs = mock_kernel_cls.call_args.kwargs
+    assert kernel_kwargs["resume_stage"] == "design_review"
+    store.update_work_item_state.assert_called_once_with(
+        42,
+        current_stage="workflow_completed",
+        latest_summary="Workflow completed successfully.",
+        next_todos=[],
+        open_issues=[],
+    )
+
+
+@patch("myswat.server.workflow_runner.submit_workflow_summary_learn_request")
+@patch("myswat.server.workflow_runner.WorkflowKernel")
 def test_run_workflow_resolves_prd_artifact_reference_before_kernel_run(
     mock_kernel_cls,
     mock_submit_learn,

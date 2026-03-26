@@ -816,9 +816,10 @@ class MySwatDaemon:
         workdir: str | None,
         mode: str,
         with_ga_test: bool = False,
+        resume_work_item_id: int | None = None,
     ) -> dict:
         work_mode = WorkMode(mode)
-        if with_ga_test and work_mode != WorkMode.full:
+        if with_ga_test and work_mode != WorkMode.full and resume_work_item_id is None:
             raise ValueError("--with-ga-test is only supported for full workflow mode.")
         with self._lock:
             active_item = self._find_active_work_item(project)
@@ -827,14 +828,59 @@ class MySwatDaemon:
                     f"Project '{project}' already has an active workflow "
                     f"(work item {active_item['id']}, status={active_item['status']})."
                 )
-            roles = self.ensure_workers(project_slug=project, mode=work_mode, workdir=workdir)
-            work_item_id = self._create_work_item(
-                project_slug=project,
-                requirement=requirement,
-                workdir=workdir,
-                mode=work_mode,
-                with_ga_test=with_ga_test,
-            )
+            work_item_id: int
+            log_requirement = requirement
+            if resume_work_item_id is None:
+                roles = self.ensure_workers(project_slug=project, mode=work_mode, workdir=workdir)
+                work_item_id = self._create_work_item(
+                    project_slug=project,
+                    requirement=requirement,
+                    workdir=workdir,
+                    mode=work_mode,
+                    with_ga_test=with_ga_test,
+                )
+            else:
+                project_row = self._store.get_project_by_slug(project)
+                if not project_row:
+                    raise ValueError(f"Project not found: {project}")
+                item = self._store.get_work_item(resume_work_item_id)
+                if not item or int(item.get("project_id") or 0) != int(project_row["id"]):
+                    raise ValueError(f"Work item {resume_work_item_id} not found in project '{project}'")
+                item_status = str(item.get("status") or "")
+                if item_status not in {"blocked", "paused"}:
+                    raise ValueError(
+                        f"Work item {resume_work_item_id} is not resumable "
+                        f"(status={item_status or 'unknown'})."
+                    )
+                item_metadata = item.get("metadata_json")
+                if not isinstance(item_metadata, dict):
+                    item_metadata = {}
+                saved_mode = item_metadata.get("work_mode")
+                if isinstance(saved_mode, str) and saved_mode:
+                    work_mode = WorkMode(saved_mode)
+                saved_with_ga_test = bool(item_metadata.get("with_ga_test"))
+                saved_workdir = item_metadata.get("requested_workdir")
+                if not isinstance(saved_workdir, str) or not saved_workdir.strip():
+                    saved_workdir = None
+                requirement = str(item.get("description") or item.get("title") or "").strip()
+                if not requirement:
+                    raise ValueError(
+                        f"Work item {resume_work_item_id} has no saved requirement to resume."
+                    )
+                workdir = workdir or saved_workdir
+                with_ga_test = saved_with_ga_test
+                work_item_id = resume_work_item_id
+                log_requirement = requirement
+                roles = self.ensure_workers(project_slug=project, mode=work_mode, workdir=workdir)
+                self._store.update_work_item_status(work_item_id, "pending")
+                self._store.append_work_item_process_event(
+                    work_item_id,
+                    event_type="workflow_resumed",
+                    title="Workflow resumed",
+                    summary="MySwat daemon resumed the existing work item from its saved stage.",
+                    from_role="user",
+                    to_role="myswat",
+                )
             self._start_workflow_thread(
                 project_slug=project,
                 requirement=requirement,
@@ -844,13 +890,14 @@ class MySwatDaemon:
                 with_ga_test=with_ga_test,
             )
         LOGGER.info(
-            'Workflow queued: project=%s work_item_id=%s mode=%s with_ga_test=%s workers=%s requirement="%s"',
+            'Workflow %s: project=%s work_item_id=%s mode=%s with_ga_test=%s workers=%s requirement="%s"',
+            "resumed" if resume_work_item_id is not None else "queued",
             project,
             work_item_id,
             work_mode.value,
             str(with_ga_test).lower(),
             ",".join(roles) if roles else "-",
-            _clip_for_log(requirement, limit=120),
+            _clip_for_log(log_requirement, limit=120),
         )
         self._log_active_project_snapshots(force=True, reason="Project status")
         return {
@@ -1199,6 +1246,11 @@ class MySwatDaemon:
                             workdir=payload.get("workdir"),
                             mode=str(payload.get("mode") or WorkMode.full.value),
                             with_ga_test=bool(payload.get("with_ga_test")),
+                            resume_work_item_id=(
+                                int(payload.get("resume_work_item_id"))
+                                if payload.get("resume_work_item_id") is not None
+                                else None
+                            ),
                         )
                         self._write_json(200, result)
                         self._log_slow_request(path=parsed.path, status=200, started_at=started_at, payload=payload)

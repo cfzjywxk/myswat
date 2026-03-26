@@ -222,6 +222,13 @@ class MySwatToolService:
         return stage or None
 
     @staticmethod
+    def _prefer_saved_stage(current_stage: str | None, fallback_stage: str | None) -> str | None:
+        if current_stage and fallback_stage:
+            if current_stage == fallback_stage or current_stage.startswith(f"{fallback_stage}_"):
+                return current_stage
+        return fallback_stage or current_stage
+
+    @staticmethod
     def _sleep_interval(seconds: float) -> float:
         return max(0.05, seconds)
 
@@ -1095,6 +1102,9 @@ class MySwatToolService:
         )
 
     def fail_stage_task(self, request: FailStageTaskRequest) -> StageRunCompletion:
+        task_state = self._store.get_work_item_state(request.work_item_id) or {}
+        saved_stage = self._stage_or_none(str(task_state.get("current_stage") or ""))
+        blocked_stage = self._prefer_saved_stage(saved_stage, self._stage_or_none(request.stage_name))
         self._store.update_stage_run(
             request.stage_run_id,
             status="blocked",
@@ -1104,7 +1114,7 @@ class MySwatToolService:
         )
         self._store.update_work_item_state(
             request.work_item_id,
-            current_stage=self._stage_or_none(request.stage_name),
+            current_stage=blocked_stage,
             latest_summary=request.summary,
             updated_by_agent_id=request.agent_id,
         )

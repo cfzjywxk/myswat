@@ -234,8 +234,6 @@ def work(
                 "The original requirement is loaded from the work item. "
                 "To start fresh with a different requirement, omit --resume."
             )
-        if follow:
-            raise typer.BadParameter("--resume cannot be combined with --follow.")
     else:
         if not requirement:
             raise typer.BadParameter("Requirement is required when not using --resume.")
@@ -243,8 +241,6 @@ def work(
     if background and follow:
         raise typer.BadParameter("--background cannot be combined with --follow.")
 
-    if resume is not None:
-        raise typer.BadParameter("--resume is not supported through the daemon workflow path yet.")
     if not auto_approve:
         raise typer.BadParameter("--interactive-checkpoints is not supported through the daemon workflow path yet.")
     if with_ga_test and mode != WorkMode.full:
@@ -261,13 +257,18 @@ def work(
     }
     if with_ga_test:
         submit_kwargs["with_ga_test"] = True
+    if resume is not None:
+        submit_kwargs["resume_work_item_id"] = resume
     try:
         result = client.submit_work(**submit_kwargs)
     except DaemonClientError as exc:
         print_daemon_error(exc, console=console)
         raise typer.Exit(1)
 
-    console.print(f"[bold]Queued workflow:[/bold] {requirement}")
+    if resume is not None:
+        console.print(f"[bold]Resumed workflow:[/bold] work item {resume}")
+    else:
+        console.print(f"[bold]Queued workflow:[/bold] {requirement}")
     console.print(f"[dim]Work item: {result.get('work_item_id')}[/dim]")
     workers = result.get("workers") or []
     if isinstance(workers, list) and workers:

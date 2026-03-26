@@ -46,9 +46,27 @@ def test_run_work_rejects_interactive_checkpoints():
         run_work("proj", "ship feature", auto_approve=False)
 
 
-def test_run_work_rejects_resume():
-    with pytest.raises(typer.BadParameter, match="--resume"):
-        run_work("proj", "ship feature", resume=7)
+@patch("myswat.cli.work_cmd.DaemonClient")
+@patch("myswat.cli.work_cmd.MySwatSettings")
+def test_run_work_resume_submits_existing_work_item(mock_settings_cls, mock_client_cls):
+    mock_client = MagicMock()
+    mock_client.base_url = "http://127.0.0.1:8765"
+    mock_client.submit_work.return_value = {
+        "work_item_id": 7,
+        "workers": ["architect", "developer", "qa_main"],
+    }
+    mock_client_cls.return_value = mock_client
+
+    work_item_id = run_work("proj", "", resume=7)
+
+    assert work_item_id == 7
+    mock_client.submit_work.assert_called_once_with(
+        project="proj",
+        requirement="",
+        workdir=None,
+        mode="full",
+        resume_work_item_id=7,
+    )
 
 
 @patch("myswat.cli.work_cmd.console.print")

@@ -250,6 +250,46 @@ class WorkflowKernel:
         self._repo_commits_created = False
         self._requirements_skill_pack = load_requirements_skill_pack(requirements_skills_root)
 
+    def _resume_entry_point(self) -> str:
+        if not self._resume_stage:
+            return "start"
+
+        stage = self._resume_stage.strip()
+        if not stage:
+            return "start"
+        if stage == "workflow_completed":
+            return "done"
+        if stage == "workflow_finished_with_issues":
+            return "start"
+        if stage == "report":
+            return "report"
+        if stage.startswith("ga_test") or stage.startswith("test_plan"):
+            return "ga_test"
+        if stage.startswith("phase_"):
+            return "phases"
+        if stage == "plan_review" or stage.startswith("plan_review_"):
+            return "plan_review"
+        if stage == "plan" or stage.startswith("plan_"):
+            return "plan"
+        if stage == "design_review" or stage.startswith("design_review_"):
+            return "design_review"
+        if stage == "design" or stage.startswith("design_"):
+            return "design"
+        return "start"
+
+    def _resume_phase_index(self) -> int:
+        if not self._resume_stage or not self._resume_stage.startswith("phase_"):
+            return 1
+        parts = self._resume_stage.split("_")
+        try:
+            phase_index = int(parts[1])
+        except (IndexError, ValueError):
+            return 1
+        suffix = "_".join(parts[2:])
+        if suffix == "committed":
+            return phase_index + 1
+        return phase_index
+
     def _emit(
         self,
         event_type: str,
@@ -1509,38 +1549,223 @@ class WorkflowKernel:
         artifact = self._store.get_latest_artifact_by_type(self._work_item_id, artifact_type)
         return str(artifact.get("content") or "") if artifact else ""
 
-    def _load_completed_phase_results(self) -> list[PhaseResult]:
-        artifacts = self._store.list_artifacts(self._work_item_id)
-        phase_rows = [row for row in artifacts if row.get("artifact_type") == "phase_result"]
+    def _load_latest_artifact_row(self, artifact_type: str) -> dict[str, Any] | None:
+        artifact = self._store.get_latest_artifact_by_type(self._work_item_id, artifact_type)
+        return artifact if isinstance(artifact, dict) else None
 
-        def _metadata(row: dict) -> dict:
-            metadata = row.get("metadata_json")
-            if isinstance(metadata, dict):
-                return metadata
-            if isinstance(metadata, str):
-                parsed = _extract_json_block(metadata)
-                return parsed if isinstance(parsed, dict) else {}
+    def _load_latest_artifact_id(self, artifact_type: str) -> int | None:
+        artifact = self._load_latest_artifact_row(artifact_type)
+        if not artifact:
+            return None
+        artifact_id = artifact.get("id")
+        try:
+            return int(artifact_id) if artifact_id is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _artifact_metadata(row: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(row, dict):
             return {}
+        metadata = row.get("metadata_json")
+        if isinstance(metadata, dict):
+            return metadata
+        if isinstance(metadata, str):
+            parsed = _extract_json_block(metadata)
+            return parsed if isinstance(parsed, dict) else {}
+        return {}
 
+    def _phase_result_rows(self) -> list[tuple[int, dict[str, Any], dict[str, Any]]]:
+        artifacts = self._store.list_artifacts(self._work_item_id)
+        phase_rows: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+        for row in artifacts:
+            if row.get("artifact_type") != "phase_result":
+                continue
+            metadata = self._artifact_metadata(row)
+            phase_index = int(metadata.get("phase_index") or row.get("iteration") or 0)
+            phase_rows.append((phase_index, row, metadata))
         phase_rows.sort(
-            key=lambda row: (
-                int(_metadata(row).get("phase_index", row.get("iteration") or 0)),
-                int(row.get("iteration") or 0),
+            key=lambda item: (
+                item[0],
+                int(item[1].get("iteration") or 0),
+                int(item[1].get("id") or 0),
             )
         )
-        results: list[PhaseResult] = []
-        for row in phase_rows:
-            metadata = _metadata(row)
-            results.append(
-                PhaseResult(
-                    name=str(metadata.get("phase_name") or row.get("title") or "phase"),
-                    summary=str(row.get("content") or ""),
-                    review_iterations=int(metadata.get("review_iterations") or 0),
-                    review_passed=bool(metadata.get("review_passed", True)),
-                    committed=bool(metadata.get("committed", True)),
-                )
+        return phase_rows
+
+    def _load_phase_results_by_index(self) -> dict[int, PhaseResult]:
+        latest_by_index: dict[int, tuple[dict[str, Any], dict[str, Any]]] = {}
+        for phase_index, row, metadata in self._phase_result_rows():
+            latest_by_index[phase_index] = (row, metadata)
+
+        results: dict[int, PhaseResult] = {}
+        for phase_index in sorted(latest_by_index):
+            row, metadata = latest_by_index[phase_index]
+            results[phase_index] = PhaseResult(
+                name=str(metadata.get("phase_name") or row.get("title") or "phase"),
+                summary=str(row.get("content") or ""),
+                review_iterations=int(metadata.get("review_iterations") or 0),
+                review_passed=bool(metadata.get("review_passed", True)),
+                committed=bool(metadata.get("committed", True)),
             )
         return results
+
+    def _load_completed_phase_results_by_index(self) -> dict[int, PhaseResult]:
+        phase_results = self._load_phase_results_by_index()
+        return {
+            phase_index: result
+            for phase_index, result in phase_results.items()
+            if result.committed
+        }
+
+    def _load_completed_phase_results(self) -> list[PhaseResult]:
+        phase_results = self._load_phase_results_by_index()
+        return [phase_results[idx] for idx in sorted(phase_results)]
+
+    def _load_phase_result_artifact(
+        self,
+        phase_index: int,
+    ) -> tuple[str, int | None, dict[str, Any]]:
+        latest_row: dict[str, Any] | None = None
+        latest_metadata: dict[str, Any] = {}
+        for row_phase_index, row, metadata in self._phase_result_rows():
+            if row_phase_index == phase_index:
+                latest_row = row
+                latest_metadata = metadata
+        if latest_row is None:
+            return "", None, {}
+        artifact_id = latest_row.get("id")
+        try:
+            resolved_artifact_id = int(artifact_id) if artifact_id is not None else None
+        except (TypeError, ValueError):
+            resolved_artifact_id = None
+        return str(latest_row.get("content") or ""), resolved_artifact_id, latest_metadata
+
+    def _persist_phase_result(
+        self,
+        *,
+        phase_index: int,
+        phase_name: str,
+        summary: str,
+        review_iterations: int,
+        review_passed: bool,
+        committed: bool,
+    ) -> None:
+        if not self._work_item_id:
+            return
+        self._store.create_artifact(
+            work_item_id=self._work_item_id,
+            agent_id=self._dev.agent_id,
+            iteration=phase_index,
+            artifact_type="phase_result",
+            title=f"Phase {phase_index}: {phase_name}",
+            content=summary[:65000],
+            metadata_json={
+                "phase_index": phase_index,
+                "phase_name": phase_name,
+                "review_iterations": review_iterations,
+                "review_passed": review_passed,
+                "committed": committed,
+            },
+        )
+
+    def _should_resume_phase_from_review(self, phase_index: int) -> bool:
+        if self._resume_stage and self._resume_stage.startswith(f"phase_{phase_index}_review"):
+            return True
+        _, _, metadata = self._load_phase_result_artifact(phase_index)
+        return bool(metadata.get("review_passed")) and not bool(metadata.get("committed", True))
+
+    def _complete_phase(
+        self,
+        *,
+        requirement: str,
+        design: str,
+        plan: str,
+        phase_name: str,
+        phase_index: int,
+        initial_summary: str,
+        initial_artifact_id: int | None,
+    ) -> PhaseResult:
+        owner = self._dev
+        stage_name = f"phase_{phase_index}"
+        reviewed_summary, review_iterations, passed = self._run_review_loop(
+            owner_stage_name=stage_name,
+            review_stage_name=f"{stage_name}_review",
+            artifact_type="phase_result",
+            artifact_title=f"Phase {phase_index} summary",
+            initial_artifact=initial_summary,
+            initial_artifact_id=initial_artifact_id,
+            owner=owner,
+            reviewers=self._qas,
+            focus=requirement + "\n\n" + phase_name,
+            review_prompt_builder=lambda artifact, iteration, reviewer_role: self._with_code_review_guidance(
+                QA_CODE_REVIEW.format(
+                    context=f"Requirement:\n{requirement}\n\nApproved Design:\n{design}\n\nPlan:\n{plan}",
+                    summary=artifact,
+                    iteration=iteration,
+                )
+            ),
+            revision_prompt_builder=lambda artifact, feedback: self._with_phase_skill_guidance(
+                DEV_ADDRESS_CODE_COMMENTS.format(
+                    summary=artifact,
+                    feedback=feedback,
+                )
+            ),
+        )
+        review_limit_reached = self._last_review_limit_reached
+        if not passed and not review_limit_reached:
+            self._persist_phase_result(
+                phase_index=phase_index,
+                phase_name=phase_name,
+                summary=reviewed_summary,
+                review_iterations=review_iterations,
+                review_passed=False,
+                committed=False,
+            )
+            return PhaseResult(
+                name=phase_name,
+                summary=reviewed_summary,
+                review_iterations=review_iterations,
+                review_passed=False,
+                committed=False,
+            )
+
+        if not self._commit_phase_changes(
+            phase_index=phase_index,
+            phase_name=phase_name,
+            summary=reviewed_summary,
+        ):
+            self._persist_phase_result(
+                phase_index=phase_index,
+                phase_name=phase_name,
+                summary=reviewed_summary,
+                review_iterations=review_iterations,
+                review_passed=passed,
+                committed=False,
+            )
+            return PhaseResult(
+                name=phase_name,
+                summary=reviewed_summary,
+                review_iterations=review_iterations,
+                review_passed=passed,
+                committed=False,
+            )
+
+        self._persist_phase_result(
+            phase_index=phase_index,
+            phase_name=phase_name,
+            summary=reviewed_summary,
+            review_iterations=review_iterations,
+            review_passed=passed,
+            committed=True,
+        )
+        return PhaseResult(
+            name=phase_name,
+            summary=reviewed_summary,
+            review_iterations=review_iterations,
+            review_passed=passed,
+            committed=True,
+        )
 
     def _parse_phases(self, plan: str) -> list[str]:
         phases: list[str] = []
@@ -1569,27 +1794,62 @@ class WorkflowKernel:
 
         return ["Implementation"]
 
-    def _run_design(self, requirement: str) -> tuple[str, bool]:
+    def _run_design(
+        self,
+        requirement: str,
+        *,
+        initial_design: str = "",
+        initial_artifact_id: int | None = None,
+        skip_generation: bool = False,
+    ) -> tuple[str, bool]:
         owner = self._arch or self._dev
-        prompt = self._with_design_skill_guidance(
-            ARCH_TECH_DESIGN.format(requirement=requirement)
+        revision_prompt_builder = (
+            (
+                lambda artifact, feedback: self._with_design_skill_guidance(
+                    ARCH_ADDRESS_DESIGN_COMMENTS.format(
+                        design=artifact,
+                        feedback=feedback,
+                    )
+                )
+            )
             if owner is self._arch
-            else DEV_TECH_DESIGN.format(requirement=requirement)
+            else (
+                lambda artifact, feedback: self._with_design_skill_guidance(
+                    DEV_ADDRESS_DESIGN_COMMENTS.format(
+                        design=artifact,
+                        feedback=feedback,
+                    )
+                )
+            )
         )
-        stage_run_id = self._queue_stage_task(
-            owner=owner,
-            stage_name="design",
-            prompt=prompt,
-            focus=requirement,
-            artifact_type="design_doc",
-            artifact_title="Technical design",
-            summary="Produce technical design",
-        )
-        completion = self._wait_for_stage_result(stage_run_id=stage_run_id, stage_name="design", owner=owner)
-        if completion.status != "completed":
-            return "", False
+        if skip_generation and initial_design:
+            draft = initial_design
+            artifact_id = initial_artifact_id
+        else:
+            prompt = self._with_design_skill_guidance(
+                ARCH_TECH_DESIGN.format(requirement=requirement)
+                if owner is self._arch
+                else DEV_TECH_DESIGN.format(requirement=requirement)
+            )
+            stage_run_id = self._queue_stage_task(
+                owner=owner,
+                stage_name="design",
+                prompt=prompt,
+                focus=requirement,
+                artifact_type="design_doc",
+                artifact_title="Technical design",
+                summary="Produce technical design",
+            )
+            completion = self._wait_for_stage_result(
+                stage_run_id=stage_run_id,
+                stage_name="design",
+                owner=owner,
+            )
+            if completion.status != "completed":
+                return "", False
+            draft = completion.artifact_content
+            artifact_id = completion.artifact_id
 
-        draft = completion.artifact_content
         reviewers = ([self._dev] if owner is self._arch else []) + self._qas
         reviewed, _iterations, passed = self._run_review_loop(
             owner_stage_name="design",
@@ -1597,7 +1857,7 @@ class WorkflowKernel:
             artifact_type="design_doc",
             artifact_title="Technical design",
             initial_artifact=draft,
-            initial_artifact_id=completion.artifact_id,
+            initial_artifact_id=artifact_id,
             owner=owner,
             reviewers=reviewers,
             focus=requirement,
@@ -1608,25 +1868,7 @@ class WorkflowKernel:
                     iteration=iteration,
                 )
             ),
-            revision_prompt_builder=(
-                (
-                    lambda artifact, feedback: self._with_design_skill_guidance(
-                        ARCH_ADDRESS_DESIGN_COMMENTS.format(
-                            design=artifact,
-                            feedback=feedback,
-                        )
-                    )
-                )
-                if owner is self._arch
-                else (
-                    lambda artifact, feedback: self._with_design_skill_guidance(
-                        DEV_ADDRESS_DESIGN_COMMENTS.format(
-                            design=artifact,
-                            feedback=feedback,
-                        )
-                    )
-                )
-            ),
+            revision_prompt_builder=revision_prompt_builder,
         )
         review_limit_reached = self._last_review_limit_reached
         if not passed and not review_limit_reached:
@@ -1644,52 +1886,58 @@ class WorkflowKernel:
             focus=requirement,
             artifact_type="design_doc",
             artifact_title="Technical design",
-            revision_prompt_builder=(
-                (
-                    lambda artifact, feedback: self._with_design_skill_guidance(
-                        ARCH_ADDRESS_DESIGN_COMMENTS.format(
-                            design=artifact,
-                            feedback=feedback,
-                        )
-                    )
-                )
-                if owner is self._arch
-                else (
-                    lambda artifact, feedback: self._with_design_skill_guidance(
-                        DEV_ADDRESS_DESIGN_COMMENTS.format(
-                            design=artifact,
-                            feedback=feedback,
-                        )
-                    )
-                )
-            ),
+            revision_prompt_builder=revision_prompt_builder,
         )
         return reviewed, ok
 
-    def _run_plan(self, requirement: str, design: str) -> tuple[str, bool]:
+    def _run_plan(
+        self,
+        requirement: str,
+        design: str,
+        *,
+        initial_plan: str = "",
+        initial_artifact_id: int | None = None,
+        skip_generation: bool = False,
+    ) -> tuple[str, bool]:
         owner = self._dev
-        stage_run_id = self._queue_stage_task(
-            owner=owner,
-            stage_name="plan",
-            prompt=self._with_plan_skill_guidance(
-                DEV_IMPLEMENTATION_PLAN.format(requirement=requirement, design=design)
-            ),
-            focus=requirement + "\n\n" + design[:4000],
-            artifact_type="implementation_plan",
-            artifact_title="Implementation plan",
-            summary="Create implementation plan",
+        revision_prompt_builder = lambda artifact, feedback: self._with_plan_skill_guidance(
+            DEV_ADDRESS_PLAN_COMMENTS.format(
+                plan=artifact,
+                feedback=feedback,
+            )
         )
-        completion = self._wait_for_stage_result(stage_run_id=stage_run_id, stage_name="plan", owner=owner)
-        if completion.status != "completed":
-            return "", False
+        if skip_generation and initial_plan:
+            plan_draft = initial_plan
+            artifact_id = initial_artifact_id
+        else:
+            stage_run_id = self._queue_stage_task(
+                owner=owner,
+                stage_name="plan",
+                prompt=self._with_plan_skill_guidance(
+                    DEV_IMPLEMENTATION_PLAN.format(requirement=requirement, design=design)
+                ),
+                focus=requirement + "\n\n" + design[:4000],
+                artifact_type="implementation_plan",
+                artifact_title="Implementation plan",
+                summary="Create implementation plan",
+            )
+            completion = self._wait_for_stage_result(
+                stage_run_id=stage_run_id,
+                stage_name="plan",
+                owner=owner,
+            )
+            if completion.status != "completed":
+                return "", False
+            plan_draft = completion.artifact_content
+            artifact_id = completion.artifact_id
 
         reviewed, _iterations, passed = self._run_review_loop(
             owner_stage_name="plan",
             review_stage_name="plan_review",
             artifact_type="implementation_plan",
             artifact_title="Implementation plan",
-            initial_artifact=completion.artifact_content,
-            initial_artifact_id=completion.artifact_id,
+            initial_artifact=plan_draft,
+            initial_artifact_id=artifact_id,
             owner=owner,
             reviewers=self._qas,
             focus=requirement + "\n\n" + design[:4000],
@@ -1700,12 +1948,7 @@ class WorkflowKernel:
                     iteration=iteration,
                 )
             ),
-            revision_prompt_builder=lambda artifact, feedback: self._with_plan_skill_guidance(
-                DEV_ADDRESS_PLAN_COMMENTS.format(
-                    plan=artifact,
-                    feedback=feedback,
-                )
-            ),
+            revision_prompt_builder=revision_prompt_builder,
         )
         review_limit_reached = self._last_review_limit_reached
         if not passed and not review_limit_reached:
@@ -1723,12 +1966,7 @@ class WorkflowKernel:
             focus=requirement + "\n\n" + design[:4000],
             artifact_type="implementation_plan",
             artifact_title="Implementation plan",
-            revision_prompt_builder=lambda artifact, feedback: self._with_plan_skill_guidance(
-                DEV_ADDRESS_PLAN_COMMENTS.format(
-                    plan=artifact,
-                    feedback=feedback,
-                )
-            ),
+            revision_prompt_builder=revision_prompt_builder,
         )
         if ok:
             self._record_status(
@@ -1738,6 +1976,68 @@ class WorkflowKernel:
                 next_todos=self._format_delivery_slice_todos(reviewed),
             )
         return reviewed, ok
+
+    def _design_stage_action(self, *, entry: str, design: str) -> str:
+        if self._mode not in {WorkMode.full, WorkMode.design}:
+            return "load"
+        if entry == "design":
+            return "rerun"
+        if entry == "design_review":
+            return "resume_review"
+        if not design and entry in {"start", "plan", "plan_review", "phases", "ga_test", "report"}:
+            return "rerun"
+        return "load"
+
+    def _plan_stage_action(self, *, entry: str, plan: str) -> str:
+        if self._mode not in {WorkMode.full, WorkMode.design, WorkMode.develop}:
+            return "load"
+        if entry == "plan":
+            return "rerun"
+        if entry == "plan_review":
+            return "resume_review"
+        if not plan and entry in {"start", "phases", "ga_test", "report"}:
+            return "rerun"
+        return "load"
+
+    def _resolve_design_stage(
+        self,
+        *,
+        requirement: str,
+        entry: str,
+        design: str,
+    ) -> tuple[str, bool]:
+        action = self._design_stage_action(entry=entry, design=design)
+        if action == "rerun":
+            return self._run_design(requirement)
+        if action == "resume_review":
+            return self._run_design(
+                requirement,
+                initial_design=design,
+                initial_artifact_id=self._load_latest_artifact_id("design_doc"),
+                skip_generation=True,
+            )
+        return design, True
+
+    def _resolve_plan_stage(
+        self,
+        *,
+        requirement: str,
+        design: str,
+        entry: str,
+        plan: str,
+    ) -> tuple[str, bool]:
+        action = self._plan_stage_action(entry=entry, plan=plan)
+        if action == "rerun":
+            return self._run_plan(requirement, design)
+        if action == "resume_review":
+            return self._run_plan(
+                requirement,
+                design,
+                initial_plan=plan,
+                initial_artifact_id=self._load_latest_artifact_id("implementation_plan"),
+                skip_generation=True,
+            )
+        return plan, True
 
     def _run_phase(
         self,
@@ -1749,86 +2049,61 @@ class WorkflowKernel:
         phase_index: int,
         total_phases: int,
         completed_summaries: list[str],
+        initial_summary: str = "",
+        initial_artifact_id: int | None = None,
+        skip_implementation: bool = False,
     ) -> PhaseResult:
         owner = self._dev
-        stage_name = f"phase_{phase_index}"
-        completed_phase_context = "\n".join(completed_summaries) or "None"
-        prompt = self._with_phase_skill_guidance(
-            DEV_IMPLEMENT_PHASE.format(
-                phase_index=phase_index,
-                total_phases=total_phases,
-                requirement=requirement,
-                design=design,
-                plan=plan,
-                phase_name=phase_name,
-                completed_phases=completed_phase_context,
-            )
-            + "\n\nAfter completing the work, return a concise implementation summary suitable for QA review."
-        )
-        stage_run_id = self._queue_stage_task(
-            owner=owner,
-            stage_name=stage_name,
-            prompt=prompt,
-            focus=requirement + "\n\n" + phase_name,
-            artifact_type="phase_result",
-            artifact_title=f"Phase {phase_index}: {phase_name}",
-            summary=f"Implement phase {phase_index}: {phase_name}",
-            iteration=phase_index,
-            metadata_json={"phase_index": phase_index, "phase_name": phase_name},
-        )
-        completion = self._wait_for_stage_result(stage_run_id=stage_run_id, stage_name=stage_name, owner=owner)
-        if completion.status != "completed":
-            return PhaseResult(name=phase_name, summary=self._failure_summary or f"Phase {phase_index} failed.")
-
-        reviewed_summary, review_iterations, passed = self._run_review_loop(
-            owner_stage_name=stage_name,
-            review_stage_name=f"{stage_name}_review",
-            artifact_type="phase_result",
-            artifact_title=f"Phase {phase_index} summary",
-            initial_artifact=completion.artifact_content,
-            initial_artifact_id=completion.artifact_id,
-            owner=owner,
-            reviewers=self._qas,
-            focus=requirement + "\n\n" + phase_name,
-            review_prompt_builder=lambda artifact, iteration, reviewer_role: self._with_code_review_guidance(
-                QA_CODE_REVIEW.format(
-                    context=f"Requirement:\n{requirement}\n\nApproved Design:\n{design}\n\nPlan:\n{plan}",
-                    summary=artifact,
-                    iteration=iteration,
+        if skip_implementation and initial_summary:
+            summary = initial_summary
+            artifact_id = initial_artifact_id
+        else:
+            stage_name = f"phase_{phase_index}"
+            completed_phase_context = "\n".join(completed_summaries) or "None"
+            prompt = self._with_phase_skill_guidance(
+                DEV_IMPLEMENT_PHASE.format(
+                    phase_index=phase_index,
+                    total_phases=total_phases,
+                    requirement=requirement,
+                    design=design,
+                    plan=plan,
+                    phase_name=phase_name,
+                    completed_phases=completed_phase_context,
                 )
-            ),
-            revision_prompt_builder=lambda artifact, feedback: self._with_phase_skill_guidance(
-                DEV_ADDRESS_CODE_COMMENTS.format(
-                    summary=artifact,
-                    feedback=feedback,
+                + "\n\nAfter completing the work, return a concise implementation summary suitable for QA review."
+            )
+            stage_run_id = self._queue_stage_task(
+                owner=owner,
+                stage_name=stage_name,
+                prompt=prompt,
+                focus=requirement + "\n\n" + phase_name,
+                artifact_type="phase_result",
+                artifact_title=f"Phase {phase_index}: {phase_name}",
+                summary=f"Implement phase {phase_index}: {phase_name}",
+                iteration=phase_index,
+                metadata_json={"phase_index": phase_index, "phase_name": phase_name},
+            )
+            completion = self._wait_for_stage_result(
+                stage_run_id=stage_run_id,
+                stage_name=stage_name,
+                owner=owner,
+            )
+            if completion.status != "completed":
+                return PhaseResult(
+                    name=phase_name,
+                    summary=self._failure_summary or f"Phase {phase_index} failed.",
                 )
-            ),
-        )
-        review_limit_reached = self._last_review_limit_reached
-        if not passed and not review_limit_reached:
-            return PhaseResult(
-                name=phase_name,
-                summary=reviewed_summary,
-                review_iterations=review_iterations,
-                review_passed=False,
-                committed=False,
-            )
+            summary = completion.artifact_content
+            artifact_id = completion.artifact_id
 
-        if not self._commit_phase_changes(phase_index=phase_index, phase_name=phase_name, summary=reviewed_summary):
-            return PhaseResult(
-                name=phase_name,
-                summary=reviewed_summary,
-                review_iterations=review_iterations,
-                review_passed=passed,
-                committed=False,
-            )
-
-        return PhaseResult(
-            name=phase_name,
-            summary=reviewed_summary,
-            review_iterations=review_iterations,
-            review_passed=passed,
-            committed=True,
+        return self._complete_phase(
+            requirement=requirement,
+            design=design,
+            plan=plan,
+            phase_name=phase_name,
+            phase_index=phase_index,
+            initial_summary=summary,
+            initial_artifact_id=artifact_id,
         )
 
     def _run_test(self, requirement: str, design: str, completed_summaries: list[str]) -> GATestResult:
@@ -1961,6 +2236,7 @@ class WorkflowKernel:
         completed_phases: list[PhaseResult],
         completed_summaries: list[str],
         result: WorkflowResult,
+        rebuild_for_resume: bool = False,
     ) -> bool | None:
         """Try to run delivery slices as a serial DAG.
 
@@ -1984,65 +2260,86 @@ class WorkflowKernel:
         if not delivery_slices:
             return None  # no slices found, fall back to legacy
 
-        # Check for persisted DAG state (resume path)
-        try:
-            persisted = self._store.get_slice_states(self._work_item_id)
-        except (AttributeError, Exception):
-            persisted = None
+        # Resume rebuilds the DAG from the approved plan plus committed phase
+        # artifacts so a previously failed slice can be retried cleanly.
+        if rebuild_for_resume:
+            committed_phase_indices = set(self._load_completed_phase_results_by_index())
+            try:
+                dag = SliceDAG.from_slices(delivery_slices)
+            except SliceDAGError as exc:
+                self._emit("error", f"DAG rebuild error: {exc}", stage="dag")
+                result.blocked = True
+                result.failure_summary = f"DAG rebuild error: {exc}"
+                result.final_report = result.failure_summary
+                return False
+            try:
+                self._store.delete_slice_states(self._work_item_id)
+            except (AttributeError, Exception):
+                pass
+            dag.persist_initial(self._store, self._work_item_id)
+            for slice_item in dag._ordered_slices():
+                phase_index = slice_item.plan_position + 1
+                if phase_index in committed_phase_indices:
+                    dag.mark_done(slice_item.id)
+        else:
+            # Check for persisted DAG state (resume path)
+            try:
+                persisted = self._store.get_slice_states(self._work_item_id)
+            except (AttributeError, Exception):
+                persisted = None
 
-        if persisted and isinstance(persisted, list) and len(persisted) > 0:
-            # Detect partial/stale persistence: compare slice IDs, not just count
-            persisted_ids = {row["slice_id"] for row in persisted}
-            parsed_ids = {s.id for s in delivery_slices}
-            if persisted_ids == parsed_ids:
-                try:
-                    dag = SliceDAG.from_store(self._store, self._work_item_id)
-                except (SliceDAGError, TypeError, KeyError) as exc:
+            if persisted and isinstance(persisted, list) and len(persisted) > 0:
+                # Detect partial/stale persistence: compare slice IDs, not just count
+                persisted_ids = {row["slice_id"] for row in persisted}
+                parsed_ids = {s.id for s in delivery_slices}
+                if persisted_ids == parsed_ids:
+                    try:
+                        dag = SliceDAG.from_store(self._store, self._work_item_id)
+                    except (SliceDAGError, TypeError, KeyError) as exc:
+                        self._emit(
+                            "warning",
+                            f"DAG resume error ({exc}); re-persisting from plan",
+                            stage="dag",
+                        )
+                        try:
+                            dag = SliceDAG.from_slices(delivery_slices)
+                        except SliceDAGError as exc2:
+                            self._emit("error", f"DAG rebuild error: {exc2}", stage="dag")
+                            result.blocked = True
+                            result.failure_summary = f"DAG rebuild error: {exc2}"
+                            result.final_report = result.failure_summary
+                            return False
+                        dag.persist_initial(self._store, self._work_item_id)
+                else:
                     self._emit(
                         "warning",
-                        f"DAG resume error ({exc}); re-persisting from plan",
+                        f"DAG persistence mismatch "
+                        f"(persisted={persisted_ids}, parsed={parsed_ids}); "
+                        f"re-persisting from plan",
                         stage="dag",
                     )
                     try:
                         dag = SliceDAG.from_slices(delivery_slices)
-                    except SliceDAGError as exc2:
-                        self._emit("error", f"DAG rebuild error: {exc2}", stage="dag")
+                    except SliceDAGError as exc:
+                        self._emit("error", f"DAG rebuild error: {exc}", stage="dag")
                         result.blocked = True
-                        result.failure_summary = f"DAG rebuild error: {exc2}"
+                        result.failure_summary = f"DAG rebuild error: {exc}"
                         result.final_report = result.failure_summary
                         return False
+                    # Only delete stale rows after successful rebuild
+                    self._store.delete_slice_states(self._work_item_id)
                     dag.persist_initial(self._store, self._work_item_id)
             else:
-                self._emit(
-                    "warning",
-                    f"DAG persistence mismatch "
-                    f"(persisted={persisted_ids}, parsed={parsed_ids}); "
-                    f"re-persisting from plan",
-                    stage="dag",
-                )
+                # First run: build DAG and persist
                 try:
                     dag = SliceDAG.from_slices(delivery_slices)
                 except SliceDAGError as exc:
-                    self._emit("error", f"DAG rebuild error: {exc}", stage="dag")
+                    self._emit("error", f"DAG construction error: {exc}", stage="dag")
                     result.blocked = True
-                    result.failure_summary = f"DAG rebuild error: {exc}"
+                    result.failure_summary = f"DAG construction error: {exc}"
                     result.final_report = result.failure_summary
                     return False
-                # Only delete stale rows after successful rebuild
-                self._store.delete_slice_states(self._work_item_id)
                 dag.persist_initial(self._store, self._work_item_id)
-        else:
-            # First run: build DAG and persist
-            try:
-                dag = SliceDAG.from_slices(delivery_slices)
-            except SliceDAGError as exc:
-                self._emit("error", f"DAG construction error: {exc}", stage="dag")
-                result.blocked = True
-                result.failure_summary = f"DAG construction error: {exc}"
-                result.final_report = result.failure_summary
-                return False
-
-            dag.persist_initial(self._store, self._work_item_id)
 
         self._emit("info", f"Running {len(dag.slices)} delivery slices serially", stage="dag")
         return self._run_dag_serial(
@@ -2179,6 +2476,11 @@ class WorkflowKernel:
 
     def run(self, requirement: str) -> WorkflowResult:
         result = WorkflowResult(requirement=requirement)
+        entry = self._resume_entry_point()
+        if entry == "done":
+            result.success = True
+            result.final_report = "Workflow was already completed."
+            return result
         if self._cancelled():
             result.blocked = True
             result.failure_summary = "Workflow cancelled before start."
@@ -2188,35 +2490,39 @@ class WorkflowKernel:
 
         design = self._load_latest_artifact("design_doc")
         plan = self._load_latest_artifact("implementation_plan")
-        completed_phases = self._load_completed_phase_results()
+        completed_phase_results = self._load_completed_phase_results_by_index()
+        completed_phases = [completed_phase_results[idx] for idx in sorted(completed_phase_results)]
+        completed_phase_indices = set(completed_phase_results)
         completed_summaries = [
-            f"Phase {idx + 1}: {item.summary[:500]}"
-            for idx, item in enumerate(completed_phases)
+            f"Phase {idx}: {completed_phase_results[idx].summary[:500]}"
+            for idx in sorted(completed_phase_results)
         ]
         result.phases.extend(completed_phases)
 
-        if self._mode in {WorkMode.full, WorkMode.design} and not design:
-            design, ok = self._run_design(requirement)
-            result.design = design
-            if not ok:
-                result.blocked = True
-                result.failure_summary = self._failure_summary or "Design stage failed."
-                result.final_report = result.failure_summary
-                return result
-        else:
-            result.design = design
+        design, ok = self._resolve_design_stage(
+            requirement=requirement,
+            entry=entry,
+            design=design,
+        )
+        result.design = design
+        if not ok:
+            result.blocked = True
+            result.failure_summary = self._failure_summary or "Design stage failed."
+            result.final_report = result.failure_summary
+            return result
 
-        if self._mode in {WorkMode.full, WorkMode.design, WorkMode.develop} and not plan:
-            design_ref = result.design or requirement
-            plan, ok = self._run_plan(requirement, design_ref)
-            result.plan = plan
-            if not ok:
-                result.blocked = True
-                result.failure_summary = self._failure_summary or "Planning stage failed."
-                result.final_report = result.failure_summary
-                return result
-        else:
-            result.plan = plan
+        plan, ok = self._resolve_plan_stage(
+            requirement=requirement,
+            design=result.design or requirement,
+            entry=entry,
+            plan=plan,
+        )
+        result.plan = plan
+        if not ok:
+            result.blocked = True
+            result.failure_summary = self._failure_summary or "Planning stage failed."
+            result.final_report = result.failure_summary
+            return result
 
         if result.design and result.plan:
             if not self._export_design_plan_to_docs(
@@ -2229,7 +2535,7 @@ class WorkflowKernel:
                 result.final_report = result.failure_summary
                 return result
 
-        if self._mode in {WorkMode.full, WorkMode.develop}:
+        if self._mode in {WorkMode.full, WorkMode.develop} and entry not in {"ga_test", "report"}:
             dag_result = self._try_run_dag_serial(
                 requirement=requirement,
                 design=result.design or requirement,
@@ -2237,21 +2543,41 @@ class WorkflowKernel:
                 completed_phases=completed_phases,
                 completed_summaries=completed_summaries,
                 result=result,
+                rebuild_for_resume=(entry in {"phases", "ga_test", "report"}),
             )
             if dag_result is None:
                 # No delivery slices found — legacy phase loop
                 phases = self._parse_phases(result.plan or "Phase 1: Implementation")
-                start_index = len(completed_phases) + 1
-                for phase_index, phase_name in enumerate(phases[start_index - 1:], start_index):
-                    phase_result = self._run_phase(
-                        requirement=requirement,
-                        design=result.design or requirement,
-                        plan=result.plan or requirement,
-                        phase_name=phase_name,
-                        phase_index=phase_index,
-                        total_phases=len(phases),
-                        completed_summaries=completed_summaries,
-                    )
+                resume_phase_index = self._resume_phase_index() if entry == "phases" else 1
+                for phase_index, phase_name in enumerate(phases, start=1):
+                    if phase_index in completed_phase_indices:
+                        continue
+                    if phase_index == resume_phase_index and self._should_resume_phase_from_review(phase_index):
+                        saved_summary, saved_artifact_id, _saved_metadata = self._load_phase_result_artifact(
+                            phase_index
+                        )
+                        phase_result = self._run_phase(
+                            requirement=requirement,
+                            design=result.design or requirement,
+                            plan=result.plan or requirement,
+                            phase_name=phase_name,
+                            phase_index=phase_index,
+                            total_phases=len(phases),
+                            completed_summaries=completed_summaries,
+                            initial_summary=saved_summary,
+                            initial_artifact_id=saved_artifact_id,
+                            skip_implementation=True,
+                        )
+                    else:
+                        phase_result = self._run_phase(
+                            requirement=requirement,
+                            design=result.design or requirement,
+                            plan=result.plan or requirement,
+                            phase_name=phase_name,
+                            phase_index=phase_index,
+                            total_phases=len(phases),
+                            completed_summaries=completed_summaries,
+                        )
                     result.phases.append(phase_result)
                     completed_summaries.append(f"Phase {phase_index}: {phase_result.summary[:500]}")
                     if not phase_result.committed:

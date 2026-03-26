@@ -142,6 +142,28 @@ def test_submit_work_includes_with_ga_test_when_requested(monkeypatch):
     assert observed["payload"]["with_ga_test"] is True
 
 
+def test_submit_work_includes_resume_work_item_id(monkeypatch):
+    observed: dict[str, object] = {}
+
+    def _urlopen(request, timeout):
+        observed["payload"] = json.loads(request.data.decode("utf-8"))
+        return _Response(b'{"ok": true}')
+
+    monkeypatch.setattr("myswat.server.control_client.urlopen", _urlopen)
+    client = DaemonClient()
+
+    result = client.submit_work(
+        project="fib-demo",
+        requirement="",
+        workdir=None,
+        mode="full",
+        resume_work_item_id=77,
+    )
+
+    assert result == {"ok": True}
+    assert observed["payload"]["resume_work_item_id"] == 77
+
+
 def test_parse_error_body_variants():
     assert DaemonClient._parse_error_body("") is None
     assert DaemonClient._parse_error_body("plain text") == "plain text"

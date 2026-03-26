@@ -1140,6 +1140,7 @@ def test_request_review_creates_pending_cycle_and_logs_event():
 
 def test_fail_stage_task_records_blocked_state_and_process_event():
     store = Mock(spec=MemoryStore)
+    store.get_work_item_state.return_value = {}
     service = MySwatToolService(store)
 
     result = service.fail_stage_task(
@@ -1202,6 +1203,32 @@ def test_fail_stage_task_records_blocked_state_and_process_event():
             "runner_exit_code": 101,
             "stderr_tail": "error[E0502]",
         },
+    )
+
+
+def test_fail_stage_task_preserves_more_specific_saved_stage():
+    store = Mock(spec=MemoryStore)
+    store.get_work_item_state.return_value = {"current_stage": "design_review"}
+    service = MySwatToolService(store)
+
+    service.fail_stage_task(
+        FailStageTaskRequest(
+            stage_run_id=55,
+            runtime_registration_id=91,
+            work_item_id=11,
+            agent_id=3,
+            agent_role="developer",
+            stage_name="design",
+            summary="Stage execution failed.",
+            metadata_json={"failure_kind": "runner_exception"},
+        )
+    )
+
+    store.update_work_item_state.assert_called_once_with(
+        11,
+        current_stage="design_review",
+        latest_summary="Stage execution failed.",
+        updated_by_agent_id=3,
     )
 
 

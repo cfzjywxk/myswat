@@ -24,8 +24,6 @@ def _validate_daemon_workflow_request(
     auto_approve: bool,
     resume: int | None,
 ) -> None:
-    if resume is not None:
-        raise typer.BadParameter("--resume is not supported through the daemon workflow path yet.")
     if not auto_approve:
         raise typer.BadParameter(
             "--interactive-checkpoints is not supported through the daemon workflow path yet."
@@ -64,6 +62,8 @@ def run_work(
     }
     if with_ga_test:
         submit_kwargs["with_ga_test"] = True
+    if resume is not None:
+        submit_kwargs["resume_work_item_id"] = resume
 
     try:
         result = client.submit_work(**submit_kwargs)
@@ -72,7 +72,10 @@ def run_work(
         raise typer.Exit(1) from exc
 
     work_item_id = int(result.get("work_item_id") or 0)
-    console.print(f"[bold]Queued workflow:[/bold] {requirement}")
+    if resume is not None:
+        console.print(f"[bold]Resumed workflow:[/bold] work item {resume}")
+    else:
+        console.print(f"[bold]Queued workflow:[/bold] {requirement}")
     if work_item_id > 0:
         console.print(f"[dim]Work item: {work_item_id}[/dim]")
     workers = result.get("workers") or []
