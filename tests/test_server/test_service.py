@@ -1176,6 +1176,50 @@ def test_request_review_reactivates_paused_cycle_on_resume():
             "task_focus": "rollback safety",
         },
     )
+    store.get_review_cycle.assert_called_once_with(88)
+    store.reactivate_review_cycle.assert_called_once()
+    store.update_work_item_state.assert_called_once()
+
+
+def test_request_review_reactivates_failed_blocked_cycle_on_resume():
+    store = Mock(spec=MemoryStore)
+    store.create_review_cycle.return_value = 88
+    store.get_review_cycle.return_value = {
+        "id": 88,
+        "status": "blocked",
+        "verdict": "failed",
+    }
+    service = MySwatToolService(store)
+
+    result = service.request_review(
+        ReviewRequest(
+            work_item_id=17,
+            artifact_id=42,
+            iteration=2,
+            proposer_agent_id=3,
+            proposer_role="developer",
+            reviewer_agent_id=4,
+            reviewer_role="qa_main",
+            stage="phase_3_review",
+            summary="Retry QA review.",
+            task_prompt="Please review this artifact again",
+            task_focus="rollback safety",
+        )
+    )
+
+    assert result.cycle_id == 88
+    store.reactivate_review_cycle.assert_called_once_with(
+        88,
+        iteration=2,
+        stage_name="phase_3_review",
+        proposal_session_id=None,
+        task_json={
+            "task_prompt": "Please review this artifact again",
+            "task_focus": "rollback safety",
+        },
+    )
+    store.update_work_item_state.assert_called_once()
+    store.append_work_item_process_event.assert_called_once()
 
 
 def test_request_review_raises_when_paused_cycle_cannot_be_reactivated():

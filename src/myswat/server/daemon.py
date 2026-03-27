@@ -42,6 +42,7 @@ _NOISY_MCP_TOOLS = frozenset({
     "renew_review_cycle_lease",
     "claim_next_assignment",
 })
+_EXPECTED_WORKER_DISCONNECT_RETENTION_SECONDS = 300.0
 
 LOGGER = logging.getLogger(__name__)
 _CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
@@ -130,6 +131,7 @@ class MySwatDaemon:
         self._workers: dict[tuple[str, str], ManagedWorkerProcess] = {}
         self._workflows: dict[int, threading.Thread] = {}
         self._workflow_controls: dict[int, ManagedWorkflow] = {}
+        self._expected_worker_disconnects: dict[int, float] = {}
         self._supervisor_stop_event = threading.Event()
         self._supervisor_thread: threading.Thread | None = None
         self._last_project_snapshot_at = 0.0
@@ -251,11 +253,13 @@ class MySwatDaemon:
         if not project:
             return
         for runtime in self._store.list_runtime_registrations(int(project["id"]), status="online"):
+            runtime_registration_id = int(runtime.id or 0)
             self._store.update_runtime_status(
-                int(runtime.id or 0),
+                runtime_registration_id,
                 status="offline",
                 metadata_json={"stop_reason": "project_worker_recycled"},
             )
+            self._remember_expected_worker_disconnect(runtime_registration_id)
 
     def _mark_dead_worker_runtime_offline(
         self,
@@ -556,6 +560,70 @@ class MySwatDaemon:
         if not isinstance(params, dict):
             return ""
         return str(params.get("name") or "")
+
+    @staticmethod
+    def _mcp_tool_arguments(payload: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+        if str(payload.get("method") or "") != "tools/call":
+            return {}
+        params = payload.get("params")
+        if not isinstance(params, dict):
+            return {}
+        arguments = params.get("arguments")
+        return arguments if isinstance(arguments, dict) else {}
+
+    def _prune_expected_worker_disconnects_locked(self, *, now: float | None = None) -> None:
+        if not self._expected_worker_disconnects:
+            return
+        current = time.monotonic() if now is None else now
+        expired = [
+            runtime_registration_id
+            for runtime_registration_id, expires_at in self._expected_worker_disconnects.items()
+            if expires_at <= current
+        ]
+        for runtime_registration_id in expired:
+            self._expected_worker_disconnects.pop(runtime_registration_id, None)
+
+    def _remember_expected_worker_disconnect(self, runtime_registration_id: int) -> None:
+        try:
+            parsed_runtime_id = int(runtime_registration_id or 0)
+        except (TypeError, ValueError):
+            return
+        if parsed_runtime_id <= 0:
+            return
+        with self._lock:
+            self._prune_expected_worker_disconnects_locked()
+            self._expected_worker_disconnects[parsed_runtime_id] = (
+                time.monotonic() + _EXPECTED_WORKER_DISCONNECT_RETENTION_SECONDS
+            )
+
+    def _has_expected_worker_disconnect(self, runtime_registration_id: int) -> bool:
+        try:
+            parsed_runtime_id = int(runtime_registration_id or 0)
+        except (TypeError, ValueError):
+            return False
+        if parsed_runtime_id <= 0:
+            return False
+        with self._lock:
+            self._prune_expected_worker_disconnects_locked()
+            return parsed_runtime_id in self._expected_worker_disconnects
+
+    def _is_expected_worker_disconnect(self, *, path: str, payload: dict[str, Any] | None) -> bool:
+        if path != "/mcp":
+            return False
+        tool_name = self._mcp_tool_name(payload)
+        if tool_name not in _NOISY_MCP_TOOLS:
+            return False
+        arguments = self._mcp_tool_arguments(payload)
+        runtime_registration_id = arguments.get("runtime_registration_id")
+        try:
+            parsed_runtime_id = int(runtime_registration_id or 0)
+        except (TypeError, ValueError):
+            return False
+        if parsed_runtime_id <= 0:
+            return False
+        return self._has_expected_worker_disconnect(parsed_runtime_id)
 
     def _project_ref(self, *, project_slug: str | None = None, project_id: Any = None) -> str:
         if project_slug:
@@ -1223,7 +1291,8 @@ class MySwatDaemon:
                 payload: dict[str, Any] | None = None,
             ) -> None:
                 detail = daemon._describe_request(path, payload)
-                LOGGER.warning(
+                log_method = LOGGER.info if daemon._is_expected_worker_disconnect(path=path, payload=payload) else LOGGER.warning
+                log_method(
                     "Daemon client disconnected: %s %s duration=%.3fs%s error=%s",
                     self.command,
                     path,

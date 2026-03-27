@@ -56,6 +56,7 @@ class TiDBPool:
             charset="utf8mb4",
             cursorclass=pymysql.cursors.DictCursor,
             autocommit=True,
+            connect_timeout=max(1, int(self._settings.connect_timeout_seconds)),
         )
 
     @contextmanager
@@ -82,6 +83,7 @@ class TiDBPool:
                 password=self._settings.password,
                 ssl={"ca": self._settings.ssl_ca} if self._settings.ssl_ca else None,
                 charset="utf8mb4",
+                connect_timeout=max(1, int(self._settings.connect_timeout_seconds)),
             )
             try:
                 with conn.cursor() as cur:

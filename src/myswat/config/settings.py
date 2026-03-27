@@ -26,6 +26,7 @@ class TiDBSettings(BaseSettings):
     password: str = ""
     ssl_ca: str = "/etc/ssl/certs/ca-certificates.crt"
     database: str = "myswat"
+    connect_timeout_seconds: int = 180
 
     model_config = {"env_prefix": "MYSWAT_TIDB_"}
 

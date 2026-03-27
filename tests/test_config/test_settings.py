@@ -34,6 +34,7 @@ class TestTiDBSettings:
         assert settings.password == ""
         assert settings.ssl_ca == "/etc/ssl/certs/ca-certificates.crt"
         assert settings.database == "myswat"
+        assert settings.connect_timeout_seconds == 180
 
     def test_env_override_host(self, monkeypatch):
         monkeypatch.setenv("MYSWAT_TIDB_HOST", "db.example.com")
@@ -65,18 +66,25 @@ class TestTiDBSettings:
         settings = TiDBSettings()
         assert settings.database == "other_db"
 
+    def test_env_override_connect_timeout_seconds(self, monkeypatch):
+        monkeypatch.setenv("MYSWAT_TIDB_CONNECT_TIMEOUT_SECONDS", "240")
+        settings = TiDBSettings()
+        assert settings.connect_timeout_seconds == 240
+
     def test_multiple_env_overrides(self, monkeypatch):
         monkeypatch.setenv("MYSWAT_TIDB_HOST", "10.0.0.1")
         monkeypatch.setenv("MYSWAT_TIDB_PORT", "5000")
         monkeypatch.setenv("MYSWAT_TIDB_USER", "root")
         monkeypatch.setenv("MYSWAT_TIDB_PASSWORD", "pw")
         monkeypatch.setenv("MYSWAT_TIDB_DATABASE", "test_db")
+        monkeypatch.setenv("MYSWAT_TIDB_CONNECT_TIMEOUT_SECONDS", "300")
         settings = TiDBSettings()
         assert settings.host == "10.0.0.1"
         assert settings.port == 5000
         assert settings.user == "root"
         assert settings.password == "pw"
         assert settings.database == "test_db"
+        assert settings.connect_timeout_seconds == 300
 
 
 # ---------------------------------------------------------------------------

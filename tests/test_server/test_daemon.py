@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import threading
+import time
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 from myswat.server.daemon import ManagedWorkerProcess, MySwatDaemon
@@ -113,6 +115,64 @@ def test_handle_work_with_ga_test_marks_work_item_and_thread():
         mode=WorkMode.full,
         with_ga_test=True,
     )
+
+
+def test_expected_worker_disconnect_detects_recycled_runtime():
+    daemon = MySwatDaemon.__new__(MySwatDaemon)
+    daemon._lock = threading.RLock()
+    daemon._expected_worker_disconnects = {}
+    daemon._remember_expected_worker_disconnect(600002)
+
+    assert daemon._is_expected_worker_disconnect(
+        path="/mcp",
+        payload={
+            "method": "tools/call",
+            "params": {
+                "name": "heartbeat_runtime",
+                "arguments": {"runtime_registration_id": 600002},
+            },
+        },
+    ) is True
+
+
+def test_expected_worker_disconnect_ignores_expired_runtime_ids():
+    daemon = MySwatDaemon.__new__(MySwatDaemon)
+    daemon._lock = threading.RLock()
+    daemon._expected_worker_disconnects = {
+        600002: time.monotonic() - 1,
+    }
+
+    assert daemon._is_expected_worker_disconnect(
+        path="/mcp",
+        payload={
+            "method": "tools/call",
+            "params": {
+                "name": "heartbeat_runtime",
+                "arguments": {"runtime_registration_id": 600002},
+            },
+        },
+    ) is False
+
+
+def test_stop_project_workers_tracks_recycled_runtime_disconnects():
+    daemon = MySwatDaemon.__new__(MySwatDaemon)
+    daemon._lock = threading.RLock()
+    daemon._workers = {}
+    daemon._store = Mock()
+    daemon._expected_worker_disconnects = {}
+    daemon._store.get_project_by_slug.return_value = {"id": 7}
+    daemon._store.list_runtime_registrations.return_value = [
+        SimpleNamespace(id=600002),
+    ]
+
+    daemon._stop_project_workers("fib-demo")
+
+    daemon._store.update_runtime_status.assert_called_once_with(
+        600002,
+        status="offline",
+        metadata_json={"stop_reason": "project_worker_recycled"},
+    )
+    assert 600002 in daemon._expected_worker_disconnects
 
 
 def test_handle_work_rejects_with_ga_test_for_non_full_mode():

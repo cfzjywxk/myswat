@@ -222,6 +222,14 @@ class MySwatToolService:
         return stage or None
 
     @staticmethod
+    def _should_reactivate_review_cycle(*, status: str, verdict: str) -> bool:
+        if status in {"paused", "cancelled"} and verdict in {"pending", "paused", "cancelled"}:
+            return True
+        # Resume should re-queue transiently failed reviews instead of
+        # replaying the old failed verdict immediately.
+        return status == "blocked" and verdict == "failed"
+
+    @staticmethod
     def _prefer_saved_stage(current_stage: str | None, fallback_stage: str | None) -> str | None:
         if current_stage and fallback_stage:
             if current_stage == fallback_stage or current_stage.startswith(f"{fallback_stage}_"):
@@ -1167,7 +1175,10 @@ class MySwatToolService:
         if isinstance(cycle, dict):
             cycle_status = str(cycle.get("status") or "")
             cycle_verdict = str(cycle.get("verdict") or "")
-            if cycle_status in {"paused", "cancelled"} and cycle_verdict in {"pending", "paused", "cancelled"}:
+            if self._should_reactivate_review_cycle(
+                status=cycle_status,
+                verdict=cycle_verdict,
+            ):
                 reactivated = self._store.reactivate_review_cycle(
                     cycle_id,
                     iteration=request.iteration,
@@ -1183,6 +1194,8 @@ class MySwatToolService:
                             "Existing review cycle could not be reactivated: "
                             f"cycle_id={cycle_id} status={refreshed_status or 'unknown'}"
                         )
+                else:
+                    self._invalidate_review_history_cache_for_work_item(request.work_item_id)
         self._store.update_work_item_state(
             request.work_item_id,
             current_stage=self._stage_or_none(request.stage),

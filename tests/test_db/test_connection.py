@@ -31,6 +31,7 @@ def settings():
     s.password = "secret"
     s.ssl_ca = "/path/to/ca.pem"
     s.database = "myswat"
+    s.connect_timeout_seconds = 180
     return s
 
 
@@ -44,6 +45,7 @@ def settings_no_ssl():
     s.password = "secret"
     s.ssl_ca = ""
     s.database = "myswat"
+    s.connect_timeout_seconds = 180
     return s
 
 
@@ -211,6 +213,7 @@ class TestConnect:
             charset="utf8mb4",
             cursorclass=pymysql.cursors.DictCursor,
             autocommit=True,
+            connect_timeout=settings.connect_timeout_seconds,
         )
 
     @patch("myswat.db.connection.pymysql.connect")
@@ -228,7 +231,18 @@ class TestConnect:
             charset="utf8mb4",
             cursorclass=pymysql.cursors.DictCursor,
             autocommit=True,
+            connect_timeout=settings_no_ssl.connect_timeout_seconds,
         )
+
+    @patch("myswat.db.connection.pymysql.connect")
+    def test_connect_timeout_is_clamped_to_one_second(self, mock_connect, pool, settings):
+        settings.connect_timeout_seconds = 0
+        mock_connect.return_value = MagicMock()
+
+        pool._connect()
+
+        _, kwargs = mock_connect.call_args
+        assert kwargs["connect_timeout"] == 1
 
     @patch("myswat.db.connection.pymysql.connect")
     def test_connect_custom_database(self, mock_connect, pool, settings):
@@ -436,6 +450,19 @@ class TestHealthCheck:
         pool.health_check()
         _, kwargs = mock_connect.call_args
         assert "database" not in kwargs
+
+    @patch("myswat.db.connection.pymysql.connect")
+    def test_health_check_timeout_is_clamped_to_one_second(self, mock_connect, pool, settings):
+        settings.connect_timeout_seconds = -5
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        mock_connect.return_value = mock_conn
+
+        pool.health_check()
+        _, kwargs = mock_connect.call_args
+        assert kwargs["connect_timeout"] == 1
 
 
 # ===================================================================

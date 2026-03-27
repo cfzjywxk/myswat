@@ -184,6 +184,24 @@ class TestCreateReviewCycleIdempotent:
         assert 55 in args
 
 
+class TestReactivateReviewCycle:
+    def test_reactivate_allows_blocked_cycles(self, mock_pool):
+        mock_pool.execute.return_value = 1
+
+        store = MemoryStore(mock_pool)
+        ok = store.reactivate_review_cycle(
+            77,
+            iteration=3,
+            stage_name="phase_3_review",
+            proposal_session_id=None,
+            task_json={"task_prompt": "retry"},
+        )
+
+        assert ok is True
+        sql = mock_pool.execute.call_args[0][0]
+        assert "status IN ('paused', 'cancelled', 'blocked')" in sql
+
+
 class TestCreateArtifactIdempotent:
     def test_new_artifact_created(self, mock_pool):
         """No existing artifact → INSERT new row."""

@@ -19,6 +19,7 @@ def mock_pool():
     pool._settings.user = "root"
     pool._settings.password = "pass"
     pool._settings.ssl_ca = None
+    pool._settings.connect_timeout_seconds = 180
     return pool
 
 
@@ -34,11 +35,25 @@ class TestEnsureDatabase:
         ensure_database(mock_pool)
 
         mock_connect.assert_called_once()
+        assert mock_connect.call_args.kwargs.get("connect_timeout") == 180
         mock_cursor.execute.assert_called_once()
         sql = mock_cursor.execute.call_args[0][0]
         assert "CREATE DATABASE IF NOT EXISTS" in sql
         assert "test_db" in sql
         mock_conn.close.assert_called_once()
+
+    @patch("pymysql.connect")
+    def test_connect_timeout_is_clamped_to_one_second(self, mock_connect, mock_pool):
+        mock_pool._settings.connect_timeout_seconds = 0
+        mock_cursor = MagicMock()
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cursor)
+        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+        mock_connect.return_value = mock_conn
+
+        ensure_database(mock_pool)
+
+        assert mock_connect.call_args.kwargs.get("connect_timeout") == 1
 
     @patch("pymysql.connect")
     def test_uses_ssl_when_configured(self, mock_connect, mock_pool):

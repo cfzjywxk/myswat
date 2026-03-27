@@ -363,6 +363,7 @@ def ensure_database(pool: TiDBPool) -> None:
         ssl={"ca": pool._settings.ssl_ca} if pool._settings.ssl_ca else None,
         charset="utf8mb4",
         autocommit=True,
+        connect_timeout=max(1, int(pool._settings.connect_timeout_seconds)),
     )
     try:
         with conn.cursor() as cur:

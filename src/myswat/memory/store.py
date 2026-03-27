@@ -3330,7 +3330,7 @@ class MemoryStore:
             "iteration = %s, stage_name = %s, proposal_session_id = %s, task_json = %s, "
             "review_session_id = NULL, claimed_by_runtime_id = NULL, claimed_at = NULL, "
             "lease_expires_at = NULL, completed_at = NULL "
-            "WHERE id = %s AND status IN ('paused', 'cancelled')",
+            "WHERE id = %s AND status IN ('paused', 'cancelled', 'blocked')",
             (
                 iteration,
                 stage_name,
