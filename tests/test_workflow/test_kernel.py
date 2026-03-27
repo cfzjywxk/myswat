@@ -3206,6 +3206,20 @@ def test_detect_incomplete_scope_report_flags_structured_and_textual_markers():
     assert "the report says planned pieces are not present yet" in reasons
 
 
+def test_detect_incomplete_scope_report_prefers_complete_status_over_historical_backstops():
+    report = (
+        "Status: COMPLETE\n"
+        "\n"
+        "The approved scope is implemented.\n"
+        "An older report artifact said only a narrower subset was present,\n"
+        "but that conflicts with the current repository state.\n"
+    )
+
+    reasons = detect_incomplete_scope_report(report)
+
+    assert reasons == []
+
+
 def test_run_blocks_when_final_report_says_scope_is_incomplete():
     store = _store()
     service = _service()

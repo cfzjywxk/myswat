@@ -101,6 +101,10 @@ class WorkflowResult:
 
 
 _SCOPE_NORMALIZE_RE = re.compile(r"[^a-z0-9]+")
+_COMPLETE_SCOPE_STATUS_RE = re.compile(
+    r"^status:\s*complete\b",
+    re.IGNORECASE | re.MULTILINE,
+)
 _INCOMPLETE_SCOPE_STATUS_RE = re.compile(
     r"^status:\s*incomplete\b",
     re.IGNORECASE | re.MULTILINE,
@@ -145,6 +149,10 @@ def detect_incomplete_scope_report(report: str) -> list[str]:
     reasons: list[str] = []
     if _INCOMPLETE_SCOPE_STATUS_RE.search(text):
         reasons.append("the final report marks scope completeness as INCOMPLETE")
+    elif _COMPLETE_SCOPE_STATUS_RE.search(text):
+        # The structured status line is authoritative when present. Textual
+        # backstops are only for older reports without that explicit signal.
+        return reasons
     for pattern, message in _INCOMPLETE_SCOPE_SIGNAL_PATTERNS:
         if pattern.search(text):
             reasons.append(message)
