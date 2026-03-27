@@ -2907,9 +2907,13 @@ class MemoryStore:
         summary: str,
         status: str = "cancelled",
     ) -> None:
+        excluded_statuses = ["completed", "blocked", "cancelled", "failed"]
+        if status == "paused":
+            excluded_statuses.append("paused")
+        placeholders = ", ".join(f"'{value}'" for value in excluded_statuses)
         self._pool.execute(
             "UPDATE stage_runs SET status = %s, summary = %s, completed_at = NOW(), lease_expires_at = NULL "
-            "WHERE work_item_id = %s AND status NOT IN ('completed', 'blocked', 'cancelled', 'failed')",
+            f"WHERE work_item_id = %s AND status NOT IN ({placeholders})",
             (status, summary[:4000], work_item_id),
         )
 
@@ -3235,22 +3239,27 @@ class MemoryStore:
         *,
         summary: str,
         status: str = "cancelled",
+        verdict: str = "cancelled",
     ) -> int:
         if not cycle_ids:
             return 0
+        excluded_statuses = ["completed", "blocked", "cancelled"]
+        if status == "paused":
+            excluded_statuses.append("paused")
         verdict_json = json.dumps(
             {
-                "verdict": "cancelled",
+                "verdict": verdict,
                 "issues": [],
                 "summary": summary[:4000],
             }
         )
         placeholders = ", ".join(["%s"] * len(cycle_ids))
+        excluded_placeholders = ", ".join(f"'{value}'" for value in excluded_statuses)
         updated = self._pool.execute(
             f"UPDATE review_cycles SET status = %s, verdict = %s, verdict_json = %s, "
             f"completed_at = NOW(), lease_expires_at = NULL "
-            f"WHERE id IN ({placeholders}) AND status NOT IN ('completed', 'blocked', 'cancelled')",
-            (status, "cancelled", verdict_json, *cycle_ids),
+            f"WHERE id IN ({placeholders}) AND status NOT IN ({excluded_placeholders})",
+            (status, verdict, verdict_json, *cycle_ids),
         )
         return int(updated or 0)
 
@@ -3260,19 +3269,24 @@ class MemoryStore:
         *,
         summary: str,
         status: str = "cancelled",
+        verdict: str = "cancelled",
     ) -> None:
+        excluded_statuses = ["completed", "blocked", "cancelled"]
+        if status == "paused":
+            excluded_statuses.append("paused")
         verdict_json = json.dumps(
             {
-                "verdict": "cancelled",
+                "verdict": verdict,
                 "issues": [],
                 "summary": summary[:4000],
             }
         )
+        placeholders = ", ".join(f"'{value}'" for value in excluded_statuses)
         self._pool.execute(
             "UPDATE review_cycles SET status = %s, verdict = %s, verdict_json = %s, "
             "completed_at = NOW(), lease_expires_at = NULL "
-            "WHERE work_item_id = %s AND status NOT IN ('completed', 'blocked', 'cancelled')",
-            (status, "cancelled", verdict_json, work_item_id),
+            f"WHERE work_item_id = %s AND status NOT IN ({placeholders})",
+            (status, verdict, verdict_json, work_item_id),
         )
 
     def get_review_cycles(self, work_item_id: int) -> list[dict]:
@@ -3301,3 +3315,28 @@ class MemoryStore:
             if row.get("verdict_json") is not None:
                 row["verdict_json"] = self._parse_json_field(row["verdict_json"])
         return rows
+
+    def reactivate_review_cycle(
+        self,
+        cycle_id: int,
+        *,
+        iteration: int,
+        stage_name: str | None,
+        proposal_session_id: int | None,
+        task_json: dict[str, Any] | None = None,
+    ) -> bool:
+        updated = self._pool.execute(
+            "UPDATE review_cycles SET status = 'pending', verdict = 'pending', verdict_json = NULL, "
+            "iteration = %s, stage_name = %s, proposal_session_id = %s, task_json = %s, "
+            "review_session_id = NULL, claimed_by_runtime_id = NULL, claimed_at = NULL, "
+            "lease_expires_at = NULL, completed_at = NULL "
+            "WHERE id = %s AND status IN ('paused', 'cancelled')",
+            (
+                iteration,
+                stage_name,
+                proposal_session_id,
+                json.dumps(task_json) if task_json else None,
+                cycle_id,
+            ),
+        )
+        return updated == 1

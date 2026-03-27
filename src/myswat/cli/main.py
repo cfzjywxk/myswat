@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 import json
+import logging
 import time
 
 import typer
@@ -10,6 +11,8 @@ from myswat.cli.daemon_errors import print_daemon_error
 from myswat.cli.progress import _describe_process_event
 from myswat.cli.memory_cmd import memory_app, search as run_search_command
 from myswat.workflow.modes import WorkMode, resolve_cli_work_mode
+
+LOGGER = logging.getLogger(__name__)
 
 app = typer.Typer(
     name="myswat",
@@ -357,6 +360,29 @@ def stop(
     console.print(f"[green]Cancellation requested for work item {result.get('work_item_id')}.[/green]")
 
 
+@app.command()
+def pause(
+    work_item_id: int = typer.Argument(..., help="Work item ID"),
+    project: str = typer.Option(..., "--project", "-p", help="Project slug"),
+):
+    """Request workflow pause so it can be resumed later."""
+    from rich.console import Console
+
+    from myswat.config.settings import MySwatSettings
+    from myswat.server.control_client import DaemonClient, DaemonClientError
+
+    console = Console()
+    settings = MySwatSettings()
+    client = DaemonClient(settings)
+    try:
+        result = client.control_work(project=project, work_item_id=work_item_id, action="pause")
+    except DaemonClientError as exc:
+        print_daemon_error(exc, console=console)
+        raise typer.Exit(1) from exc
+
+    console.print(f"[green]Pause requested for work item {result.get('work_item_id')}.[/green]")
+
+
 def _format_history_timestamp(value) -> str:
     if hasattr(value, "isoformat"):
         isoformat = value.isoformat
@@ -605,6 +631,19 @@ def _compact_text(value, limit: int = 180) -> str:
     return text[: limit - 3] + "..."
 
 
+def _phase_index_from_stage_name(stage_name: str | None) -> int | None:
+    text = str(stage_name or "").strip()
+    if not text.startswith("phase_"):
+        return None
+    parts = text.split("_", 2)
+    if len(parts) < 2:
+        return None
+    try:
+        return int(parts[1])
+    except ValueError:
+        return None
+
+
 def _task_state_dict(item: dict) -> dict:
     metadata = item.get("metadata_json") if isinstance(item, dict) else None
     if not isinstance(metadata, dict):
@@ -771,7 +810,7 @@ def _event_badge(entry: dict) -> tuple[str, str]:
     if verdict == "lgtm":
         return "LGTM", "black on green"
     if verdict == "changes_requested":
-        return "REQUEST CHANGES", "bold white on red"
+        return "CHANGES REQUESTED", "bold white on red"
     if event_type in {"agent_stall", "stage_blocked"}:
         return "CRITICAL", "bold white on red"
     if event_type == "agent_empty_output":
@@ -789,6 +828,17 @@ def _event_badge(entry: dict) -> tuple[str, str]:
     if event_type in {"workflow_completed", "stage_completed"}:
         return "DONE", "black on green"
     return "", ""
+
+
+def _review_verdict_label(verdict: str) -> str:
+    normalized = str(verdict or "").strip().lower()
+    if normalized == "lgtm":
+        return "LGTM"
+    if normalized == "changes_requested":
+        return "CHANGES REQUESTED"
+    if normalized == "failed":
+        return "FAILED"
+    return normalized.upper() if normalized else "-"
 
 
 def _event_title(entry: dict) -> str:
@@ -828,10 +878,10 @@ def _event_summary(entry: dict) -> str:
     return _compact_text(" ".join(parts), 320)
 
 
-def _build_review_cycle_flow_entries(pool, item_id: int) -> list[dict]:
-    rows = _safe_list(
+def _fetch_review_cycle_rows(pool, item_id: int) -> list[dict]:
+    return _safe_list(
         pool.fetch_all(
-            "SELECT rc.iteration, rc.stage_name, rc.verdict, rc.verdict_json, "
+            "SELECT rc.id, rc.iteration, rc.stage_name, rc.status, rc.verdict, rc.verdict_json, "
             "rc.created_at, rc.updated_at, rc.completed_at, "
             "a1.role AS proposer_role, a2.role AS reviewer_role, "
             "art.title AS artifact_title, art.artifact_type "
@@ -845,6 +895,8 @@ def _build_review_cycle_flow_entries(pool, item_id: int) -> list[dict]:
         )
     )
 
+
+def _build_review_cycle_flow_entries_from_rows(rows: list[dict]) -> list[dict]:
     events: list[dict] = []
     sequence = 0
     for row in rows:
@@ -894,8 +946,10 @@ def _build_review_cycle_flow_entries(pool, item_id: int) -> list[dict]:
     return events
 
 
-def _build_teamwork_flow_entries(pool, item: dict) -> list[dict]:
-    review_entries = _build_review_cycle_flow_entries(pool, int(item.get("id") or 0))
+def _build_teamwork_flow_entries(pool, item: dict, *, review_rows: list[dict] | None = None) -> list[dict]:
+    if review_rows is None:
+        review_rows = _fetch_review_cycle_rows(pool, int(item.get("id") or 0))
+    review_entries = _build_review_cycle_flow_entries_from_rows(review_rows)
     timeline: list[dict] = []
     process_entries = _process_log_entries(item)
 
@@ -940,6 +994,47 @@ def _build_teamwork_flow_entries(pool, item: dict) -> list[dict]:
             int(entry.get("_sequence") or 0),
         ),
     )
+
+
+def _print_review_verdict_details(console, review_rows: list[dict]) -> None:
+    from rich.table import Table
+
+    rows = [row for row in review_rows if str(row.get("verdict") or "").strip()]
+    if not rows:
+        return
+
+    table = Table(title="Review Verdicts")
+    table.add_column("When", style="dim", no_wrap=True)
+    table.add_column("Stage", no_wrap=True)
+    table.add_column("Iter", justify="right", no_wrap=True)
+    table.add_column("Reviewer", no_wrap=True)
+    table.add_column("Verdict", no_wrap=True)
+    table.add_column("Summary", max_width=52)
+    table.add_column("Issues", max_width=56)
+
+    for row in rows:
+        verdict_payload = _parse_verdict_payload(row.get("verdict_json"))
+        issues = verdict_payload.get("issues") if isinstance(verdict_payload.get("issues"), list) else []
+        summary = _compact_text(str(verdict_payload.get("summary") or "").strip() or "-", 120)
+        cleaned_issues = [str(issue).strip() for issue in issues if str(issue).strip()]
+        if cleaned_issues:
+            issue_preview = "; ".join(_compact_text(issue, 50) for issue in cleaned_issues[:2])
+            if len(cleaned_issues) > 2:
+                issue_preview += f" (+{len(cleaned_issues) - 2} more)"
+            issue_text = _compact_text(issue_preview, 120)
+        else:
+            issue_text = "-"
+        table.add_row(
+            _format_timestamp_short(row.get("completed_at") or row.get("updated_at") or row.get("created_at")),
+            str(row.get("stage_name") or "-"),
+            str(row.get("iteration") or "-"),
+            _role_label(row.get("reviewer_role")),
+            _review_verdict_label(str(row.get("verdict") or "")),
+            summary,
+            issue_text,
+        )
+
+    console.print(table)
 
 
 def _build_timeline_actor(entry: dict):
@@ -1014,6 +1109,116 @@ def _print_message_flow(
             padding=(0, 1),
         )
     )
+
+
+def _latest_review_reviewer_role(review_cycles: list[dict], stage_name: str) -> str | None:
+    for cycle in reversed(review_cycles):
+        if str(cycle.get("stage_name") or "") != stage_name:
+            continue
+        reviewer_role = str(cycle.get("reviewer_role") or "").strip()
+        if reviewer_role:
+            return reviewer_role
+    return None
+
+
+def _slice_runtime_context(store, item: dict, dag) -> dict[str, object]:
+    item_id = int(item.get("id") or 0)
+    # Delivery slices are persisted in plan order with 0-based plan_position,
+    # while phase stages are named `phase_<n>` with 1-based numbering.
+    phase_to_slice_id = {
+        slice_item.plan_position + 1: slice_item.id
+        for slice_item in dag._ordered_slices()
+    }
+    active_by_slice_id: dict[str, dict] = {}
+
+    def _register_active(
+        *,
+        phase_index: int | None,
+        owner_role: str | None,
+        state_label: str,
+        stage_name: str | None,
+        inferred: bool,
+    ) -> None:
+        if phase_index is None:
+            return
+        slice_id = phase_to_slice_id.get(phase_index)
+        if not slice_id or slice_id in active_by_slice_id:
+            return
+        slice_item = dag.slices.get(slice_id)
+        if slice_item is None:
+            return
+        active_by_slice_id[slice_id] = {
+            "slice_id": slice_id,
+            "title": slice_item.title,
+            "owner_role": owner_role,
+            "owner_label": _role_label(owner_role),
+            "state_label": state_label,
+            "stage_name": str(stage_name or ""),
+            "inferred": inferred,
+        }
+
+    # `list_stage_runs()` returns StageRun model objects, while
+    # `get_review_cycles()` returns plain dict rows from the store.
+    stage_runs = _safe_list(store.list_stage_runs(item_id))
+    for stage_run in stage_runs:
+        if str(getattr(stage_run, "status", "") or "") != "claimed":
+            continue
+        _register_active(
+            phase_index=_phase_index_from_stage_name(getattr(stage_run, "stage_name", None)),
+            owner_role=str(getattr(stage_run, "owner_role", "") or "") or None,
+            state_label="dev",
+            stage_name=str(getattr(stage_run, "stage_name", "") or ""),
+            inferred=False,
+        )
+
+    review_cycles = _safe_list(store.get_review_cycles(item_id))
+    for cycle in review_cycles:
+        if str(cycle.get("status") or "") != "claimed":
+            continue
+        _register_active(
+            phase_index=_phase_index_from_stage_name(cycle.get("stage_name")),
+            owner_role=str(cycle.get("reviewer_role") or "") or None,
+            state_label="review",
+            stage_name=str(cycle.get("stage_name") or ""),
+            inferred=False,
+        )
+
+    if not active_by_slice_id:
+        current_stage = str(_task_state_dict(item).get("current_stage") or "")
+        if current_stage:
+            inferred_state = "review" if current_stage.endswith("_review") else "dev"
+            inferred_owner = "developer"
+            if inferred_state == "review":
+                inferred_owner = _latest_review_reviewer_role(review_cycles, current_stage) or "qa_main"
+            _register_active(
+                phase_index=_phase_index_from_stage_name(current_stage),
+                owner_role=inferred_owner,
+                state_label=inferred_state,
+                stage_name=current_stage,
+                inferred=True,
+            )
+
+    parallel_ready = []
+    for slice_item in dag.dispatchable_slices():
+        if slice_item.id in active_by_slice_id:
+            continue
+        parallel_ready.append(
+            {
+                "slice_id": slice_item.id,
+                "title": slice_item.title,
+                "state_label": "revision" if slice_item.status.value == "needs_revision" else "ready",
+            }
+        )
+
+    return {
+        "active_slices": [
+            active_by_slice_id[slice_item.id]
+            for slice_item in dag._ordered_slices()
+            if slice_item.id in active_by_slice_id
+        ],
+        "active_by_slice_id": active_by_slice_id,
+        "parallel_ready_slices": parallel_ready,
+    }
 
 
 def _select_current_status_item(items: list[dict]) -> dict | None:
@@ -1271,8 +1476,11 @@ def _print_teamwork_details(pool, item, console, details: bool = False, show_hea
             f"{_markup_for_item_status(status)}"
         )
 
-    flow_entries = _build_teamwork_flow_entries(pool, item)
+    review_rows = _fetch_review_cycle_rows(pool, item_id)
+    flow_entries = _build_teamwork_flow_entries(pool, item, review_rows=review_rows)
     _print_message_flow(console, flow_entries if details else flow_entries[-12:])
+    if details:
+        _print_review_verdict_details(console, review_rows)
 
     artifacts = _safe_list(
         pool.fetch_all(
@@ -1323,6 +1531,7 @@ def _maybe_print_dag_status(console, store, item: dict | None) -> None:
     try:
         slice_states = store.get_slice_states(item["id"])
     except Exception:
+        LOGGER.debug("Failed to load slice states for work item %s", item.get("id"), exc_info=True)
         return
     if not slice_states:
         return
@@ -1330,8 +1539,19 @@ def _maybe_print_dag_status(console, store, item: dict | None) -> None:
         from myswat.workflow.dag import SliceDAG
         from myswat.cli.dag_display import render_dag_status
         dag = SliceDAG.from_store(store, item["id"])
-        console.print(render_dag_status(dag, item["id"]))
+        context = _slice_runtime_context(store, item, dag)
+        console.print(
+            render_dag_status(
+                dag,
+                item["id"],
+                execution_model="serial",
+                active_slices=context["active_slices"],
+                active_by_slice_id=context["active_by_slice_id"],
+                parallel_ready_slices=context["parallel_ready_slices"],
+            )
+        )
     except Exception:
+        LOGGER.debug("Failed to render DAG status for work item %s", item.get("id"), exc_info=True)
         pass  # Don't break status command if DAG rendering fails
 
 

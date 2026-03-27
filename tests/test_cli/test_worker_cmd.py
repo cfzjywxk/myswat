@@ -100,14 +100,14 @@ class _DirectMCPClient:
         return {} if structured is None else structured
 
 
-def _agent_row(role: str) -> dict:
+def _agent_row(role: str, *, backend: str = "fake", model: str = "fake-model") -> dict:
     return {
         "id": 3,
         "role": role,
         "display_name": role,
-        "cli_backend": "fake",
-        "model_name": "fake-model",
-        "cli_path": "fake",
+        "cli_backend": backend,
+        "model_name": model,
+        "cli_path": backend,
     }
 
 
@@ -896,6 +896,67 @@ def test_run_worker_marks_review_failed_after_repeated_truncated_json_output():
     assert runner.reset_calls == 2
     service.publish_review_verdict.assert_not_called()
     service.append_coordination_event.assert_called_once()
+
+
+def test_run_worker_falls_back_to_codex_after_claude_retry_exhaustion():
+    service = Mock()
+    service.register_runtime.return_value = SimpleNamespace(
+        model_dump=lambda: {"runtime_registration_id": 10}
+    )
+    service.claim_next_assignment.side_effect = _assignment_stream(
+        AssignmentEnvelope(
+            assignment_kind="review",
+            runtime_registration_id=10,
+            project_id=1,
+            work_item_id=13,
+            review_cycle_id=34,
+            stage_name="code_review",
+            agent_id=4,
+            agent_role="qa_main",
+            iteration=2,
+            prompt="Review the implementation",
+            system_context="kind=review;stage=code_review",
+        )
+    )
+    service.append_coordination_event.return_value = {"ok": True}
+    service.publish_review_verdict.return_value = {"ok": True}
+    service.heartbeat_runtime.return_value = None
+    service.update_runtime_status.return_value = {"runtime_registration_id": 10, "status": "offline"}
+
+    primary_runner = _FakeRunner(
+        [
+            (True, '{"verdict":"changes_requested","issues":["Handle overflow."]'),
+            (True, '{"verdict":"changes_requested","issues":["Still truncated."]'),
+        ]
+    )
+    fallback_runner = _FakeRunner(
+        [(True, '{"verdict":"lgtm","issues":[],"summary":"Codex QA fallback passed."}')]
+    )
+
+    with patch("myswat.cli.worker_cmd.make_runner_from_row", return_value=fallback_runner) as make_runner:
+        result = run_worker(
+            project_slug="fib-demo",
+            role="qa_main",
+            server_url="http://unused",
+            project_row={"id": 1, "slug": "fib-demo", "repo_path": "/tmp/fib-demo"},
+            agent_row=_agent_row("qa_main", backend="claude", model="claude-opus-4-6"),
+            runner=primary_runner,
+            mcp_client=_DirectMCPClient(service),
+            idle_exit_seconds=0.05,
+        )
+
+    assert result == {"stage_assignments": 0, "review_assignments": 1}
+    request = service.publish_review_verdict.call_args.args[0]
+    assert request.cycle_id == 34
+    assert request.verdict == "lgtm"
+    assert request.summary == "Codex QA fallback passed."
+    service.fail_review_cycle.assert_not_called()
+    assert service.append_coordination_event.call_count == 2
+    fallback_row = make_runner.call_args.args[0]
+    assert fallback_row["cli_backend"] == "codex"
+    assert fallback_row["model_name"] == "gpt-5.4"
+    assert primary_runner.reset_calls == 2
+    assert fallback_runner.reset_calls == 1
 
 
 def test_run_worker_marks_review_failed_without_retry_for_nonretryable_error():

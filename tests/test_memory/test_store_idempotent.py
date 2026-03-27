@@ -615,3 +615,49 @@ class TestStoreReadOperations:
         sql, args = mock_pool.fetch_one.call_args[0]
         assert "work_item_id = %s" in sql
         assert args == (1, 42)
+
+
+class TestPauseCancelTransitions:
+    def test_cancel_open_stage_runs_includes_paused_rows_when_cancelling(self, mock_pool):
+        store = MemoryStore(mock_pool)
+
+        store.cancel_open_stage_runs(7, summary="cancel it", status="cancelled")
+
+        sql, args = mock_pool.execute.call_args[0]
+        assert "status NOT IN ('completed', 'blocked', 'cancelled', 'failed')" in sql
+        assert "paused" not in sql
+        assert args == ("cancelled", "cancel it", 7)
+
+    def test_cancel_open_stage_runs_excludes_paused_rows_when_pausing(self, mock_pool):
+        store = MemoryStore(mock_pool)
+
+        store.cancel_open_stage_runs(7, summary="pause it", status="paused")
+
+        sql, args = mock_pool.execute.call_args[0]
+        assert "status NOT IN ('completed', 'blocked', 'cancelled', 'failed', 'paused')" in sql
+        assert args == ("paused", "pause it", 7)
+
+    def test_cancel_open_review_cycles_includes_paused_rows_when_cancelling(self, mock_pool):
+        store = MemoryStore(mock_pool)
+
+        store.cancel_open_review_cycles(7, summary="cancel it", status="cancelled", verdict="cancelled")
+
+        sql, args = mock_pool.execute.call_args[0]
+        assert "status NOT IN ('completed', 'blocked', 'cancelled')" in sql
+        assert "paused" not in sql
+        assert args[0] == "cancelled"
+        assert args[1] == "cancelled"
+        assert '"summary": "cancel it"' in args[2]
+        assert args[3] == 7
+
+    def test_cancel_open_review_cycles_excludes_paused_rows_when_pausing(self, mock_pool):
+        store = MemoryStore(mock_pool)
+
+        store.cancel_open_review_cycles(7, summary="pause it", status="paused", verdict="paused")
+
+        sql, args = mock_pool.execute.call_args[0]
+        assert "status NOT IN ('completed', 'blocked', 'cancelled', 'paused')" in sql
+        assert args[0] == "paused"
+        assert args[1] == "paused"
+        assert '"summary": "pause it"' in args[2]
+        assert args[3] == 7

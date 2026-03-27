@@ -44,6 +44,7 @@ class AgentSettings(BaseSettings):
     developer_model: str = "gpt-5.4"
     architect_model: str = "gpt-5.4"
     qa_main_model: str = "claude-opus-4-6"
+    qa_fallback_model: str = "gpt-5.4"
     qa_vice_model: str = "kimi-code/kimi-for-coding"
     codex_default_flags: list[str] = Field(
         default=["--full-auto", "--json"],

@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 
 AssignmentKind = Literal["none", "stage", "review"]
-ReviewVerdictValue = Literal["lgtm", "changes_requested", "failed"]
+ReviewVerdictValue = Literal["lgtm", "changes_requested", "failed", "paused"]
 
 
 class ProjectLookupRequest(BaseModel):

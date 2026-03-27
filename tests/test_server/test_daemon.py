@@ -376,6 +376,7 @@ def test_handle_control_work_marks_cancelled_and_recycles_workers():
 def test_handle_control_work_marks_paused_and_recycles_workers():
     daemon = MySwatDaemon.__new__(MySwatDaemon)
     daemon._store = Mock()
+    daemon._service = Mock()
     daemon._lock = threading.Lock()
     daemon._workflow_controls = {
         8: type(
@@ -401,10 +402,20 @@ def test_handle_control_work_marks_paused_and_recycles_workers():
 
     assert result == {"ok": True, "work_item_id": 8, "status": "paused"}
     daemon._store.update_work_item_status.assert_called_once_with(8, "paused")
-    daemon._store.cancel_open_stage_runs.assert_called_once()
-    daemon._store.cancel_open_review_cycles.assert_called_once()
+    daemon._store.cancel_open_stage_runs.assert_called_once_with(
+        8,
+        summary="Workflow paused by user request.",
+        status="paused",
+    )
+    daemon._store.cancel_open_review_cycles.assert_called_once_with(
+        8,
+        summary="Workflow paused by user request.",
+        status="paused",
+        verdict="paused",
+    )
     assert daemon._workflow_controls[8].cancel_event.is_set() is True
     assert daemon._workflow_controls[8].requested_status == "paused"
+    daemon._service.notify_work_item_coordination_changed.assert_called_once_with(8)
     daemon._stop_project_workers.assert_called_once_with("fib-demo")
 
 

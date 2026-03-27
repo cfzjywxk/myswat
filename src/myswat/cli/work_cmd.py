@@ -86,16 +86,24 @@ def run_work(
     return work_item_id
 
 
-def stop_work_item(project_slug: str, work_item_id: int) -> None:
-    """Request workflow cancellation through the daemon."""
+def _control_work_item(project_slug: str, work_item_id: int, *, action: str) -> None:
     settings = MySwatSettings()
     client = DaemonClient(settings)
     try:
-        result = client.control_work(project=project_slug, work_item_id=work_item_id, action="cancel")
+        result = client.control_work(project=project_slug, work_item_id=work_item_id, action=action)
     except DaemonClientError as exc:
         _print_daemon_error(exc)
         raise typer.Exit(1) from exc
 
-    console.print(
-        f"[green]Cancellation requested for work item {result.get('work_item_id') or work_item_id}.[/green]"
-    )
+    verb = "Pause" if action == "pause" else "Cancellation"
+    console.print(f"[green]{verb} requested for work item {result.get('work_item_id') or work_item_id}.[/green]")
+
+
+def stop_work_item(project_slug: str, work_item_id: int) -> None:
+    """Request workflow cancellation through the daemon."""
+    _control_work_item(project_slug, work_item_id, action="cancel")
+
+
+def pause_work_item(project_slug: str, work_item_id: int) -> None:
+    """Request workflow pause through the daemon."""
+    _control_work_item(project_slug, work_item_id, action="pause")

@@ -70,9 +70,9 @@ _SYSTEM_CONTEXT_REVIEW_HISTORY_ROUND_LIMIT = 3
 _SYSTEM_CONTEXT_REVIEW_HISTORY_ISSUE_LIMIT = 3
 _SYSTEM_CONTEXT_REVIEW_HISTORY_TEXT_LIMIT = 1_000
 _REVIEW_HISTORY_CACHE_MAX_ENTRIES = 256
-_TERMINAL_STAGE_STATUSES = frozenset({"completed", "blocked", "cancelled", "failed"})
-_TERMINAL_REVIEW_STATUSES = frozenset({"completed", "blocked", "cancelled"})
-_VISIBLE_REVIEW_VERDICTS = frozenset({"lgtm", "changes_requested", "failed"})
+_TERMINAL_STAGE_STATUSES = frozenset({"completed", "blocked", "cancelled", "failed", "paused"})
+_TERMINAL_REVIEW_STATUSES = frozenset({"completed", "blocked", "cancelled", "paused"})
+_VISIBLE_REVIEW_VERDICTS = frozenset({"lgtm", "changes_requested", "failed", "paused"})
 
 
 @dataclass(frozen=True)
@@ -1163,6 +1163,26 @@ class MySwatToolService:
             status="pending",
             task_json=task_json or None,
         )
+        cycle = self._store.get_review_cycle(cycle_id)
+        if isinstance(cycle, dict):
+            cycle_status = str(cycle.get("status") or "")
+            cycle_verdict = str(cycle.get("verdict") or "")
+            if cycle_status in {"paused", "cancelled"} and cycle_verdict in {"pending", "paused", "cancelled"}:
+                reactivated = self._store.reactivate_review_cycle(
+                    cycle_id,
+                    iteration=request.iteration,
+                    stage_name=request.stage,
+                    proposal_session_id=request.proposal_session_id,
+                    task_json=task_json or None,
+                )
+                if not reactivated:
+                    refreshed_cycle = self._store.get_review_cycle(cycle_id) or {}
+                    refreshed_status = str(refreshed_cycle.get("status") or "")
+                    if refreshed_status not in {"pending", "claimed", "completed", "blocked"}:
+                        raise RuntimeError(
+                            "Existing review cycle could not be reactivated: "
+                            f"cycle_id={cycle_id} status={refreshed_status or 'unknown'}"
+                        )
         self._store.update_work_item_state(
             request.work_item_id,
             current_stage=self._stage_or_none(request.stage),
@@ -1185,6 +1205,16 @@ class MySwatToolService:
         status = str(cycle.get("status") or "pending")
         if verdict == "pending" or status not in _TERMINAL_REVIEW_STATUSES:
             return None
+        if verdict in {"paused", "cancelled"}:
+            verdict_json = cycle.get("verdict_json") or {}
+            summary = verdict_json.get("summary") if isinstance(verdict_json, dict) else ""
+            return ReviewVerdictEnvelope(
+                cycle_id=int(cycle["id"]),
+                reviewer_role=str(cycle.get("reviewer_role") or ""),
+                verdict="paused",
+                issues=[],
+                summary=str(summary or f"Review {verdict}."),
+            )
         if verdict not in _VISIBLE_REVIEW_VERDICTS:
             raise ValueError(
                 "Unsupported terminal review verdict: "
@@ -1213,7 +1243,7 @@ class MySwatToolService:
                 if len(cycles) == len(request.cycle_ids):
                     all_terminal = True
                     verdicts: list[ReviewVerdictEnvelope] = []
-                    saw_failed = False
+                    saw_stop_verdict = False
                     for cycle in cycles:
                         verdict = str(cycle.get("verdict") or "pending")
                         status = str(cycle.get("status") or "pending")
@@ -1224,9 +1254,9 @@ class MySwatToolService:
                         if envelope is None:
                             continue
                         verdicts.append(envelope)
-                        if envelope.verdict == "failed":
-                            saw_failed = True
-                    if all_terminal or (request.return_on_failed and saw_failed):
+                        if envelope.verdict in {"failed", "paused"}:
+                            saw_stop_verdict = True
+                    if all_terminal or (request.return_on_failed and saw_stop_verdict):
                         return verdicts
 
                 remaining = self._remaining_timeout(started_at, request.timeout_seconds)

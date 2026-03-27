@@ -2305,6 +2305,51 @@ def test_review_failure_takes_precedence_over_changes_requested():
     assert service.start_stage_run.call_count == 0
 
 
+def test_review_loop_unwinds_cleanly_on_paused_verdict():
+    dev = _participant(10, "developer")
+    qa_main = _participant(20, "qa_main")
+    service = _service()
+    service.wait_for_review_verdicts.return_value = [
+        ReviewVerdictEnvelope(
+            cycle_id=2000,
+            reviewer_role="qa_main",
+            verdict="paused",
+            summary="Workflow paused by user request.",
+        ),
+    ]
+
+    kernel = WorkflowKernel(
+        store=_store(),
+        service=service,
+        dev=dev,
+        qas=[qa_main],
+        project_id=1,
+        work_item_id=9,
+        mode=WorkMode.full,
+        auto_approve=True,
+    )
+
+    artifact, iterations, passed = kernel._run_review_loop(
+        owner_stage_name="plan",
+        review_stage_name="plan_review",
+        artifact_type="implementation_plan",
+        artifact_title="Implementation plan",
+        initial_artifact="draft",
+        initial_artifact_id=1000,
+        owner=dev,
+        reviewers=[qa_main],
+        focus="ctx",
+        review_prompt_builder=lambda artifact, iteration, reviewer_role: artifact,
+        revision_prompt_builder=lambda artifact, feedback: artifact + feedback,
+    )
+
+    assert (artifact, iterations, passed) == ("draft", 1, False)
+    assert kernel._blocked is True
+    assert kernel._failure_summary == "Workflow paused by user request."
+    service.cancel_review_cycles.assert_not_called()
+    assert service.start_stage_run.call_count == 0
+
+
 def test_kernel_parses_completed_phase_rows_and_phase_names():
     store = _store()
     store.list_artifacts.return_value = [

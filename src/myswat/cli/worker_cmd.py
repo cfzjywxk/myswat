@@ -365,6 +365,8 @@ def _build_review_diagnostics(
     runner: Any,
     attempt: int,
     attempts: int,
+    backend: str | None = None,
+    model: str | None = None,
 ) -> dict[str, Any]:
     diagnostics = dict(attempt_result.diagnostics)
     diagnostics.update(
@@ -377,8 +379,8 @@ def _build_review_diagnostics(
             "stage_name": str(assignment.get("stage_name") or ""),
             "runtime_registration_id": runtime_registration_id,
             "worker_pid": os.getpid(),
-            "backend": str(agent_row.get("cli_backend") or ""),
-            "model": str(agent_row.get("model_name") or ""),
+            "backend": str(backend or agent_row.get("cli_backend") or ""),
+            "model": str(model or agent_row.get("model_name") or ""),
             "workdir": str(getattr(runner, "workdir", "") or ""),
             "diagnosed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         }
@@ -409,7 +411,82 @@ def _append_review_retry_event(
     )
 
 
-def _run_review_with_single_retry(
+def _append_review_fallback_event(
+    *,
+    assignment: dict[str, Any],
+    mcp: MCPHTTPClient,
+    agent_row: dict[str, Any],
+    role: str,
+    summary: str,
+    diagnostics: dict[str, Any],
+) -> None:
+    mcp.call_tool(
+        "append_coordination_event",
+        {
+            "work_item_id": int(assignment["work_item_id"]),
+            "stage_name": assignment.get("stage_name") or "",
+            "event_type": "review_fallback",
+            "summary": summary,
+            "from_agent_id": int(agent_row["id"]),
+            "from_role": role,
+            "payload_json": diagnostics,
+        },
+    )
+
+
+def _publish_review_verdict(
+    *,
+    assignment: dict[str, Any],
+    mcp: MCPHTTPClient,
+    runtime_registration_id: int,
+    agent_row: dict[str, Any],
+    role: str,
+    verdict: ReviewVerdict,
+) -> None:
+    mcp.call_tool(
+        "publish_review_verdict",
+        {
+            "cycle_id": int(assignment["review_cycle_id"]),
+            "work_item_id": int(assignment["work_item_id"]),
+            "reviewer_agent_id": int(agent_row["id"]),
+            "reviewer_role": role,
+            "verdict": verdict.verdict,
+            "issues": verdict.issues,
+            "summary": verdict.summary,
+            "stage": str(assignment.get("stage_name") or ""),
+            "runtime_registration_id": runtime_registration_id,
+        },
+    )
+
+
+def _should_use_codex_review_fallback(
+    *,
+    role: str,
+    agent_row: dict[str, Any],
+    attempt_result: ReviewAttemptResult,
+) -> bool:
+    if role != "qa_main":
+        return False
+    if str(agent_row.get("cli_backend") or "").strip().lower() != "claude":
+        return False
+    return (attempt_result.failure_kind or "") != "cancelled"
+
+
+def _qa_codex_fallback_agent_row(
+    *,
+    agent_row: dict[str, Any],
+    settings: MySwatSettings,
+) -> dict[str, Any]:
+    return {
+        **agent_row,
+        "cli_backend": "codex",
+        "cli_path": str(settings.agents.codex_path or "codex"),
+        "model_name": str(settings.agents.qa_fallback_model or "gpt-5.4"),
+        "cli_extra_args": [str(flag) for flag in (settings.agents.codex_default_flags or [])],
+    }
+
+
+def _execute_review_attempts(
     *,
     assignment: dict[str, Any],
     runner: Any,
@@ -419,11 +496,10 @@ def _run_review_with_single_retry(
     role: str,
     prompt: str,
     system_context: str | None,
-) -> None:
-    work_item_id = int(assignment["work_item_id"])
-    cycle_id = int(assignment["review_cycle_id"])
-    stage_name = str(assignment.get("stage_name") or "")
-
+    execution_label: str = "review execution",
+    backend: str | None = None,
+    model: str | None = None,
+) -> tuple[ReviewAttemptResult, dict[str, Any], int]:
     for attempt in range(1, _REVIEW_MAX_ATTEMPTS + 1):
         response: Any | None = None
         resolved_content = ""
@@ -456,24 +532,12 @@ def _run_review_with_single_retry(
             runner=runner,
             attempt=attempt,
             attempts=_REVIEW_MAX_ATTEMPTS,
+            backend=backend,
+            model=model,
         )
 
         if attempt_result.outcome == ReviewAttemptOutcome.VALID_VERDICT and attempt_result.verdict is not None:
-            mcp.call_tool(
-                "publish_review_verdict",
-                {
-                    "cycle_id": cycle_id,
-                    "work_item_id": work_item_id,
-                    "reviewer_agent_id": int(agent_row["id"]),
-                    "reviewer_role": role,
-                    "verdict": attempt_result.verdict.verdict,
-                    "issues": attempt_result.verdict.issues,
-                    "summary": attempt_result.verdict.summary,
-                    "stage": stage_name,
-                    "runtime_registration_id": runtime_registration_id,
-                },
-            )
-            return
+            return attempt_result, diagnostics, attempt
 
         if attempt_result.outcome == ReviewAttemptOutcome.RETRYABLE_FAILURE and attempt < _REVIEW_MAX_ATTEMPTS:
             _append_review_retry_event(
@@ -482,29 +546,142 @@ def _run_review_with_single_retry(
                 agent_row=agent_row,
                 role=role,
                 summary=(
-                    f"{attempt_result.summary} Retrying review execution "
+                    f"{attempt_result.summary} Retrying {execution_label} "
                     f"({attempt}/{_REVIEW_MAX_ATTEMPTS})."
                 ),
                 diagnostics=diagnostics,
             )
             continue
 
-        mcp.call_tool(
-            "fail_review_cycle",
-            {
-                "cycle_id": cycle_id,
-                "work_item_id": work_item_id,
-                "reviewer_agent_id": int(agent_row["id"]),
-                "reviewer_role": role,
-                "stage": stage_name,
-                "runtime_registration_id": runtime_registration_id,
-                "summary": attempt_result.summary,
-                "failure_kind": attempt_result.failure_kind or "review_failed",
-                "attempts": attempt,
-                "diagnostics": diagnostics,
-            },
+        return attempt_result, diagnostics, attempt
+
+    raise RuntimeError("Review attempt loop exhausted without a terminal result")
+
+
+def _run_review_with_single_retry(
+    *,
+    assignment: dict[str, Any],
+    runner: Any,
+    mcp: MCPHTTPClient,
+    runtime_registration_id: int,
+    agent_row: dict[str, Any],
+    role: str,
+    prompt: str,
+    system_context: str | None,
+    settings: MySwatSettings,
+) -> None:
+    primary_result, primary_diagnostics, primary_attempts = _execute_review_attempts(
+        assignment=assignment,
+        runner=runner,
+        mcp=mcp,
+        runtime_registration_id=runtime_registration_id,
+        agent_row=agent_row,
+        role=role,
+        prompt=prompt,
+        system_context=system_context,
+        execution_label="review execution",
+        backend=str(agent_row.get("cli_backend") or ""),
+        model=str(agent_row.get("model_name") or ""),
+    )
+    if primary_result.verdict is not None:
+        _publish_review_verdict(
+            assignment=assignment,
+            mcp=mcp,
+            runtime_registration_id=runtime_registration_id,
+            agent_row=agent_row,
+            role=role,
+            verdict=primary_result.verdict,
         )
         return
+
+    final_summary = primary_result.summary
+    final_failure_kind = primary_result.failure_kind or "review_failed"
+    final_attempts = primary_attempts
+    final_diagnostics = dict(primary_diagnostics)
+
+    if _should_use_codex_review_fallback(
+        role=role,
+        agent_row=agent_row,
+        attempt_result=primary_result,
+    ):
+        fallback_agent_row = _qa_codex_fallback_agent_row(agent_row=agent_row, settings=settings)
+        fallback_summary = (
+            f"{primary_result.summary} Switching {role} review execution to Codex fallback."
+        )
+        fallback_event_payload = dict(primary_diagnostics)
+        fallback_event_payload.update(
+            {
+                "fallback_backend": str(fallback_agent_row.get("cli_backend") or ""),
+                "fallback_model": str(fallback_agent_row.get("model_name") or ""),
+            }
+        )
+        _append_review_fallback_event(
+            assignment=assignment,
+            mcp=mcp,
+            agent_row=agent_row,
+            role=role,
+            summary=fallback_summary,
+            diagnostics=fallback_event_payload,
+        )
+        try:
+            fallback_runner = make_runner_from_row(
+                fallback_agent_row,
+                settings=settings,
+                workdir=str(getattr(runner, "workdir", "") or "") or None,
+            )
+            fallback_result, fallback_diagnostics, fallback_attempts = _execute_review_attempts(
+                assignment=assignment,
+                runner=fallback_runner,
+                mcp=mcp,
+                runtime_registration_id=runtime_registration_id,
+                agent_row=fallback_agent_row,
+                role=role,
+                prompt=prompt,
+                system_context=system_context,
+                execution_label="Codex QA fallback review execution",
+                backend="codex",
+                model=str(fallback_agent_row.get("model_name") or ""),
+            )
+        except Exception as exc:
+            final_diagnostics["fallback_backend"] = "codex"
+            final_diagnostics["fallback_model"] = str(fallback_agent_row.get("model_name") or "")
+            final_diagnostics["fallback_build_error"] = _clip_diagnostic_text(
+                str(exc),
+                limit=_REVIEW_EXCEPTION_TEXT_LIMIT,
+            )
+            final_diagnostics["primary_failure"] = primary_diagnostics
+        else:
+            if fallback_result.verdict is not None:
+                _publish_review_verdict(
+                    assignment=assignment,
+                    mcp=mcp,
+                    runtime_registration_id=runtime_registration_id,
+                    agent_row=agent_row,
+                    role=role,
+                    verdict=fallback_result.verdict,
+                )
+                return
+            final_summary = fallback_result.summary
+            final_failure_kind = fallback_result.failure_kind or "review_failed"
+            final_attempts = fallback_attempts
+            final_diagnostics = dict(fallback_diagnostics)
+            final_diagnostics["primary_failure"] = primary_diagnostics
+
+    mcp.call_tool(
+        "fail_review_cycle",
+        {
+            "cycle_id": int(assignment["review_cycle_id"]),
+            "work_item_id": int(assignment["work_item_id"]),
+            "reviewer_agent_id": int(agent_row["id"]),
+            "reviewer_role": role,
+            "stage": str(assignment.get("stage_name") or ""),
+            "runtime_registration_id": runtime_registration_id,
+            "summary": final_summary,
+            "failure_kind": final_failure_kind,
+            "attempts": final_attempts,
+            "diagnostics": final_diagnostics,
+        },
+    )
 
 
 def _assignment_keepalive_call(
@@ -724,6 +901,7 @@ def _handle_review_assignment(
     runtime_registration_id: int,
     agent_row: dict[str, Any],
     role: str,
+    settings: MySwatSettings,
 ) -> None:
     prompt, system_context = _prepare_runner_payloads(
         assignment=assignment,
@@ -738,6 +916,7 @@ def _handle_review_assignment(
         role=role,
         prompt=prompt,
         system_context=system_context,
+        settings=settings,
     )
 
 
@@ -856,6 +1035,7 @@ def run_worker(
                     runtime_registration_id=runtime_registration_id,
                     agent_row=agent_row,
                     role=role,
+                    settings=settings,
                 )
                 processed_counts["review_assignments"] += 1
                 continue

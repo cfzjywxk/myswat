@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+import io
 import json
 from unittest.mock import MagicMock, patch
 
@@ -13,6 +14,7 @@ from click.exceptions import Exit as ClickExit
 from rich.console import Console
 from typer.testing import CliRunner
 
+from myswat.cli.dag_display import render_dag_status
 from myswat.cli.main import (
     _build_teamwork_flow_entries,
     _format_timestamp_short,
@@ -24,6 +26,7 @@ from myswat.cli.main import (
     _select_status_flow_item,
     app,
 )
+from myswat.workflow.dag import DeliverySlice, SliceDAG
 
 
 def test_work_command_requires_requirement_without_resume():
@@ -62,16 +65,19 @@ def test_work_command_rejects_requirement_with_resume():
         )
 
 
-def test_work_command_rejects_resume_with_follow():
+def test_work_command_direct_call_rejects_interactive_checkpoints():
     from myswat.cli.main import work
 
-    with pytest.raises(typer.BadParameter, match="--resume cannot be combined with --follow"):
+    with pytest.raises(
+        typer.BadParameter,
+        match="--interactive-checkpoints is not supported through the daemon workflow path yet.",
+    ):
         work(
             project="proj",
-            requirement=None,
-            follow=True,
+            requirement="req",
+            follow=False,
             background=False,
-            resume=7,
+            resume=None,
             design_mode=False,
             develop_mode=False,
             test_mode=False,
@@ -210,7 +216,7 @@ def test_print_message_flow_renders_timeline_panel():
     rendered = output.export_text()
     assert "Message Flow" in rendered
     assert "Developer -> Architect" in rendered
-    assert "REQUEST CHANGES" in rendered
+    assert "CHANGES REQUESTED" in rendered
 
 
 def test_format_timestamp_short_normalizes_db_utc_datetimes_but_keeps_local_strings():
@@ -433,3 +439,158 @@ def test_task_command_without_description_still_prints_state(
 
     assert result.exit_code == 0
     mock_teamwork.assert_called_once()
+
+
+def test_print_teamwork_details_details_mode_renders_review_verdict_details():
+    from myswat.cli.main import _print_teamwork_details
+
+    pool = MagicMock()
+    pool.fetch_all.side_effect = [
+        [
+            {
+                "id": 11,
+                "iteration": 2,
+                "status": "completed",
+                "verdict": "changes_requested",
+                "created_at": "2026-03-26 12:00:00",
+                "updated_at": "2026-03-26 12:01:00",
+                "completed_at": "2026-03-26 12:01:00",
+                "stage_name": "phase_1_review",
+                "verdict_json": json.dumps(
+                    {
+                        "summary": "Need to remove unnecessary boxing and expose less internals.",
+                        "issues": [
+                            "Switch ExecutionBackend to native AFIT.",
+                            "Keep point-key encoding internal to the backend.",
+                        ],
+                    }
+                ),
+                "proposer_role": "developer",
+                "reviewer_role": "qa_main",
+                "artifact_title": "Phase 1 summary",
+                "artifact_type": "phase_result",
+            },
+        ],
+        [],
+    ]
+
+    item = {"id": 1, "title": "Implement auth", "status": "completed"}
+    output = io.StringIO()
+    console = Console(file=output, force_terminal=False, width=140)
+
+    _print_teamwork_details(pool, item, console, details=True)
+
+    rendered = output.getvalue()
+    assert "Review Verdicts" in rendered
+    assert "Need to remove unnecessary boxing and expose less internals." in rendered
+    assert "Switch ExecutionBackend" in rendered
+    assert "native AFIT." in rendered
+    assert "Keep point-key encoding" in rendered
+    assert "internal to the backend." in rendered
+
+
+def test_print_review_verdict_details_compacts_many_issues():
+    from myswat.cli.main import _print_review_verdict_details
+
+    output = io.StringIO()
+    console = Console(file=output, force_terminal=False, width=140)
+
+    _print_review_verdict_details(
+        console,
+        [
+            {
+                "verdict": "changes_requested",
+                "completed_at": "2026-03-26 12:01:00",
+                "stage_name": "phase_1_review",
+                "iteration": 2,
+                "reviewer_role": "qa_main",
+                "verdict_json": json.dumps(
+                    {
+                        "summary": "Need follow-up changes.",
+                        "issues": [
+                            "Issue alpha requires a fairly long explanation to prove compaction works.",
+                            "Issue beta also has a long explanation that should be previewed, not dumped.",
+                            "Issue gamma should only appear in the +N suffix.",
+                        ],
+                    }
+                ),
+            }
+        ],
+    )
+
+    rendered = output.getvalue()
+    assert "Review Verdicts" in rendered
+    assert "Issue alpha" in rendered
+    assert "Issue beta" in rendered
+    assert "(+1 more)" in rendered
+    assert "Issue gamma should only appear in the +N suffix." not in rendered
+
+
+def test_render_dag_status_surfaces_serial_execution_active_and_parallel_ready():
+    dag = SliceDAG.from_slices(
+        [
+            DeliverySlice(id="a", title="Foundation seam", plan_position=0),
+            DeliverySlice(id="b", title="Point-get tracer bullet", blocked_by=["a"], plan_position=1),
+            DeliverySlice(id="c", title="Txn storage port", plan_position=2),
+        ]
+    )
+    output = Console(record=True, force_terminal=False, width=160)
+
+    output.print(
+        render_dag_status(
+            dag,
+            42,
+            execution_model="serial",
+            active_slices=[
+                {
+                    "slice_id": "a",
+                    "title": "Foundation seam",
+                    "owner_label": "Developer",
+                    "state_label": "dev",
+                    "stage_name": "phase_1",
+                }
+            ],
+            active_by_slice_id={
+                "a": {
+                    "slice_id": "a",
+                    "title": "Foundation seam",
+                    "owner_label": "Developer",
+                    "state_label": "dev",
+                    "stage_name": "phase_1",
+                }
+            },
+            parallel_ready_slices=[
+                {
+                    "slice_id": "c",
+                    "title": "Txn storage port",
+                    "state_label": "ready",
+                }
+            ],
+        )
+    )
+
+    rendered = output.export_text()
+    assert "Serial Slice Dependencies" in rendered
+    assert "Execution" in rendered
+    assert "serial" in rendered
+    assert "Active slices" in rendered
+    assert "Foundation seam | state dev | owner Developer | phase_1" in rendered
+    assert "Parallel-ready" in rendered
+    assert "Txn storage port | state ready" in rendered
+
+
+def test_render_dag_status_omits_empty_summary_rows():
+    dag = SliceDAG.from_slices(
+        [
+            DeliverySlice(id="a", title="Foundation seam", plan_position=0),
+        ]
+    )
+    output = Console(record=True, force_terminal=False, width=120)
+
+    output.print(render_dag_status(dag, 7, execution_model="serial"))
+
+    rendered = output.export_text()
+    assert "Execution" in rendered
+    assert "serial" in rendered
+    assert "Active slices" not in rendered
+    assert "Parallel-ready" not in rendered

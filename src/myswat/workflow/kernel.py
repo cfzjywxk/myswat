@@ -1463,6 +1463,7 @@ class WorkflowKernel:
                 cycle_to_reviewer[request.cycle_id] = reviewer
 
             verdicts = self._wait_for_review_verdicts(cycle_ids)
+            paused_verdicts = [verdict for verdict in verdicts if verdict.verdict == "paused"]
             failed_verdicts = [verdict for verdict in verdicts if verdict.verdict == "failed"]
             all_lgtm = True
             collected_feedback: list[str] = []
@@ -1531,6 +1532,24 @@ class WorkflowKernel:
                     collected_feedback.extend(
                         [f"[{reviewer_role}] {issue}" for issue in issues if issue]
                     )
+
+            if paused_verdicts:
+                returned_cycle_ids = {verdict.cycle_id for verdict in verdicts}
+                remaining_cycle_ids = [cycle_id for cycle_id in cycle_ids if cycle_id not in returned_cycle_ids]
+                paused = paused_verdicts[0]
+                pause_summary = paused.summary or "Workflow paused."
+                self._emit(
+                    "warning",
+                    pause_summary,
+                    stage=review_stage_name,
+                    agent_role=paused.reviewer_role,
+                    detail=paused.summary,
+                    verdict=paused.verdict,
+                    cancelled_cycle_ids=remaining_cycle_ids,
+                )
+                self._blocked = True
+                self._failure_summary = pause_summary
+                return artifact, iteration, False
 
             if failed_verdicts:
                 returned_cycle_ids = {verdict.cycle_id for verdict in verdicts}

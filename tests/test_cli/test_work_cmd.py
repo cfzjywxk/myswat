@@ -8,7 +8,7 @@ import pytest
 import typer
 from click.exceptions import Exit as ClickExit
 
-from myswat.cli.work_cmd import run_work, stop_work_item
+from myswat.cli.work_cmd import pause_work_item, run_work, stop_work_item
 from myswat.server.control_client import DaemonClientError
 from myswat.workflow.modes import WorkMode
 
@@ -143,3 +143,21 @@ def test_stop_work_item_requires_daemon(mock_settings_cls, mock_client_cls, mock
     rendered = "\n".join(str(call.args[0]) for call in mock_print.call_args_list if call.args)
     assert "unavailable" in rendered
     assert "myswat server" in rendered
+
+
+@patch("myswat.cli.work_cmd.console.print")
+@patch("myswat.cli.work_cmd.DaemonClient")
+@patch("myswat.cli.work_cmd.MySwatSettings")
+def test_pause_work_item_pauses_through_daemon(mock_settings_cls, mock_client_cls, mock_print):
+    mock_client = MagicMock()
+    mock_client.control_work.return_value = {"work_item_id": 99}
+    mock_client_cls.return_value = mock_client
+
+    pause_work_item("proj", 99)
+
+    mock_client.control_work.assert_called_once_with(
+        project="proj",
+        work_item_id=99,
+        action="pause",
+    )
+    assert any("Pause requested" in str(call.args[0]) for call in mock_print.call_args_list if call.args)

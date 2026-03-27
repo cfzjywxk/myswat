@@ -1102,6 +1102,7 @@ def test_complete_stage_task_persists_artifact_and_marks_stage_completed():
 def test_request_review_creates_pending_cycle_and_logs_event():
     store = Mock(spec=MemoryStore)
     store.create_review_cycle.return_value = 88
+    store.get_review_cycle.return_value = None
     service = MySwatToolService(store)
 
     result = service.request_review(
@@ -1136,6 +1137,81 @@ def test_request_review_creates_pending_cycle_and_logs_event():
             "task_focus": "rollback safety",
         },
     )
+
+
+def test_request_review_reactivates_paused_cycle_on_resume():
+    store = Mock(spec=MemoryStore)
+    store.create_review_cycle.return_value = 88
+    store.get_review_cycle.return_value = {
+        "id": 88,
+        "status": "paused",
+        "verdict": "paused",
+    }
+    service = MySwatToolService(store)
+
+    result = service.request_review(
+        ReviewRequest(
+            work_item_id=17,
+            artifact_id=42,
+            iteration=2,
+            proposer_agent_id=3,
+            proposer_role="developer",
+            reviewer_agent_id=4,
+            reviewer_role="qa_main",
+            stage="review",
+            summary="Ready for QA review.",
+            task_prompt="Please review this artifact",
+            task_focus="rollback safety",
+        )
+    )
+
+    assert result.cycle_id == 88
+    store.reactivate_review_cycle.assert_called_once_with(
+        88,
+        iteration=2,
+        stage_name="review",
+        proposal_session_id=None,
+        task_json={
+            "task_prompt": "Please review this artifact",
+            "task_focus": "rollback safety",
+        },
+    )
+
+
+def test_request_review_raises_when_paused_cycle_cannot_be_reactivated():
+    store = Mock(spec=MemoryStore)
+    store.create_review_cycle.return_value = 88
+    store.get_review_cycle.side_effect = [
+        {
+            "id": 88,
+            "status": "paused",
+            "verdict": "paused",
+        },
+        {
+            "id": 88,
+            "status": "paused",
+            "verdict": "paused",
+        },
+    ]
+    store.reactivate_review_cycle.return_value = False
+    service = MySwatToolService(store)
+
+    with pytest.raises(RuntimeError, match="could not be reactivated"):
+        service.request_review(
+            ReviewRequest(
+                work_item_id=17,
+                artifact_id=42,
+                iteration=2,
+                proposer_agent_id=3,
+                proposer_role="developer",
+                reviewer_agent_id=4,
+                reviewer_role="qa_main",
+                stage="review",
+                summary="Ready for QA review.",
+                task_prompt="Please review this artifact",
+                task_focus="rollback safety",
+            )
+        )
 
 
 def test_fail_stage_task_records_blocked_state_and_process_event():
@@ -1332,6 +1408,40 @@ def test_wait_for_review_verdicts_rejects_unknown_terminal_verdict():
                 timeout_seconds=1,
             )
         )
+
+
+def test_wait_for_review_verdicts_maps_paused_cycle_to_paused_envelope():
+    store = Mock(spec=MemoryStore)
+    store.get_review_cycles_by_ids.return_value = [
+        {
+            "id": 88,
+            "reviewer_role": "qa_main",
+            "status": "paused",
+            "verdict": "paused",
+            "verdict_json": {
+                "summary": "Workflow paused by user request.",
+                "issues": [],
+            },
+        }
+    ]
+    service = MySwatToolService(store)
+
+    result = service.wait_for_review_verdicts(
+        ReviewWaitRequest(
+            cycle_ids=[88],
+            timeout_seconds=1,
+        )
+    )
+
+    assert result == [
+        service_module.ReviewVerdictEnvelope(
+            cycle_id=88,
+            reviewer_role="qa_main",
+            verdict="paused",
+            issues=[],
+            summary="Workflow paused by user request.",
+        )
+    ]
 
 
 def test_publish_review_verdict_ignores_already_terminal_cycle():

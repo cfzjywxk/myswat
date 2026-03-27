@@ -981,8 +981,21 @@ class MySwatDaemon:
             from_role="user",
             to_role="myswat",
         )
-        self._store.cancel_open_stage_runs(work_item_id, summary=summary)
-        self._store.cancel_open_review_cycles(work_item_id, summary=summary)
+        if target_status == "paused":
+            self._store.cancel_open_stage_runs(
+                work_item_id,
+                summary=summary,
+                status="paused",
+            )
+            self._store.cancel_open_review_cycles(
+                work_item_id,
+                summary=summary,
+                status="paused",
+                verdict="paused",
+            )
+        else:
+            self._store.cancel_open_stage_runs(work_item_id, summary=summary)
+            self._store.cancel_open_review_cycles(work_item_id, summary=summary)
         service = getattr(self, "_service", None)
         if service is not None:
             service.notify_work_item_coordination_changed(work_item_id)

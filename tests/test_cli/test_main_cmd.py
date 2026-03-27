@@ -203,7 +203,7 @@ class TestPrintTeamworkDetails:
         assert "Message Flow" in rendered
         assert "Developer -> QA" in rendered
         assert "QA -> Developer" in rendered
-        assert "REQUEST CHANGES" in rendered
+        assert "CHANGES REQUESTED" in rendered
 
     def test_architect_review_flow_uses_role_labels(self):
         pool = MagicMock()
@@ -1394,6 +1394,39 @@ class TestCommandRouting:
         assert "Start the daemon first" in result.output
 
     @patch("myswat.server.control_client.DaemonClient")
+    def test_pause_command(self, mock_client_cls):
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
+
+        mock_client = MagicMock()
+        mock_client.control_work.return_value = {"work_item_id": 42}
+        mock_client_cls.return_value = mock_client
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["pause", "42", "--project", "proj"])
+        assert result.exit_code == 0
+        mock_client.control_work.assert_called_once_with(project="proj", work_item_id=42, action="pause")
+
+    @patch("myswat.server.control_client.DaemonClient")
+    def test_pause_command_requires_daemon(self, mock_client_cls):
+        from typer.testing import CliRunner
+        from myswat.cli.main import app
+
+        mock_client = MagicMock()
+        mock_client.control_work.side_effect = DaemonClientError(
+            "MySwat daemon is unavailable at http://127.0.0.1:8765: <urlopen error [Errno 111] connection refused>",
+            retryable=True,
+        )
+        mock_client_cls.return_value = mock_client
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["pause", "42", "--project", "proj"])
+
+        assert result.exit_code == 1
+        assert "unavailable" in result.output
+        assert "Start the daemon first" in result.output
+
+    @patch("myswat.server.control_client.DaemonClient")
     def test_cleanup_command(self, mock_client_cls):
         from typer.testing import CliRunner
         from myswat.cli.main import app
@@ -1423,7 +1456,7 @@ class TestCommandRouting:
 
         assert result.exit_code == 0
         commands = set(re.findall(r"│\s+([a-z][a-z0-9-]*)\s+", result.output))
-        for visible_name in ("chat", "work", "status", "search", "history", "task", "memory", "gc", "stop", "init", "cleanup", "reset"):
+        for visible_name in ("chat", "work", "status", "search", "history", "task", "memory", "gc", "stop", "pause", "init", "cleanup", "reset"):
             assert visible_name in commands
 
     def test_feed_command_removed(self):

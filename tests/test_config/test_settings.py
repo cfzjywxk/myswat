@@ -101,6 +101,7 @@ class TestAgentSettings:
         assert settings.developer_model == "gpt-5.4"
         assert settings.architect_model == "gpt-5.4"
         assert settings.qa_main_model == "claude-opus-4-6"
+        assert settings.qa_fallback_model == "gpt-5.4"
         assert settings.qa_vice_model == "kimi-code/kimi-for-coding"
 
     def test_default_codex_flags(self):
@@ -179,6 +180,11 @@ class TestAgentSettings:
         monkeypatch.setenv("MYSWAT_AGENTS_QA_MAIN_MODEL", "custom/qa-model")
         settings = AgentSettings()
         assert settings.qa_main_model == "custom/qa-model"
+
+    def test_env_override_qa_fallback_model(self, monkeypatch):
+        monkeypatch.setenv("MYSWAT_AGENTS_QA_FALLBACK_MODEL", "gpt-5.5")
+        settings = AgentSettings()
+        assert settings.qa_fallback_model == "gpt-5.5"
 
     def test_env_override_qa_vice_model(self, monkeypatch):
         monkeypatch.setenv("MYSWAT_AGENTS_QA_VICE_MODEL", "custom/vice-model")
